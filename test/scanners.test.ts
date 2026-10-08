@@ -4,7 +4,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
-import { isDockerfile, limits, runScanner } from '../src/server/scanners.ts';
+import { execFileSync } from 'node:child_process';
+import { Cancelled, isDockerfile, limits, runScanner } from '../src/server/scanners.ts';
 import { changedFiles, type ChangeSpec } from '../src/server/git.ts';
 import { fingerprint } from '../src/server/engine/findings.ts';
 import { DEFAULT_FLOWS } from '../src/server/flows/defaults.ts';
@@ -301,9 +302,10 @@ test("a scanner that couldn't check a file can't call its findings there fixed; 
   open('unchecked', 'api/Dockerfile', 'scan-hadolint');
   open('failed', '.github/workflows/ci.yml', 'scan-actionlint');
   open('secret', 'app.js', 'scan-betterleaks');
+  open('old-secret', 'old.js', 'scan-gitleaks');   // raised by the old gitleaks block, closable by scan-betterleaks when it runs
   applyLedger(db, { id: 'r1run', repoId: 'r1', branch: 'feat', flowId: 'default-review', trigger: 'post-push', mode: 'range' } as any, [], got.complete, got.unchecked);
-  assert.deepEqual(['checked', 'unchecked', 'failed', 'secret'].map((fp) => db.getLedger(fp, 'r1')?.state), ['fixed', 'open', 'open', 'open'],
-    'betterleaks missing this time: its open secret stays open');
+  assert.deepEqual(['checked', 'unchecked', 'failed', 'secret', 'old-secret'].map((fp) => db.getLedger(fp, 'r1')?.state), ['fixed', 'open', 'open', 'open', 'open'],
+    "betterleaks missing this time: its open secrets stay open, the old gitleaks block's too");
   db.close();
 });
 
@@ -400,4 +402,55 @@ test('Dockerfiles for hadolint: Dockerfile, Dockerfile.<variant> and *.Dockerfil
     'templates/Dockerfile.erb', 'Dockerfile.example', 'Dockerfile.sample', 'Dockerfile.dev.md', 'README.md', 'Dockerfile/notes', '.dockerignore']) {
     assert.equal(isDockerfile(p), false, p);
   }
+});
+
+test('a cancelled review stops its scanner between files and kills the one running: cancelled, not failed or partial', async () => {
+  const { change, files } = await staged({ 'a/Dockerfile': 'FROM a\n', 'b/Dockerfile': 'FROM b\n', 'c/Dockerfile': 'FROM c\n' });
+  const t = fakeTools({ hadolint: `for a; do f="$a"; done\necho "$f" >> "$D/ran"\nsleep 5\necho '[]'` });
+  try {
+    const ac = new AbortController();
+    // cancel once the first file's run has started (a newer push superseding the review mid-scan)
+    const started = setInterval(() => { if (existsSync(join(t.dir, 'ran'))) { clearInterval(started); ac.abort(); } }, 20);
+    const t0 = Date.now();
+    await assert.rejects(runScanner('hadolint', 'h', files, change, ac.signal), Cancelled);
+    assert.ok(Date.now() - t0 < 4_000, `stopped promptly (${Date.now() - t0}ms), not after every file's 5s`);
+    assert.deepEqual(readFileSync(join(t.dir, 'ran'), 'utf8').trim().split('\n'), ['a/Dockerfile'], 'the later files never ran');
+    await assert.rejects(runScanner('hadolint', 'h', files, change, AbortSignal.abort()), Cancelled, 'cancelled before it started');
+  } finally { t.restore(); }
+});
+
+test("a missing osv-scanner shows as not installed, not failed or partial", async () => {
+  const { change, files } = await staged({ 'package-lock.json': '{"lockfileVersion":3,"packages":{}}\n' });
+  const t = fakeTools({});
+  try {
+    const r = await runScanner('osv', 'o', files, change);
+    assert.equal(r.state.state, 'not installed', JSON.stringify(r.state));
+  } finally { t.restore(); }
+});
+
+// The real tools, where installed: PuRR's flags must be ones they accept. Skipped where a tool isn't on PATH.
+const installed = (tool: string) => { try { execFileSync('which', [tool], { stdio: 'pipe' }); return true; } catch { return false; } };
+
+test('the real betterleaks accepts PuRR\'s flags and finds a committed AWS key', { skip: !installed('betterleaks') && 'betterleaks is not installed here' }, async () => {
+  const { change, files } = await staged({ 'app.js': `const k = "${FAKE_AWS}";\n` });
+  const r = await runScanner('betterleaks', 's', files, change);
+  assert.equal(r.state.state, 'ran', JSON.stringify(r.state));
+  assert.equal(r.findings.length, 1);
+  assert.equal(r.findings[0].file, 'app.js');
+  assert.equal(r.findings[0].severity, 'must_fix');
+});
+
+test('the real hadolint accepts PuRR\'s flags and raises an error-level rule on an added line', { skip: !installed('hadolint') && 'hadolint is not installed here' }, async () => {
+  const { change, files } = await staged({ 'Dockerfile': 'FROM alpine:3.20\nWORKDIR relative/path\n' });   // DL3000: an error
+  const r = await runScanner('hadolint', 'h', files, change);
+  assert.equal(r.state.state, 'ran', JSON.stringify(r.state));
+  assert.ok(r.findings.some((f) => f.source.rule === 'DL3000' && f.line === 2), JSON.stringify(r.findings));
+});
+
+test('the real actionlint accepts PuRR\'s flags and raises a workflow error on an added line', { skip: !installed('actionlint') && 'actionlint is not installed here' }, async () => {
+  const wf = 'on: push\njobs:\n  build:\n    runs-on: ubuntu-latest\n    needs: missing-job\n    steps:\n      - run: echo hi\n';
+  const { change, files } = await staged({ '.github/workflows/ci.yml': wf });
+  const r = await runScanner('actionlint', 'a', files, change);
+  assert.equal(r.state.state, 'ran', JSON.stringify(r.state));
+  assert.ok(r.findings.some((f) => f.line === 5), JSON.stringify(r.findings));
 });
