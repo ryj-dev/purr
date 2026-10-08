@@ -44,6 +44,8 @@ export class PostPushWatcher {
   private deps: WatcherDeps;
   /** push confirmations still waiting for the remote */
   private confirming = new Set<Promise<void>>();
+  /** shas a hook here has reported and that are still being confirmed: their own review is on its way */
+  private reporting = new Set<string>();
 
   private handledKey(repo: Repo, branch: string) { return `${githubRepo(repo.remoteUrl) ?? repo.path}:${branch}`; }
 
@@ -81,26 +83,33 @@ export class PostPushWatcher {
     }
     const remote = body.remote || 'origin';
     const prOnly = this.db.getSettings().postPushPrsOnly;
+    this.reporting.add(body.sha);
     const confirm = (async () => {
       const deadline = Date.now() + 90_000;
       while (Date.now() < deadline) {
         if ((await this.deps.lsRemote(body.repoPath, remote, body.branch)) === body.sha) {
           const gh = await this.deps.ghAuthed();
           const pr = gh ? await this.deps.prForBranch(body.repoPath, body.branch) : null;
-          // gh can be slow: if a newer push landed meanwhile, it's the one to review (its own hook, or the poller,
-          // schedules it), and this older push mustn't take its place in the debounce. No answer is no news
+          // gh can be slow: if a newer push landed meanwhile, it's the one to review, and this older push mustn't take
+          // its place in the debounce. Left to its own hook (one here is still confirming it) or to the poller (an
+          // open PR); with neither (another machine's or a bot's push, no PR), this hook reviews it, which covers
+          // this push too. No answer from ls-remote is no news
+          let head = body.sha;
           const again = await this.deps.lsRemote(body.repoPath, remote, body.branch);
-          if (again && again !== body.sha) return;
+          if (again && again !== body.sha) {
+            if ((pr && !pr.isDraft) || this.reporting.has(again)) return;
+            head = again;
+          }
           // no open PR (a push to main, or a branch not yet proposed): no review, and nothing marked as handled, so
           // the poller reviews this commit when its PR is opened
           if (prOnly && gh && !pr) return;
           // post-push off for this clone: leave the commit to the poller, which may review it through another clone
           if (!this.mgr.resolveFlow('post-push', repo.id)) return;
           const key = this.handledKey(repo, body.branch);
-          if (this.lastSeen.get(key) === body.sha) return;   // already scheduled from another clone
-          this.lastSeen.set(key, body.sha);
+          if (this.lastSeen.get(key) === head) return;   // already scheduled from another clone
+          this.lastSeen.set(key, head);
           this.mgr.schedulePostPush({
-            trigger: 'post-push', repoPath: body.repoPath, mode: 'range', head: body.sha, branch: body.branch, pr,
+            trigger: 'post-push', repoPath: body.repoPath, mode: 'range', head, branch: body.branch, pr,
             base: pr ? pr.baseRefName : null,
           });
           return;
@@ -109,7 +118,7 @@ export class PostPushWatcher {
       }
     })().catch(() => {});
     this.confirming.add(confirm);
-    void confirm.finally(() => this.confirming.delete(confirm));
+    void confirm.finally(() => { this.confirming.delete(confirm); this.reporting.delete(body.sha); });
     return { queued: true, prOnly };
   }
 
