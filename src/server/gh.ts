@@ -37,6 +37,8 @@ async function tokenFor(account: string): Promise<string | null> {
 }
 
 let accountsCache: { at: number; list: string[] } | null = null;
+/** Stands in for an account when gh is signed in but PuRR can't read who as: gh's own login is used. Not a name to show. */
+export const GH_DEFAULT_LOGIN = '(gh default login)';
 /** Whether gh lists accounts the multi-account way (gh 2.40+), so each can be picked with `gh auth token --user`. */
 let multiAccount = true;
 
@@ -63,7 +65,7 @@ export async function ghAccounts(): Promise<string[]> {
     // only a clean answer says which kind of gh this is: a timeout says nothing
     if (r.code === 0 && parsed.accounts.length) multiAccount = parsed.multi;
     // signed in (exit 0) in words PuRR doesn't know: still use gh, as its default login
-    list = parsed.accounts.length || r.code !== 0 ? parsed.accounts : ['github.com'];
+    list = parsed.accounts.length || r.code !== 0 ? parsed.accounts : [GH_DEFAULT_LOGIN];
     if (r.code === 0 && !parsed.accounts.length) multiAccount = false;   // that placeholder has no token: use gh's own login
   } catch { /* gh missing */ }
   accountsCache = { at: Date.now(), list };

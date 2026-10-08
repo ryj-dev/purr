@@ -147,3 +147,13 @@ test('a signed-in gh in words PuRR can\'t parse is used through its own login, e
     assert.deepEqual(gh.comments(), ['none 7']);
   } finally { gh.restore(); }
 });
+
+test('the Toolchain popup shows gh signed in, but no made-up account name, when it can\'t read who', async () => {
+  const { refreshToolchain, toolchainStatus } = await import('../src/server/toolchain.ts');
+  const gh = fakeGh('Signed in, in words from a future gh\n', {});
+  try {
+    refreshToolchain();
+    const auth = (await toolchainStatus()).tools.find((t) => t.name === 'gh')!.auth;
+    assert.deepEqual(auth, { signedIn: true, accounts: [], detail: 'signed in' });
+  } finally { gh.restore(); refreshToolchain(); }
+});
