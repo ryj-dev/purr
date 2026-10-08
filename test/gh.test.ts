@@ -60,12 +60,27 @@ test('prForBranch tries each account, keeps only an open PR, and says which acco
   try { assert.equal((await prForBranch(process.cwd(), 'feat'))?.account, 'work-me', 'an account gh has no token for is skipped'); } finally { gh.restore(); }
 });
 
-test('a review comment is posted once, as the account that found the PR', async () => {
-  const gh = fakeGh(TWO, {});
+test('a review comment is posted once, as the account that found the PR, or else as one that can see it', async () => {
+  const gh = fakeGh(TWO, { 'tok-work-me': pr('OPEN') });
   try {
     assert.equal(await commentOnPr(process.cwd(), 7, 'body', 'work-me'), true);
+    // no account known (a run from before PuRR kept it): not just the active one, which can't see this private repo
     assert.equal(await commentOnPr(process.cwd(), 8, 'body'), true);
-    assert.deepEqual(gh.comments(), ['tok-work-me 7', 'tok-me 8'], 'the found-by account, else the active one');
+    assert.deepEqual(gh.comments(), ['tok-work-me 7', 'tok-work-me 8']);
+  } finally { gh.restore(); }
+});
+
+test("a PR found through gh's own login (an unreadable account list) gets its comment, before and after gh reads normally again", async () => {
+  const { GH_DEFAULT_LOGIN } = await import('../src/server/gh.ts');
+  let gh = fakeGh('Signed in, in words from a future gh\n', { none: pr('OPEN') });
+  try {
+    assert.equal(await commentOnPr(process.cwd(), 7, 'b', GH_DEFAULT_LOGIN), true);
+    assert.deepEqual(gh.comments(), ['none 7'], "gh's own login, no token");
+  } finally { gh.restore(); }
+  gh = fakeGh(TWO, { 'tok-work-me': pr('OPEN') });
+  try {
+    assert.equal(await commentOnPr(process.cwd(), 7, 'b', GH_DEFAULT_LOGIN), true);
+    assert.deepEqual(gh.comments(), ['tok-work-me 7'], 'now an account list again: one that can see the PR');
   } finally { gh.restore(); }
 });
 

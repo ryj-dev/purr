@@ -485,3 +485,51 @@ test("two quick pushes: the older one's slow PR lookup doesn't schedule it over 
   assert.deepEqual(scheduled, [], 'c5 is not scheduled: c6 is the push to review');
   db.close();
 });
+
+test("no answer from the remote on the second look after asking gh is no news: the push landed and is reviewed", async () => {
+  const db = openDb(); ensureDefaults(db);
+  const mgr = new RunManager(db, new ClaudeRunner(db));
+  const scheduled: string[] = [];
+  mgr.schedulePostPush = (req: RunRequest) => { scheduled.push(req.head!); };
+  const { root, a } = projectsFolder();
+  sh(a, 'remote', 'add', 'origin', 'https://github.com/work-org/app-m.git');
+  db.setSettings({ ...db.getSettings(), projectFolders: [root], postPushPrsOnly: false });
+  const looks: (string | null)[] = ['m1', null];
+  const watcher = new PostPushWatcher(db, mgr, {
+    fetchPrs: async () => ({ prs: [], answered: ['me'] }), lsRemote: async () => looks.shift() ?? null, ghAuthed: async () => true, prForBranch: async () => null,
+  });
+  await watcher.pushIntent({ repoPath: a, branch: 'feat', sha: 'm1' });
+  await watcher.settled();
+  assert.deepEqual(scheduled, ['m1']);
+  db.close();
+});
+
+test("a just-discovered clone's PR is still new if gh failed in the poll that found the clone", async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
+  const db = openDb(); ensureDefaults(db);
+  const mgr = new RunManager(db, new ClaudeRunner(db));
+  const scheduled: string[] = [];
+  mgr.schedulePostPush = (req: RunRequest) => { scheduled.push(req.head!); };
+  const t0 = Date.now();
+  const root = realpathSync(mkdtempSync(join(process.env.TMPDIR!, 'purr-projects-')));
+  db.setSettings({ ...db.getSettings(), projectFolders: [root] });
+  const pr: OpenPr = { repo: 'work-org/app-n', number: 1, headRefOid: 'n1', headRefName: 'f', baseRefName: 'main', title: 't', body: '', url: 'u',
+    isDraft: false, account: 'me', createdAt: new Date(t0 + 3 * 60_000).toISOString() };
+  let fetched: any = { prs: [pr], answered: ['me'] };
+  const watcher = new PostPushWatcher(db, mgr, { fetchPrs: async () => fetched });
+  try {
+    await watcher.poll();
+    t.mock.timers.tick(6 * 60_000);
+    await watcher.poll();
+    const dir = join(root, 'app-n');
+    renameSync(tempRepo(), dir);
+    sh(dir, 'remote', 'add', 'origin', 'https://github.com/work-org/app-n.git');
+    t.mock.timers.tick(5 * 60_000);
+    fetched = { prs: [], answered: [] };       // the poll that discovers the clone: gh fails
+    await watcher.poll();
+    t.mock.timers.tick(60_000);
+    fetched = { prs: [pr], answered: ['me'] };
+    await watcher.poll();
+    assert.deepEqual(scheduled, ['n1']);
+  } finally { t.mock.timers.reset(); db.close(); }
+});
