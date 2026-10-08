@@ -207,6 +207,15 @@ test('purr findings: exit codes, usage errors, --json and purr runs', async () =
   assert.equal(stuck.status, 3);
   assert.match(stuck.stderr, /is still running after 1s/);
 
+  // --pr: that PR's review, waited for or not
+  const db9 = openDb();
+  db9.putRun(run({ repoId: repo.id, repoPath, headSha: 'abab0012', branch: 'prb', pr: { number: 12, title: 't', body: '', url: 'u' } }, ), );
+  db9.setRunFindings(db9.findRuns({ repoIds: [repo.id], pr: 12, limit: 1 })[0].id, [mustFix('p12')]);
+  db9.close();
+  assert.equal(purr(repoPath, 'findings', '--pr', '12').status, 1);
+  assert.equal(purr(repoPath, 'findings', '--pr', '12', '--wait', '--timeout', '5').status, 1);
+  assert.equal(purr(repoPath, 'findings', '--pr', '13').status, 3, 'no review of PR 13');
+
   const runs = purr(repoPath, 'runs', '--branch', 'feat');
   assert.equal(runs.status, 0);
   assert.equal(runs.stdout.trim().split('\n').length, 5, runs.stdout);

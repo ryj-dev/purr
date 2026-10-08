@@ -94,7 +94,9 @@ export class PostPushWatcher {
       let landed = false;   // seen on the remote once: whatever happens next, it didn't "never show up"
       while (Date.now() < deadline) {
         const tip = await this.deps.lsRemote(body.repoPath, remote, body.branch);
-        if (from === undefined && tip !== body.sha) from = tip;
+        // an older hook sends no `from`: the tip at first look stands in, and nothing later does (a quick second
+        // push seen after this one landed is a newer push, not the old tip)
+        if (from === undefined) from = tip === body.sha ? null : tip;
         if (tip && tip !== body.sha && tip !== from) {
           // the branch moved on before this push was seen. On top of it (a quick second push, CI, another machine):
           // that push's review covers this commit, including when git can't tell because the tip isn't local. Not
@@ -106,6 +108,7 @@ export class PostPushWatcher {
           return note('superseded', 'a newer push to the branch took its place', tip);
         }
         if (tip === body.sha) {
+          landed = true;
           const gh = await this.deps.ghAuthed();
           const pr = gh ? await this.deps.prForBranch(body.repoPath, body.branch) : null;
           // gh can take a while: if the branch moved on meanwhile (a quick second push), look again from the top,

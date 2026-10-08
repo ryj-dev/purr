@@ -254,9 +254,16 @@ export function openDb(file = paths.db) {
       try { db.prepare('DELETE FROM push_outcomes WHERE sha = ? AND repo_path = ? AND branch = ?').run(sha.toLowerCase(), repoPath, branch ?? ''); } catch { /* as above */ }
     },
     /** The commit has its review now: whatever was noted about its pushes no longer matters. */
-    /** On every clone: pushed to another branch, the same commit may still be owed a review of its own there. */
-    clearPushOutcome: (sha: string, branch: string | null) => {
-      try { db.prepare('DELETE FROM push_outcomes WHERE sha = ? AND branch = ?').run(sha.toLowerCase(), branch ?? ''); } catch { /* as above */ }
+    /**
+     * On every clone of the reviewed repo (`repoPaths`), for its branch only: pushed to another branch, or to a fork
+     * registered alongside, the same commit may still be owed a review of its own there.
+     */
+    clearPushOutcome: (sha: string, branch: string | null, repoPaths: string[]) => {
+      if (!repoPaths.length) return;
+      try {
+        db.prepare(`DELETE FROM push_outcomes WHERE sha = ? AND branch = ? AND repo_path IN (${repoPaths.map(() => '?').join(', ')})`)
+          .run(sha.toLowerCase(), branch ?? '', ...repoPaths);
+      } catch { /* as above */ }
     },
     /**
      * What was noted about a commit's pushes (by sha prefix), newest first, from `repoPaths` only: another repo's

@@ -119,6 +119,16 @@ test('ReviewWatch follows a newer push that took a commit\'s place, and stops wh
   outcome('fbfb01', 'no-pr');
   assert.deepEqual(await new ReviewWatch(db, { ...q, sha: 'fbfb01' }, async () => undefined).check(), { run: null, done: false });
 
+  // waiting on A: pushed B (A superseded), then A again (B superseded, A pending): back to A, then A's review
+  outcome('a0a001', 'superseded', 'a0a002');
+  const wa = new ReviewWatch(db, { ...q, sha: 'a0a001' }, openPr);
+  assert.deepEqual(await wa.check(), { run: null, done: false }, 'followed to B');
+  outcome('a0a002', 'superseded', 'a0a001');
+  outcome('a0a001', 'pending');
+  assert.deepEqual(await wa.check(), { run: null, done: false }, 'back to A, pending');
+  db.putRun(at({ id: 'rA', headSha: 'a0a001', status: 'passed' }));
+  assert.equal((await wa.check()).run?.id, 'rA');
+
   // pushes bouncing between two commits: no endless following, just waiting for the review that's coming
   outcome('baba01', 'superseded', 'baba02');
   outcome('baba02', 'superseded', 'baba01');
@@ -185,8 +195,10 @@ test('ReviewWatch follows a newer push that took a commit\'s place, and stops wh
   // a review of the commit on one branch leaves what it's owed on another
   outcome('efef01', 'no-pr');
   db.setPushOutcome({ sha: 'efef01', kind: 'pending', reason: 'pending', repoPath, branch: 'feat-a' });
-  db.clearPushOutcome('efef01', 'feat-a');
-  assert.deepEqual(db.getPushOutcomes('efef01', [repoPath]).map((o) => [o.branch, o.kind]), [['feat', 'no-pr']]);
+  db.setPushOutcome({ sha: 'efef01', kind: 'no-pr', reason: 'no-pr', repoPath: '/a/fork', branch: 'feat-a' });
+  db.clearPushOutcome('efef01', 'feat-a', [repoPath]);
+  assert.deepEqual(db.getPushOutcomes('efef01', [repoPath, '/a/fork']).map((o) => [o.repoPath === repoPath ? 'here' : 'fork', o.branch, o.kind]).sort(),
+    [['fork', 'feat-a', 'no-pr'], ['here', 'feat', 'no-pr']], "the other branch's note, and a fork's on the same branch, stay");
 
   // a restart loses what was pending
   outcome('abab01', 'pending');
@@ -326,6 +338,24 @@ test('pushes that get no review of their own say why: superseded in the debounce
   assert.deepEqual(kind('cde1'), ['superseded', 'cde2']);
   line = 'unknown';
 
+  // an older hook (no `from`), and a quick second push landing while gh is asked about this one: covered by it
+  const older = new PostPushWatcher(db, mgr, {
+    lsRemote: async () => (tips.length > 1 ? tips.shift()! : tips[0]) ?? null, ghAuthed: async () => true,
+    prForBranch: async () => { tips = ['dcd2']; return pr; }, ancestry: async () => 'unknown', confirmEveryMs: 5,
+  });
+  tips = ['dcd1'];
+  await older.pushIntent({ repoPath, branch: 'feat', sha: 'dcd1' });
+  await older.settled();
+  assert.deepEqual(kind('dcd1'), ['superseded', 'dcd2'], "the later tip isn't taken as the old one");
+
+  // gh can't be asked whether there's a PR (offline), reviews PR-only: noted no-pr, and --wait keeps waiting
+  const offline = new PostPushWatcher(db, mgr, { lsRemote: async () => 'aef1', ghAuthed: async () => true, prForBranch: async () => null, confirmEveryMs: 5 });
+  db.setSettings({ ...db.getSettings(), postPushPrsOnly: true });
+  await offline.pushIntent({ repoPath, branch: 'feat', sha: 'aef1', from: 'aef0' });
+  await offline.settled();
+  assert.equal(kindOf('aef1'), 'no-pr');
+  assert.deepEqual(await new ReviewWatch(db, { repoIds: [repo.id], sha: 'aef1' }, async () => undefined).check(), { run: null, done: false });
+
   // the branch moved to something that doesn't include the push (rejected: a teammate's went in instead)
   line = 'no';
   await push('eee3', 'eee0', ['eee0', 'eee4']);
@@ -442,13 +472,16 @@ test("a review's creation clears its commit's notes on that branch in every clon
   const { ensureDefaults } = await import('../src/server/flows/store.ts');
   const db = openDb(join(mkdtempSync(join(process.env.TMPDIR!, 'purr-db-')), 'purr.db'));
   ensureDefaults(db);
-  const repo = await addRepo(db, tempRepo());
+  const mainPath = tempRepo(), otherPath = tempRepo();
+  for (const p of [mainPath, otherPath]) sh(p, 'remote', 'add', 'origin', 'https://github.com/work-org/app-z.git');
+  const repo = await addRepo(db, mainPath);
+  const other = await addRepo(db, otherPath);   // another clone of the same GitHub repo
   const mgr = new RunManager(db, new ClaudeRunner(db));
   (mgr as any).start = () => {};                     // the run is created, not run
   const note = (sha: string, kind: PushOutcome['kind'], path: string, branch: string) => db.setPushOutcome({ sha, kind, reason: kind, repoPath: path, branch });
-  const left = (sha: string) => db.getPushOutcomes(sha, [repo.path, '/other/clone']).map((o) => `${o.branch}@${o.repoPath === repo.path ? 'here' : 'other'}`).sort();
+  const left = (sha: string) => db.getPushOutcomes(sha, [repo.path, other.path]).map((o) => `${o.branch}@${o.repoPath === repo.path ? 'here' : 'other'}`).sort();
   note('abc1', 'pending', repo.path, 'feat');
-  note('abc1', 'pending', '/other/clone', 'feat');
+  note('abc1', 'pending', other.path, 'feat');
   note('abc1', 'no-pr', repo.path, 'elsewhere');
   db.setSettings({ ...db.getSettings(), debounceSec: 0 });
   mgr.schedulePostPush({ trigger: 'post-push', repoPath: repo.path, mode: 'range', head: 'abc1', branch: 'feat' });
@@ -483,5 +516,18 @@ test('a push handed to another clone, whose PR the poller first sees late, is st
     isDraft: false, account: 'me', createdAt: new Date(Date.now() - 86_400_000).toISOString() }];
   await watcher.poll();
   assert.deepEqual(scheduled, ['ee01']);
+  db.close();
+});
+
+test('the push notes table from an earlier build (no branch column) is rebuilt, and notes keyed by branch work', () => {
+  const file = join(mkdtempSync(join(process.env.TMPDIR!, 'purr-db-')), 'purr.db');
+  const old = openDb(file);
+  old.raw.exec('DROP TABLE push_outcomes; CREATE TABLE push_outcomes (sha TEXT PRIMARY KEY, data TEXT NOT NULL, at TEXT NOT NULL)');
+  old.raw.prepare('INSERT INTO push_outcomes VALUES (?, ?, ?)').run('abc', '{}', 'x');
+  old.close();
+  const db = openDb(file);
+  db.setPushOutcome({ sha: 'abc1', kind: 'no-pr', reason: 'r', repoPath: '/r', branch: 'a' });
+  db.setPushOutcome({ sha: 'abc1', kind: 'pending', reason: 'r', repoPath: '/r', branch: 'b' });
+  assert.deepEqual(db.getPushOutcomes('abc1', ['/r']).map((o) => [o.branch, o.kind]).sort(), [['a', 'no-pr'], ['b', 'pending']]);
   db.close();
 });

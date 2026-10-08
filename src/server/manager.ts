@@ -15,7 +15,7 @@ import {
   type ChangeSpec, branchNamed, changedFiles, currentBranch, defaultBaseRef, ensureWorktree, git, headSha, isAncestor, mergeBase,
   pruneWorktrees, resolveBase, resolveRef,
 } from './git.ts';
-import { type PrInfo, commentOnPr, ghAuthed, prForBranch } from './gh.ts';
+import { type PrInfo, commentOnPr, ghAuthed, githubRepo, prForBranch } from './gh.ts';
 import { active, applyLedger, fingerprintAll } from './ledger.ts';
 import { notify } from './notify.ts';
 import { APP_MANAGED } from './runtime.ts';
@@ -144,6 +144,12 @@ export class RunManager {
     }
   }
 
+  /** The repo at `repoPath` and every other clone of the same GitHub repo (only itself if it has no GitHub remote). */
+  private clonePaths(repoPath: string): string[] {
+    const key = githubRepo(this.db.getRepoByPath(repoPath)?.remoteUrl);
+    return [...new Set([repoPath, ...(key ? this.db.listRepos().filter((r) => githubRepo(r.remoteUrl) === key).map((r) => r.path) : [])])];
+  }
+
   /** Debounced post-push: a burst of pushes to one branch produces one review of the latest. */
   schedulePostPush(req: RunRequest) {
     const outcome = (sha: string | null | undefined, kind: 'superseded' | 'skipped', reason: string, nextSha: string | null = null) => {
@@ -168,7 +174,7 @@ export class RunManager {
       this.debounces.delete(key);
       const run = this.createRun(req);
       if (!run) return skip('the post-push trigger is off for this repo');
-      if (req.head) this.db.clearPushOutcome(req.head, req.branch ?? null);   // its push to this branch has its review now
+      if (req.head) this.db.clearPushOutcome(req.head, req.branch ?? null, this.clonePaths(req.repoPath));   // its push to this branch has its review now
       this.supersede(req.repoPath, req.branch ?? null, run.id);
       this.start(req, run);
     }, delay);

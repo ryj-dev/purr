@@ -70,7 +70,7 @@ export class ReviewWatch {
         const next = run.branch ? this.db.findRuns({ repoIds: this.q.repoIds, branch: run.branch, triggers: this.q.triggers, limit: 1 })[0] : null;
         if (next?.headSha && next.id !== run.id && next.queuedAt > run.queuedAt) {
           // back to a commit followed before (pushed A, B, then A again): its newer review is the one to wait on now
-          if (!this.follow(next.headSha, `review ${run.id} was superseded by a newer push`)) this.q = { ...this.q, sha: next.headSha, branch: null, pr: null };
+          if (!this.follow(next.headSha, `review ${run.id} was superseded by a newer push`)) this.revisit(next.headSha);
           continue;
         }
         return { run, done: false };   // the newer push's review is still in its debounce
@@ -82,8 +82,9 @@ export class ReviewWatch {
       // a newer push that took its place: follow it, whatever else is still pending
       const overtaken = outs.find((o) => o.nextSha);
       if (overtaken) {
-        // back to a commit already followed (pushes bouncing between two): its review is still to come, so wait
-        if (!this.follow(overtaken.nextSha!, `commit ${overtaken.sha.slice(0, 12)} wasn't reviewed on its own: ${overtaken.reason}`, overtaken)) return { run: null, done: false };
+        // back to a commit already followed (pushed A, B, then A again): look at that commit's review afresh; the
+        // hop limit stops notes that only point at each other
+        if (!this.follow(overtaken.nextSha!, `commit ${overtaken.sha.slice(0, 12)} wasn't reviewed on its own: ${overtaken.reason}`, overtaken)) this.revisit(overtaken.nextSha!);
         continue;
       }
       if (outs.some((o) => o.kind === 'pending')) return { run: null, done: false };
@@ -96,7 +97,7 @@ export class ReviewWatch {
         if (pr && !pr.isDraft) {
           // a PR is open now, and the poller reviews its head: this commit, or a later push that covers it
           if (pr.headRefOid && pr.headRefOid !== out.sha) {
-            if (!this.follow(pr.headRefOid, `${out.branch}'s PR is at a later push now`, out)) return { run: null, done: false };
+            if (!this.follow(pr.headRefOid, `${out.branch}'s PR is at a later push now`, out)) this.revisit(pr.headRefOid);
             stop = 'follow';
             break;
           }
@@ -110,7 +111,8 @@ export class ReviewWatch {
       if (this.via) return this.byPr(this.via);
       return { run: null, done: false };
     }
-    return { run: null, done: true, stop: 'gave up following newer pushes' };
+    // only notes that point at each other, with no review between them: one may still come, so wait
+    return { run: null, done: false };
   }
 
   /** Moves on to `sha`'s review; false if it was followed before (a loop). `from`: the push note that led here. */
@@ -123,6 +125,8 @@ export class ReviewWatch {
     this.via = from?.branch ? { repoPath: from.repoPath, branch: from.branch } : null;
     return true;
   }
+
+  private revisit(sha: string) { this.q = { ...this.q, sha, branch: null, pr: null }; }
 
   /** For a push nothing here noted: reviewed if its branch's PR is open (not a draft), or if reviews aren't PR-only. */
   private async byPr(via: { repoPath: string; branch: string }): Promise<ReviewState> {
