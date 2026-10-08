@@ -70,12 +70,14 @@ export class ReviewWatch {
       const paths = (this.q.repoIds ?? []).map((id) => this.db.getRepo(id)?.path).filter((p): p is string => !!p);
       // one note per branch the commit went to: wait while any of them may still bring a review
       const outs = this.q.sha ? this.db.getPushOutcomes(this.q.sha, paths) : [];
-      if (outs.some((o) => o.kind === 'pending')) return { run: null, done: false };
+      // a newer push that took its place: follow it, whatever else is still pending
       const overtaken = outs.find((o) => o.nextSha);
       if (overtaken) { this.follow(overtaken.nextSha!, `commit ${overtaken.sha.slice(0, 12)} wasn't reviewed on its own: ${overtaken.reason}`); continue; }
+      if (outs.some((o) => o.kind === 'pending')) return { run: null, done: false };
       let stop: string | null = null;
       for (const out of outs) {
-        if (out.kind !== 'no-pr' || !out.branch) continue;
+        // reviewed through its PR (once there's one, or by another clone): depends on that PR now
+        if ((out.kind !== 'no-pr' && out.kind !== 'elsewhere') || !out.branch) continue;
         const pr = await this.prOf(out.repoPath, out.branch);
         if (pr && !pr.isDraft) {
           // a PR is open now, and the poller reviews its head: this commit, or a later push that covers it
@@ -111,7 +113,7 @@ export class ReviewWatch {
 export async function waitForReview(watch: { check: () => Promise<ReviewState> }, opts: { timeoutMs: number; intervalMs?: number; onChange?: (run: Run | null) => void }) {
   if (!Number.isFinite(opts.timeoutMs) || opts.timeoutMs < 0) throw new Error(`Bad timeout: ${opts.timeoutMs}`);
   const deadline = Date.now() + opts.timeoutMs;
-  let lastKey = '';
+  let lastKey = '\0';   // nothing a state gives: the first check always reports, even "no review yet"
   for (;;) {
     const st = await watch.check();
     const key = st.run ? `${st.run.id}:${st.run.status}` : '';

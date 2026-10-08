@@ -18,6 +18,9 @@ export const currentBranch = async (cwd: string) => {
   const b = await tryGit(cwd, ['symbolic-ref', '--quiet', '--short', 'HEAD']);
   return b || null;
 };
+/** The remote branch `branch` tracks (origin/bar -> "bar"), or null. Pushes are reviewed under that name. */
+export const upstreamBranch = async (cwd: string, branch: string) =>
+  (await tryGit(cwd, ['for-each-ref', '--format=%(upstream:lstrip=3)', `refs/heads/${branch}`]))?.trim() || null;
 export const remoteUrl = (cwd: string, remote = 'origin') => tryGit(cwd, ['remote', 'get-url', remote]);
 export const gitDir = (cwd: string) => tryGit(cwd, ['rev-parse', '--absolute-git-dir']);
 /** Shared hooks dir (respects core.hooksPath). */

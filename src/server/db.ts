@@ -60,7 +60,7 @@ export interface RunQuery {
  */
 export interface PushOutcome {
   sha: string;
-  kind: 'pending' | 'no-pr' | 'superseded' | 'skipped';
+  kind: 'pending' | 'no-pr' | 'elsewhere' | 'superseded' | 'skipped';   // elsewhere: left to another clone's review of its PR
   reason: string;
   repoPath: string;
   branch: string | null;
@@ -249,6 +249,9 @@ export function openDb(file = paths.db) {
           .run(o.sha.toLowerCase(), o.repoPath, o.branch ?? '', JSON.stringify(o), now());
         db.prepare('DELETE FROM push_outcomes WHERE at < ?').run(new Date(Date.now() - 30 * 86_400_000).toISOString());
       } catch { /* the database is busy: --wait then waits out its timeout instead of stopping early */ }
+    },
+    deletePushOutcome: (sha: string, repoPath: string, branch: string | null) => {
+      try { db.prepare('DELETE FROM push_outcomes WHERE sha = ? AND repo_path = ? AND branch = ?').run(sha.toLowerCase(), repoPath, branch ?? ''); } catch { /* as above */ }
     },
     /** The commit has its review now: whatever was noted about its pushes no longer matters. */
     clearPushOutcome: (sha: string) => { try { db.prepare('DELETE FROM push_outcomes WHERE sha = ?').run(sha.toLowerCase()); } catch { /* as above */ } },

@@ -2,6 +2,9 @@ import { tempRepo } from './helpers.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
+import { mkdtempSync } from 'node:fs';
+import { join } from 'node:path';
+import { createServer } from 'node:net';
 import { openDb } from '../src/server/db.ts';
 import { addRepo } from '../src/server/http.ts';
 import type { Finding, Run } from '../src/shared/types.ts';
@@ -123,8 +126,45 @@ test('purr findings: exit codes, usage errors, --json and purr runs', async () =
   assert.match(purr(repoPath, 'findings', '--sha', 'dddd000001', '--all').stderr, /bug t1.*\[dismissed\]/);
   assert.match(purr(repoPath, 'findings', '--sha', 'dddd000002').stderr, /Resolved by this review[\s\S]*fixed\s+a\.ts:1\s+bug t2/);
 
+  // pushed as another name (git push -u origin foo:renamed): found under the name it was reviewed as
+  const bare = mkdtempSync(join(process.env.TMPDIR!, 'purr-test-remote-'));
+  execFileSync('git', ['init', '-q', '--bare', bare]);
+  execFileSync('git', ['remote', 'add', 'origin', bare], { cwd: repoPath });
+  execFileSync('git', ['checkout', '-q', '-b', 'foo'], { cwd: repoPath });
+  execFileSync('git', ['push', '-q', '-u', 'origin', 'foo:renamed', '--no-verify'], { cwd: repoPath });
+  const db4 = openDb();
+  db4.putRun(run({ repoId: repo.id, repoPath, headSha: 'eeee000001', branch: 'renamed' }));
+  db4.close();
+  const renamed = purr(repoPath, 'findings', '--json');
+  assert.equal(renamed.status, 0, renamed.stderr);
+  assert.equal(JSON.parse(renamed.stdout).run.branch, 'renamed');
+
   const runs = purr(repoPath, 'runs', '--branch', 'feat');
   assert.equal(runs.status, 0);
   assert.equal(runs.stdout.trim().split('\n').length, 5, runs.stdout);
   assert.equal(purr(repoPath, 'runs', '--limit', 'x').status, 4);
+});
+
+test('a second purr daemon, started by mistake, leaves the live one\'s runs and pending pushes alone', async () => {
+  const db = openDb();
+  const repoPath = tempRepo();
+  const repo = await addRepo(db, repoPath);
+  const live = run({ repoId: repo.id, repoPath, headSha: 'ffff000001', status: 'running' });
+  db.putRun(live);
+  db.setPushOutcome({ sha: 'ffff000002', kind: 'pending', reason: 'waiting', repoPath: repo.path, branch: 'feat' });
+  db.close();
+  const busy = createServer();
+  await new Promise<void>((r) => busy.listen(0, '127.0.0.1', () => r()));
+  const port = (busy.address() as { port: number }).port;
+  try {
+    const second = spawnSync(process.execPath, [CLI, 'daemon', '--port', String(port)], {
+      encoding: 'utf8', env: { ...process.env, PURR_NO_GLOBAL_HOOKS: '1' }, timeout: 20_000,
+    });
+    assert.equal(second.status, 1, second.stderr);
+    assert.match(second.stderr, /in use/);
+  } finally { busy.close(); }
+  const after = openDb();
+  assert.equal(after.getRun(live.id)!.status, 'running', 'not failed as an orphan');
+  assert.equal(after.getPushOutcomes('ffff000002', [repo.path])[0]?.kind, 'pending', 'not given up on');
+  after.close();
 });

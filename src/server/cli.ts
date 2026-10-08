@@ -9,7 +9,7 @@ import { type DB, type RunQuery, openDb } from './db.ts';
 import { ensureDefaults } from './flows/store.ts';
 import { exportFlow, importFlow, previewImport } from './flows/share.ts';
 import { readFileSync } from 'node:fs';
-import { currentBranch, headSha, repoRoot } from './git.ts';
+import { currentBranch, headSha, repoRoot, upstreamBranch } from './git.ts';
 import { ReviewWatch, blockSessions, currentFindings, isActive, isFinished, resolvedBy, sameRepoIds, waitForReview } from './lookup.ts';
 import { addRepo, startHttp } from './http.ts';
 import { installGlobalHooks, removePidFile, uninstallGlobalHooks, writePidFile } from './globalHooks.ts';
@@ -256,7 +256,9 @@ async function runQuery(db: DB, currentBranchByDefault: boolean): Promise<RunQue
     triggers: trigger === 'all' ? undefined : trigger ? [trigger as TriggerKind] : ['post-push', 'manual'],
   };
   if (currentBranchByDefault && pr == null && !q.branch && !q.sha) {
-    q.branch = await currentBranch(cwd);
+    const local = await currentBranch(cwd);
+    // reviews are recorded under the remote's name for the branch (git push origin foo:bar is reviewed as bar)
+    q.branch = local ? (await upstreamBranch(cwd, local)) ?? local : null;
     // detached (a review worktree, CI): the commit checked out, not every branch's latest review
     if (!q.branch) q.sha = await headSha(cwd);
     if (!q.branch && !q.sha) throw new UsageError('nothing is checked out here: pass --pr, --branch or --sha');

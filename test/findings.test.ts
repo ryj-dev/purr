@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
-import { openDb } from '../src/server/db.ts';
+import { type PushOutcome, openDb } from '../src/server/db.ts';
 import { addRepo } from '../src/server/http.ts';
 import { ReviewWatch, currentFindings, isActive, resolvedBy, sameRepoIds, waitForReview } from '../src/server/lookup.ts';
 import { applyLedger } from '../src/server/ledger.ts';
@@ -84,7 +84,7 @@ test('waitForReview waits for the watch to finish, gives up at the timeout, and 
     return calls < 2 ? null : fakeRun({ id: 'w', status: calls < 4 ? 'running' : 'passed' });
   }), { timeoutMs: 5000, intervalMs: 5, onChange: (r) => seen.push(r?.status ?? null) });
   assert.equal(st.run?.status, 'passed');
-  assert.deepEqual(seen, ['running', 'passed']);
+  assert.deepEqual(seen, [null, 'running', 'passed'], 'reports at once, before any review exists');
   assert.equal((await waitForReview(watch(() => null), { timeoutMs: 30, intervalMs: 5 })).run, null);
   assert.equal((await waitForReview(watch(() => fakeRun({ status: 'queued' })), { timeoutMs: 30, intervalMs: 5 })).run?.status, 'queued');
   await assert.rejects(waitForReview(watch(() => null), { timeoutMs: NaN }), /Bad timeout/);
@@ -95,7 +95,7 @@ test('ReviewWatch follows a newer push that took a commit\'s place, and stops wh
   const repo = await addRepo(db, tempRepo());
   const repoPath = repo.path;
   const q = { repoIds: [repo.id], triggers: ['post-push' as const, 'manual' as const] };
-  const outcome = (sha: string, kind: 'pending' | 'no-pr' | 'superseded' | 'skipped', nextSha: string | null = null, path = repoPath) =>
+  const outcome = (sha: string, kind: PushOutcome['kind'], nextSha: string | null = null, path = repoPath) =>
     db.setPushOutcome({ sha, kind, reason: kind, repoPath: path, branch: 'feat', nextSha });
   const at = (over: Partial<Run>) => fakeRun({ repoId: repo.id, branch: 'feat', ...over });
 
@@ -144,6 +144,18 @@ test('ReviewWatch follows a newer push that took a commit\'s place, and stops wh
   assert.match(ws.notes[0], /PR is at a later push now; following the review of bcbc02/);
   db.putRun(at({ id: 'rt', headSha: 'bcbc02', status: 'passed' }));
   assert.equal((await ws.check()).run?.id, 'rt');
+
+  // pending on one branch, overtaken on another: follow the newer push rather than wait on the pending one
+  outcome('cdcd01', 'superseded', 'cdcd02');
+  db.setPushOutcome({ sha: 'cdcd01', kind: 'pending', reason: 'pending', repoPath, branch: 'other' });
+  db.putRun(at({ id: 'rcd', headSha: 'cdcd02', status: 'passed' }));
+  assert.equal((await new ReviewWatch(db, { ...q, sha: 'cdcd01' }).check()).run?.id, 'rcd');
+
+  // left to another clone's review of the PR: wait while it's open, stop if it's a draft
+  outcome('dede01', 'elsewhere');
+  assert.deepEqual(await new ReviewWatch(db, { ...q, sha: 'dede01' }, async () => ({ number: 9, isDraft: false, headRefOid: 'dede01' }) as any).check(),
+    { run: null, done: false });
+  assert.match((await new ReviewWatch(db, { ...q, sha: 'dede01' }, async () => ({ number: 9, isDraft: true }) as any).check()).stop ?? '', /draft/);
 
   // a restart loses what was pending
   outcome('abab01', 'pending');
@@ -254,6 +266,14 @@ test('pushes that get no review of their own say why: superseded in the debounce
   assert.equal(kindOf('acd1'), 'pending', 'landed and scheduled');
   await push('acd2', undefined, ['acd2']);
   assert.equal(kindOf('acd2'), 'pending', 'already there at first look');
+
+  // a push that never lands is given up on, and says so
+  const quick = new PostPushWatcher(db, mgr, { lsRemote: async () => 'old0', ghAuthed: async () => true, prForBranch: async () => null,
+    confirmMs: 60, confirmEveryMs: 10 });
+  await quick.pushIntent({ repoPath, branch: 'feat', sha: 'dead01', from: 'old0' });
+  await quick.settled();
+  assert.equal(kindOf('dead01'), 'skipped');
+  assert.match(one(db, 'dead01', [repoPath])!.reason, /never showed up/);
 
   // post-push off here, and on in no other clone: no review is coming
   db.setTrigger({ trigger: 'post-push', repoId: repo.id, flowId: null });

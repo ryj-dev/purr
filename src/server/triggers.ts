@@ -20,6 +20,9 @@ export interface WatcherDeps {
   lsRemote: (cwd: string, remote: string, branch: string) => Promise<string | null>;
   ghAuthed: () => Promise<boolean>;
   prForBranch: (repoPath: string, branch: string) => Promise<PrInfo | null>;
+  /** how long the hook's push gets to show up on the remote, and how often to look */
+  confirmMs: number;
+  confirmEveryMs: number;
 }
 
 export class PostPushWatcher {
@@ -45,7 +48,7 @@ export class PostPushWatcher {
 
   constructor(db: DB, mgr: RunManager, deps: Partial<WatcherDeps> = {}) {
     this.db = db; this.mgr = mgr;
-    this.deps = { fetchPrs: openPrsForAllAccounts, lsRemote, ghAuthed, prForBranch, ...deps };
+    this.deps = { fetchPrs: openPrsForAllAccounts, lsRemote, ghAuthed, prForBranch, confirmMs: 90_000, confirmEveryMs: 3000, ...deps };
   }
 
   start() {
@@ -83,7 +86,7 @@ export class PostPushWatcher {
       this.db.setPushOutcome({ sha: body.sha, kind, reason, repoPath: body.repoPath, branch: body.branch, nextSha });
     note('pending', 'waiting for the push to land');
     const confirm = (async () => {
-      const deadline = Date.now() + 90_000;
+      const deadline = Date.now() + this.deps.confirmMs;
       // the branch's tip before this push (null: a new branch); the hook says, else it's what's there at first look
       let from = body.from;
       while (Date.now() < deadline) {
@@ -104,11 +107,14 @@ export class PostPushWatcher {
           if (!this.mgr.resolveFlow('post-push', repo.id)) {
             // post-push off for this clone: left to the poller, through another clone of the repo that has it on
             const others = (await this.clonesByRepo()).get(githubRepo(repo.remoteUrl) ?? '') ?? [];
-            if (!pr || !others.some((c) => this.mgr.resolveFlow('post-push', c.id))) note('skipped', 'the post-push trigger is off for this repo');
-            return;
+            if (pr && others.some((c) => this.mgr.resolveFlow('post-push', c.id))) {
+              return note('elsewhere', 'the post-push trigger is off in this clone; another clone reviews its PR');
+            }
+            return note('skipped', 'the post-push trigger is off for this repo');
           }
           const key = this.handledKey(repo, body.branch);
-          if (this.lastSeen.get(key) === body.sha) return;   // already scheduled from another clone
+          // already scheduled from another clone: its review covers this push, and its creation clears the notes
+          if (this.lastSeen.get(key) === body.sha) return this.db.deletePushOutcome(body.sha, body.repoPath, body.branch);
           this.lastSeen.set(key, body.sha);
           this.mgr.schedulePostPush({
             trigger: 'post-push', repoPath: body.repoPath, mode: 'range', head: body.sha, branch: body.branch, pr,
@@ -116,7 +122,7 @@ export class PostPushWatcher {
           });
           return;
         }
-        await new Promise((r) => setTimeout(r, 3000));
+        await new Promise((r) => setTimeout(r, this.deps.confirmEveryMs));
       }
       note('skipped', `the push never showed up on ${remote}/${body.branch}`);
     })().catch(() => {});
