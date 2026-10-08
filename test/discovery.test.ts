@@ -308,6 +308,7 @@ test('a draft marked ready, a push made while post-push was off, and an account 
   let prs: OpenPr[] = [];
   let answered = ['me'];
   const watcher = new PostPushWatcher(db, mgr, { fetchPrs: async () => ({ prs, answered, accounts: ['me', 'work'] }) });
+  const t0 = Date.now();
   const pr = (n: number, sha: string, over: Partial<OpenPr> = {}): OpenPr => ({ repo: 'work-org/app-g', number: n, headRefOid: sha,
     headRefName: `b${n}`, baseRefName: 'main', title: 't', body: '', url: 'u', isDraft: false, account: 'me',
     createdAt: new Date().toISOString(), ...over });
@@ -338,8 +339,46 @@ test('a draft marked ready, a push made while post-push was off, and an account 
 
     t.mock.timers.tick(60_000);
     answered = ['me', 'work'];                     // work answers at last, with a PR it opened after startup
-    prs = [pr(1, 'd3'), pr(2, 'w1', { account: 'work', createdAt: new Date(Date.now() - 90_000).toISOString() })];
+    // opened just after startup, long before "now minus the slack": only the since-startup mark lets it count
+    prs = [pr(1, 'd3'), pr(2, 'w1', { account: 'work', createdAt: new Date(t0 + 10_000).toISOString() })];
     await watcher.poll();
     assert.deepEqual(scheduled, ['d1', 'x2', 'd3', 'w1'], 'listed since startup: its PRs from since then are new');
+  } finally { t.mock.timers.reset(); db.close(); }
+});
+
+test('signing in to gh after startup brings no old PRs; a slow multi-account poll loses no new one; a newly added remote isn\'t reviewed twice', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
+  const db = openDb(); ensureDefaults(db);
+  const mgr = new RunManager(db, new ClaudeRunner(db));
+  const scheduled: string[] = [];
+  mgr.schedulePostPush = (req: RunRequest) => { scheduled.push(req.head!); };
+  const { root, a } = projectsFolder();
+  db.setSettings({ ...db.getSettings(), projectFolders: [root], postPushPrsOnly: false });
+  let fetched: any = null;                         // gh signed out at startup
+  let pushed = '';
+  const watcher = new PostPushWatcher(db, mgr, {
+    fetchPrs: async () => fetched, lsRemote: async () => pushed, ghAuthed: async () => true, prForBranch: async () => null,
+  });
+  const t0 = Date.now();
+  const pr = (n: number, sha: string, opened: number): OpenPr => ({ repo: 'work-org/app-h', number: n, headRefOid: sha, headRefName: 'feat',
+    baseRefName: 'main', title: 't', body: '', url: 'u', isDraft: false, account: 'me', createdAt: new Date(opened).toISOString() });
+  try {
+    await watcher.poll();
+    // registered with no remote: the hook adds origin's owner/name before marking the push, so the poller agrees
+    sh(a, 'remote', 'add', 'origin', 'https://github.com/work-org/app-h.git');
+    pushed = 'k1';
+    await watcher.pushIntent({ repoPath: a, branch: 'feat', sha: 'k1' });
+    await watcher.settled();
+    assert.deepEqual(scheduled, ['k1']);
+
+    t.mock.timers.tick(3 * 86_400_000);            // days later, signed in from the Toolchain popup
+    fetched = { prs: [pr(1, 'k1', t0 + 60_000), pr(2, 'old', t0 + 60_000)], answered: ['me'], askedAt: { me: Date.now() - 5 * 60_000 } };
+    await watcher.poll();
+    assert.deepEqual(scheduled, ['k1'], 'k1 already reviewed by the hook; PR 2 was open before signing in');
+
+    // that poll asked "me" five minutes before it finished: a PR opened four minutes ago wasn't in its answer
+    fetched = { ...fetched, prs: [...fetched.prs, pr(3, 'new', Date.now() - 4 * 60_000)], askedAt: { me: Date.now() } };
+    await watcher.poll();
+    assert.deepEqual(scheduled, ['k1', 'new']);
   } finally { t.mock.timers.reset(); db.close(); }
 });
