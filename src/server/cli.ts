@@ -273,6 +273,9 @@ async function runQuery(db: DB, currentBranchByDefault: boolean): Promise<RunQue
   return q;
 }
 
+/** PuRR itself went wrong before or outside a command's own handling (the database won't open): exit 5, not 2. */
+const purrFailed = (e: unknown) => { console.error(`purr: couldn't read the reviews: ${(e as Error)?.message ?? e}`); return 5; };
+
 const describe = (q: RunQuery) => q.pr != null ? `PR #${q.pr}` : q.sha ? `commit ${q.sha.slice(0, 12)}` : q.branch ? `branch ${q.branch}` : 'this repo';
 const unknownRepo = () => `PuRR hasn't seen the repo at ${value('repo') ?? process.cwd()} yet (commit or push through it, or run: purr repo add)`;
 /** Local time, to the minute. */
@@ -284,7 +287,7 @@ const localTime = (iso: string) => {
 /**
  * `purr findings`: the latest review's findings, optionally waiting for one in progress or about to start.
  * Exit 0 clean, 1 must-fix, 2 the review failed / was cancelled / superseded, 3 no finished review (none, unknown
- * repo, still running, won't be reviewed, or the wait timed out), 4 usage error.
+ * repo, still running, won't be reviewed, or the wait timed out), 4 usage error, 5 PuRR itself failed.
  */
 async function findingsCmd(): Promise<number> {
   const db = openDb();
@@ -355,13 +358,15 @@ async function findingsCmd(): Promise<number> {
     return findings.some((f) => f.severity === 'must_fix' && isActive(f)) ? 1 : 0;
   } catch (e) {
     if (e instanceof UsageError) { console.error(`purr: ${e.message}`); return 4; }
-    throw e;
+    // PuRR itself went wrong (the database, git): not a review result, so not 2 ("the review failed")
+    console.error(`purr: couldn't read the reviews: ${(e as Error)?.message ?? e}`);
+    return 5;
   } finally {
     db.close();
   }
 }
 
-/** `purr runs`: recent reviews of this repo, newest first. Exit 3 for an unknown repo, 4 for a usage error. */
+/** `purr runs`: recent reviews of this repo, newest first. Exit 3 for an unknown repo, 4 for a usage error, 5 if PuRR failed. */
 async function runsCmd(): Promise<number> {
   const db = openDb();
   try {
@@ -379,7 +384,9 @@ async function runsCmd(): Promise<number> {
     return 0;
   } catch (e) {
     if (e instanceof UsageError) { console.error(`purr: ${e.message}`); return 4; }
-    throw e;
+    // PuRR itself went wrong (the database, git): not a review result, so not 2 ("the review failed")
+    console.error(`purr: couldn't read the reviews: ${(e as Error)?.message ?? e}`);
+    return 5;
   } finally {
     db.close();
   }
@@ -432,7 +439,7 @@ const USAGE = `PuRR: Pull Request Reviewer
   purr findings [--pr N | --branch B | --sha S | --run ID] [--wait [--timeout SECS]] [--all] [--json]
                                  the latest review's findings (default: this branch; with --wait, the review
                                  of the commit checked out here). Exit 0 clean, 1 must-fix, 2 failed or
-                                 superseded, 3 no finished review, 4 usage error
+                                 superseded, 3 no finished review, 4 usage error, 5 PuRR error
   purr runs [--pr N | --branch B | --sha S] [--limit N] [--json]
                                  recent reviews of this repo (must-fix/consider/minor counts)
                                  both take --repo P, and --trigger post-push|manual|pre-push|pre-commit|all
@@ -452,8 +459,8 @@ async function main(): Promise<number> {
     case 'daemon': await daemon(); return -1;
     case 'hook': return hook(sub as HookName);
     case 'run': return manualRun();
-    case 'findings': return findingsCmd();
-    case 'runs': return runsCmd();
+    case 'findings': return findingsCmd().catch(purrFailed);
+    case 'runs': return runsCmd().catch(purrFailed);
     case 'open': {
       const db = openDb();
       await exec('open', [`http://127.0.0.1:${db.getSettings().port}`]);

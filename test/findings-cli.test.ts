@@ -216,6 +216,14 @@ test('purr findings: exit codes, usage errors, --json and purr runs', async () =
   assert.equal(purr(repoPath, 'findings', '--pr', '12', '--wait', '--timeout', '5').status, 1);
   assert.equal(purr(repoPath, 'findings', '--pr', '13').status, 3, 'no review of PR 13');
 
+  // a branch that tracks a local branch (feat/x): not looked up under 'x'
+  execFileSync('git', ['checkout', '-q', '-b', 'feat/x'], { cwd: repoPath });
+  execFileSync('git', ['checkout', '-q', '-b', 'tracks-local', '--track', 'feat/x'], { cwd: repoPath });
+  const db10 = openDb();
+  db10.putRun(run({ repoId: repo.id, repoPath, headSha: 'abab0099', branch: 'x' }));
+  db10.close();
+  assert.equal(purr(repoPath, 'findings').status, 3, "no review of tracks-local; a branch named x's isn't its");
+
   const runs = purr(repoPath, 'runs', '--branch', 'feat');
   assert.equal(runs.status, 0);
   assert.equal(runs.stdout.trim().split('\n').length, 5, runs.stdout);
@@ -280,4 +288,13 @@ test('the daemon that gets the port fails runs and gives up on pushes the last o
     assert.equal(after.getPushOutcomes('abcd000002', [repo.path])[0]?.kind, 'skipped');
     after.close();
   } finally { d.kill(); }
+});
+
+test("PuRR failing (its database won't open) exits 5, not 2 (a failed review)", async () => {
+  const home = mkdtempSync(join(process.env.TMPDIR!, 'purr-test-home-'));
+  const { writeFileSync } = await import('node:fs');
+  writeFileSync(join(home, 'purr.db'), 'this is not a database'.repeat(100));
+  const r = spawnSync(process.execPath, [CLI, 'findings', '--sha', 'abcd'], { cwd: tempRepo(), encoding: 'utf8', env: { ...process.env, PURR_HOME: home } });
+  assert.equal(r.status, 5, r.stderr);
+  assert.match(r.stderr, /couldn't read the reviews/);
 });
