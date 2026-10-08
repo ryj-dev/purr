@@ -54,7 +54,7 @@ test('hostile or sloppy content is rebuilt from known types and fields only', ()
   const evil = {
     format: 'purr-flow', version: 1, name: 'x'.repeat(500), description: 'd',
     blocks: [
-      { id: 'c', type: 'context', label: 'Ctx', position: { x: 'a' }, config: { model: 'opus', maxTurns: 1e9, tools: ['Read', 42], __proto__x: 1, shell: 'rm -rf /' } },
+      { id: 'c', type: 'context', label: 'Ctx', position: { x: 'a' }, config: { model: 'opus', maxTurns: 2e9, tools: ['Read', 42], __proto__x: 1, shell: 'rm -rf /' } },
       { id: 'c', type: 'prompt', label: 'Dup id', config: { prompt: 'p', forkFrom: 'ghost', output: 'weird' } },
       { id: 'g', type: 'gate', config: { blockOn: 'everything' } },
       { type: 'eval', config: {} },
@@ -62,10 +62,10 @@ test('hostile or sloppy content is rebuilt from known types and fields only', ()
     edges: [{ source: 'c', target: 'c-2' }, { source: 'c', target: 'missing' }, { source: 'c', target: 'c-2' }, 'junk'],
   };
   const p = previewImport(JSON.stringify(evil));
-  assert.equal(p.name.length, 120);
+  assert.equal(p.name.length, 500, 'long names are kept whole');
   assert.deepEqual(p.blocks.map((b) => b.id), ['c', 'c-2', 'g'], 'unknown type skipped, duplicate id renamed');
   const ctx = p.blocks[0].config as Record<string, unknown>;
-  assert.equal(ctx.maxTurns, 500, 'numbers clamped');
+  assert.equal(ctx.maxTurns, 40, 'an absurd value (over the 1e9 ceiling) falls back to the default');
   assert.deepEqual(ctx.tools, ['Read', 'Grep', 'Glob', 'Bash'], 'a malformed array falls back to the default');
   assert.equal('shell' in ctx, false, 'unknown fields dropped');
   assert.equal(p.blocks[0].position.x, 0);
@@ -101,4 +101,88 @@ test('risks: shell commands, broad Bash, write and network tools, PR comments', 
   has('warn', /internet/);
   has('info', /comment on your PRs/);
   assert.ok(!r.some((x) => /git log/.test(x.detail ?? '') && x.message.includes('these shell commands')), 'read-only git commands are not flagged');
+});
+
+// Every block type with every setting changed from its default, at the edges of what the editor allows.
+const EVERYTHING = {
+  scanner: { scanner: 'zizmor' },
+  command: { command: 'npm test -- --reporter=dot && echo "done: $HOME"', timeoutSec: 7200, failOnNonZero: true },
+  context: {
+    model: 'claude-opus-5-5', effort: 'xhigh', tools: ['Read', 'Grep', 'Glob', 'Bash', 'Edit', 'WebFetch'],
+    allowedTools: ['Read', 'Bash(npm test:*)', 'Bash(git log:*)', 'WebFetch(domain:docs.example.com)'], maxTurns: 900,
+    prompt: 'Gather facts.\n\n{{diff}}\n{{files}}\n{{scanner_findings}}\nUnicode: ünïcödé ✓ 漢字 — "quotes" \\ backslash',
+    includeDiff: false, includeFiles: true, budgetChars: 5_000_000,
+  },
+  branch: {},
+  prompt: {
+    prompt: 'Lens prompt {{finding_schema}}\n'.repeat(400), maxTurns: 1000, allowedTools: [], output: 'text',
+    forkFrom: 'ctx', category: 'security-deep',
+  },
+  merge: { lineWindow: 25 },
+  verify: {
+    prompt: 'Refute {{finding}}', maxTurns: 3, allowedTools: ['Read'], forkFrom: 'ctx',
+    appliesTo: ['consider', 'must_fix'], failClosed: false, concurrency: 64,
+  },
+  gate: { blockOn: 'minor' },
+  output: { notify: false, postPrComment: true },
+} as const;
+
+test('every setting of every block type survives export -> import exactly', async () => {
+  const { BLOCK_TYPES } = await import('../src/server/flows/blockTypes.ts');
+  // the fixture must exercise every field the block types define, each with a non-default value,
+  // so a field added later fails here until it's covered
+  for (const t of BLOCK_TYPES) {
+    const want = EVERYTHING[t.type as keyof typeof EVERYTHING] as Record<string, unknown>;
+    assert.ok(want, `fixture covers block type ${t.type}`);
+    const d = t.defaultConfig as unknown as Record<string, unknown>;
+    assert.deepEqual(Object.keys(want).sort(), Object.keys(d).sort(), `fixture sets every ${t.type} field`);
+    for (const k of Object.keys(d)) assert.notDeepEqual(want[k], d[k], `${t.type}.${k} differs from its default`);
+  }
+  const ids: Record<string, string> = { context: 'ctx' };
+  const blocks = BLOCK_TYPES.map((t, i) => ({
+    id: ids[t.type] ?? `${t.type}-x${i}`, type: t.type, label: `${t.type} · ${'long label '.repeat(27)}`.trim(),
+    position: { x: i * 312.5 - 40.25, y: (i % 3) * -117.75 + 8.5 }, config: structuredClone(EVERYTHING[t.type as keyof typeof EVERYTHING]),
+  })) as unknown as import('../src/shared/types.ts').Block[];
+  const edges = [
+    { id: 'edge-ctx-branch', source: 'ctx', target: 'branch-x3' },
+    { id: 'e-A1b2C3', source: 'branch-x3', target: 'prompt-x4' },
+    { id: 'e-merge', source: 'prompt-x4', target: 'merge-x5' },
+  ];
+  const flow = {
+    id: 'flow-src', name: 'Everything · ünïcödé flow '.repeat(12).trim(), description: '  Line one.\nLine two with trailing space.  ',
+    isDefault: false, blocks, edges, createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-02T00:00:00.000Z',
+  };
+  const e = exportFlow(flow);
+  for (const input of [e.text, e.json]) {
+    const p = previewImport(input);
+    assert.deepEqual(p.notes, [], 'nothing was dropped or repaired');
+    assert.deepEqual(p.blocks, blocks, 'blocks: ids, types, labels, positions and every config field');
+    assert.deepEqual(p.edges, edges, 'connections, including their ids');
+    assert.equal(p.name, flow.name);
+    assert.equal(p.description, flow.description, 'whitespace kept');
+  }
+  // and through the database, as the app saves and reloads it
+  const db = openDb();
+  const saved = importFlow(db, e.text);
+  const again = db.getFlow(saved.id)!;
+  assert.deepEqual(again.blocks, blocks);
+  assert.deepEqual(again.edges, edges);
+  assert.equal(again.description, flow.description);
+  // what intentionally doesn't travel: identity and timestamps; it arrives as your own editable flow
+  assert.notEqual(again.id, flow.id);
+  assert.equal(again.isDefault, false);
+  // and exporting the imported copy gives byte-identical share text (name aside, which may get "(imported)")
+  assert.equal(exportFlow({ ...again, name: flow.name }).text, e.text);
+  db.close();
+});
+
+test('a default flow with changed preferences exports those preferences', async () => {
+  const { setBlockOptions } = await import('../src/server/flows/store.ts');
+  const db = openDb();
+  ensureDefaults(db);
+  setBlockOptions(db, 'default-review', 'out', { notify: false, postPrComment: true });
+  const p = previewImport(exportFlow(db.getFlow('default-review')!).text);
+  assert.deepEqual(p.blocks.find((b) => b.id === 'out')!.config, { notify: false, postPrComment: true });
+  setBlockOptions(db, 'default-review', 'out', { notify: true, postPrComment: false });
+  db.close();
 });

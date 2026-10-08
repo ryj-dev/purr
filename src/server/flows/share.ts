@@ -20,7 +20,6 @@ const FORMAT = 'purr-flow';
 const MAX_TEXT = 512 * 1024;
 const MAX_BLOCKS = 200;
 const MAX_EDGES = 800;
-const MAX_STRING = 100_000;
 
 /** What travels: the flow's own content, without ids, timestamps or default status. */
 interface SharedFlowV1 {
@@ -29,7 +28,7 @@ interface SharedFlowV1 {
   name: string;
   description: string;
   blocks: Array<Pick<Block, 'id' | 'type' | 'label' | 'position' | 'config'>>;
-  edges: Array<{ source: string; target: string }>;
+  edges: Array<{ id: string; source: string; target: string }>;
 }
 
 export function exportFlow(flow: Flow): FlowExport {
@@ -37,7 +36,7 @@ export function exportFlow(flow: Flow): FlowExport {
     format: FORMAT, version: 1,
     name: flow.name.replace(/^Default · /, ''), description: flow.description,
     blocks: flow.blocks.map((b) => ({ id: b.id, type: b.type, label: b.label, position: b.position, config: b.config })),
-    edges: flow.edges.map((e) => ({ source: e.source, target: e.target })),
+    edges: flow.edges.map((e) => ({ id: e.id, source: e.source, target: e.target })),
   };
   const json = JSON.stringify(shared, null, 2);
   const text = SHARE_PREFIX + deflateRawSync(Buffer.from(JSON.stringify(shared)), { level: 9 }).toString('base64url');
@@ -64,7 +63,7 @@ function decode(input: string): unknown {
 }
 
 const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
-const str = (v: unknown, max = MAX_STRING) => (typeof v === 'string' ? v.slice(0, max) : null);
+const str = (v: unknown) => (typeof v === 'string' ? v : null);
 const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
 
 const ENUMS: Record<string, readonly (string | null)[]> = {
@@ -73,9 +72,10 @@ const ENUMS: Record<string, readonly (string | null)[]> = {
   output: ['findings', 'text'],
   blockOn: ['must_fix', 'consider', 'minor'],
 };
-const INT_RANGES: Record<string, [number, number]> = {
-  timeoutSec: [1, 3600], maxTurns: [1, 500], budgetChars: [0, 2_000_000], lineWindow: [0, 1000], concurrency: [1, 32],
-};
+// The editor's own minimums (web/src/components/Inspector.tsx). There's no upper limit in the editor, so import only
+// refuses absurd values: anything a real flow can hold is copied exactly.
+const MINIMUMS: Record<string, number> = { timeoutSec: 1, maxTurns: 1, budgetChars: 0, lineWindow: 0, concurrency: 1 };
+const CEILING = 1e9;
 
 /** Rebuilds one config from the type's defaults, taking only known fields of the right kind from the shared one. */
 function cleanConfig(type: BlockType, raw: unknown, where: string, notes: string[]): BlockConfigMap[BlockType] {
@@ -89,11 +89,10 @@ function cleanConfig(type: BlockType, raw: unknown, where: string, notes: string
     if (k in ENUMS) ok = ENUMS[k].includes(v as string) ? v : undefined;
     else if (k === 'forkFrom') ok = v === null || typeof v === 'string' ? v : undefined;
     else if (k === 'appliesTo') ok = Array.isArray(v) && v.every((x) => ENUMS.blockOn.includes(x)) ? [...new Set(v)] : undefined;
-    else if (Array.isArray(d)) ok = Array.isArray(v) && v.every((x) => typeof x === 'string' && x.length < 500) ? v.slice(0, 100) : undefined;
+    else if (Array.isArray(d)) ok = Array.isArray(v) && v.every((x) => typeof x === 'string') ? [...v] : undefined;
     else if (typeof d === 'number') {
       const n = num(v);
-      const [lo, hi] = INT_RANGES[k] ?? [Number.MIN_SAFE_INTEGER, Number.MAX_SAFE_INTEGER];
-      ok = n === null ? undefined : Math.min(hi, Math.max(lo, Math.round(n)));
+      ok = n !== null && n >= (MINIMUMS[k] ?? -CEILING) && n <= CEILING ? n : undefined;
     } else if (typeof d === 'boolean') ok = typeof v === 'boolean' ? v : undefined;
     else if (typeof d === 'string') ok = str(v) ?? undefined;
     if (ok === undefined) notes.push(`${where}: "${k}" had an invalid value, used the default`);
@@ -124,7 +123,7 @@ function rebuild(data: unknown): { name: string; description: string; blocks: Bl
     let id = typeof rb.id === 'string' && /^[A-Za-z0-9_.-]{1,64}$/.test(rb.id) ? rb.id : `${type}-${i + 1}`;
     if (ids.has(id)) { notes.push(`Block "${id}": duplicate id, renamed`); id = `${id}-${i + 1}`; }
     ids.add(id);
-    const label = (str(rb.label, 120) ?? '').trim() || blockTypeInfo(type).label;
+    const label = str(rb.label) || blockTypeInfo(type).label;
     const pos = isObj(rb.position) ? rb.position : {};
     const position = { x: num(pos.x) ?? i * 300, y: num(pos.y) ?? 0 };
     blocks.push({ id, type, label, position, config: cleanConfig(type, rb.config, `"${label}"`, notes) });
@@ -141,16 +140,21 @@ function rebuild(data: unknown): { name: string; description: string; blocks: Bl
   }
   const edges: Edge[] = [];
   const seen = new Set<string>();
+  const edgeIds = new Set<string>();
   for (const re of rawEdges) {
     if (!isObj(re) || typeof re.source !== 'string' || typeof re.target !== 'string') { notes.push('A connection was unreadable, skipped'); continue; }
     if (!ids.has(re.source) || !ids.has(re.target) || re.source === re.target) { notes.push(`Connection ${re.source} → ${re.target} doesn't join two blocks, skipped`); continue; }
     const key = `${re.source}\u0000${re.target}`;
     if (seen.has(key)) continue;
     seen.add(key);
-    edges.push({ id: `e-${re.source}-${re.target}`, source: re.source, target: re.target });
+    // keep the connection's id when it's usable, so the copy is exact
+    let eid = typeof re.id === 'string' && /^[A-Za-z0-9_.-]{1,128}$/.test(re.id) && !edgeIds.has(re.id) ? re.id : `e-${re.source}-${re.target}`;
+    while (edgeIds.has(eid)) eid += '_';
+    edgeIds.add(eid);
+    edges.push({ id: eid, source: re.source, target: re.target });
   }
-  const name = (str(data.name, 120) ?? '').trim() || 'Imported flow';
-  const description = (str(data.description, 2000) ?? '').trim();
+  const name = str(data.name)?.trim() || 'Imported flow';
+  const description = str(data.description) ?? '';
   return { name, description, blocks, edges, notes };
 }
 
