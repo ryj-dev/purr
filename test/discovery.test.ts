@@ -438,3 +438,29 @@ test('an account signed in from a terminal after startup: its PRs from since the
     assert.deepEqual(scheduled, ['s1'], 'opened after it was signed in: new; opened long before: already open');
   } finally { t.mock.timers.reset(); db.close(); }
 });
+
+test("a PR opened from a clone discovery only finds later (its own git hooks) is still new when the clone shows up", async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
+  const db = openDb(); ensureDefaults(db);
+  const mgr = new RunManager(db, new ClaudeRunner(db));
+  const scheduled: string[] = [];
+  mgr.schedulePostPush = (req: RunRequest) => { scheduled.push(req.head!); };
+  const t0 = Date.now();
+  const root = realpathSync(mkdtempSync(join(process.env.TMPDIR!, 'purr-projects-')));
+  db.setSettings({ ...db.getSettings(), projectFolders: [root] });
+  const pr: OpenPr = { repo: 'work-org/app-k', number: 1, headRefOid: 'h1', headRefName: 'f', baseRefName: 'main', title: 't', body: '', url: 'u',
+    isDraft: false, account: 'me', createdAt: new Date(t0 + 3 * 60_000).toISOString() };
+  const watcher = new PostPushWatcher(db, mgr, { fetchPrs: async () => ({ prs: [pr], answered: ['me'] }) });
+  try {
+    await watcher.poll();                          // the PR is listed, but no clone of it is here yet
+    t.mock.timers.tick(6 * 60_000);
+    await watcher.poll();
+    // cloned (husky: PuRR's hooks never ran there), pushed and proposed at t0 + 3min; discovery finds it at t0 + 11min
+    const dir = join(root, 'app-k');
+    renameSync(tempRepo(), dir);
+    sh(dir, 'remote', 'add', 'origin', 'https://github.com/work-org/app-k.git');
+    t.mock.timers.tick(5 * 60_000);
+    await watcher.poll();
+    assert.deepEqual(scheduled, ['h1'], 'not taken for a PR that was already open');
+  } finally { t.mock.timers.reset(); db.close(); }
+});

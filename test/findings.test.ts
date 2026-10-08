@@ -559,3 +559,29 @@ test('the push notes table from an earlier build (no branch column) is rebuilt, 
   assert.deepEqual(db.getPushOutcomes('abc1', ['/r']).map((o) => [o.branch, o.kind]).sort(), [['a', 'no-pr'], ['b', 'pending']]);
   db.close();
 });
+
+test("the service's events wake a waiting --wait at once, even one that came while it was busy looking", async () => {
+  const { ServiceEvents } = await import('../src/server/lookup.ts');
+  const { ClaudeRunner } = await import('../src/server/claude.ts');
+  const { RunManager } = await import('../src/server/manager.ts');
+  const { PostPushWatcher } = await import('../src/server/triggers.ts');
+  const { startHttp } = await import('../src/server/http.ts');
+  const db = openDb(join(mkdtempSync(join(process.env.TMPDIR!, 'purr-db-')), 'purr.db'));
+  const mgr = new RunManager(db, new ClaudeRunner(db));
+  const server = startHttp(db, mgr, new PostPushWatcher(db, mgr), 0);
+  await new Promise((r) => server.once('listening', r));
+  const ev = (await ServiceEvents.connect((server.address() as { port: number }).port))!;
+  try {
+    const timed = async (fn: () => void) => { const t0 = Date.now(); const w = ev.wait(60_000); fn(); await w; return Date.now() - t0; };
+    assert.ok(await timed(() => mgr.emit({ type: 'run', run: fakeRun({}) })) < 2_000, 'a run event wakes it');
+    assert.ok(await timed(() => mgr.emit({ type: 'push', sha: 'abc' })) < 2_000, 'so does a push note');
+    mgr.emit({ type: 'run', run: fakeRun({}) });      // while nobody waits (looking at the database, say)
+    await new Promise((r) => setTimeout(r, 100));
+    const t0 = Date.now();
+    await ev.wait(60_000);
+    assert.ok(Date.now() - t0 < 500, 'not lost: the next wait returns at once');
+    server.closeAllConnections();
+    await ev.wait(60_000);
+    assert.equal(ev.down, true, 'the stream ending says the service stopped');
+  } finally { ev.close(); server.close(); db.close(); }
+});

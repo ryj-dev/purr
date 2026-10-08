@@ -331,6 +331,8 @@ async function findingsCmd(): Promise<number> {
       if (!st.done) { console.error(`purr: review ${run.id} is still ${run.status} after ${timeoutSec}s`); return 3; }
     } else {
       const find = () => runId ? db.getRun(runId) : db.findRuns({ ...q, limit: 1 })[0] ?? null;
+      // a run id that doesn't exist will never appear: say so now rather than wait out the timeout
+      if (runId && !db.getRun(runId)) { console.error(`purr: no review of run ${runId} found (purr runs lists them)`); return 3; }
       // waits for a review that isn't queued yet, too (the PR's first, still in its debounce)
       const events = wait ? await listen(db) : null;
       const st = wait ? await waitForReview({ check: async () => { const r = find(); return { run: r, done: !!r && isFinished(r) }; } }, {

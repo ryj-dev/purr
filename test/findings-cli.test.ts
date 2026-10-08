@@ -79,6 +79,8 @@ test('purr findings: exit codes, usage errors, --json and purr runs', async (tc)
   assert.equal(code('--sha', 'aaaa000005'), 0, 'its must-fix was dismissed since');
   assert.equal(code('--sha', 'bbbb'), 3, 'no such review');
   assert.equal(code('--run', 'run-nope'), 3);
+  const typo = await purrA(repoPath, 'findings', '--run', 'run-typo', '--wait');
+  assert.deepEqual([typo.status, /no review of run run-typo found/.test(typo.stderr)], [3, true], 'a run that will never appear: no wait');
   const skipped = await purrA(repoPath, 'findings', '--sha', 'aaaa000006', '--wait', '--timeout', '30');
   assert.equal(skipped.status, 3);
   assert.match(skipped.stderr, /won't be reviewed: reviews are paused/);
@@ -108,20 +110,21 @@ test('purr findings: exit codes, usage errors, --json and purr runs', async (tc)
   execFileSync('git', ['checkout', '-q', '-'], { cwd: repoPath });
   const db3 = openDb();
   // the child must be seen waiting before the run finishes, or this wouldn't test waiting at all
-  const waitFor = (args: string[], id: string) => new Promise<{ status: number | null; stdout: string; sawRunning: boolean }>((res) => {
+  const waitFor = (args: string[], id: string) => new Promise<{ status: number | null; stdout: string; sawRunning: boolean; after: number }>((res) => {
     const p = spawn(process.execPath, [CLI, 'findings', ...args, '--wait', '--json', '--timeout', '30'], { cwd: repoPath });
-    let stdout = '', sawRunning = false;
+    let stdout = '', sawRunning = false, announced = 0;
     p.stdout.on('data', (d) => { stdout += d; });
     p.stderr.on('data', (d) => {
       if (!sawRunning && String(d).includes(`review ${id} is running`)) {
         sawRunning = true;
+        announced = Date.now();
         const db = openDb();
         db.putRun({ ...db.getRun(id)!, status: 'passed' });
         svc.announce(db.getRun(id)!);
         db.close();
       }
     });
-    p.on('close', (status) => res({ status, stdout, sawRunning }));
+    p.on('close', (status) => res({ status, stdout, sawRunning, after: Date.now() - announced }));
   });
   // --branch --wait before the branch's first review is queued: waits for it to appear
   const later = await new Promise<{ status: number | null; sawWaiting: boolean }>((res) => {
@@ -148,6 +151,7 @@ test('purr findings: exit codes, usage errors, --json and purr runs', async (tc)
     db3.setRunFindings(live.id, []);
     const w = await waitFor(args.map((a) => a === 'RUN' ? live.id : a), live.id);
     assert.ok(w.sawRunning, `${args[0]}: waited while it ran`);
+    assert.ok(w.after < 5_000, `${args[0]}: woken by the service's event, not a 30s slow look (${w.after}ms)`);
     assert.equal(w.status, 0);
     assert.equal(JSON.parse(w.stdout).run.status, 'passed', 'reported once finished');
   }

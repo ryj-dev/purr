@@ -194,11 +194,18 @@ export class ServiceEvents {
     this.poke();
   }
 
-  private poke() { const w = this.wake; this.wake = null; w?.(); }
+  /** An event that came while nobody was waiting (the waiter was busy looking): the next wait returns at once. */
+  private missed = false;
+
+  private poke() {
+    const w = this.wake;
+    this.wake = null;
+    if (w) w(); else this.missed = true;
+  }
 
   /** Until an event, the stream ends, or `ms` pass (a slow look anyway, in case an event was missed). */
   wait(ms: number) {
-    if (this.down) return Promise.resolve();
+    if (this.down || this.missed) { this.missed = false; return Promise.resolve(); }
     return new Promise<void>((r) => {
       const t = setTimeout(() => { this.wake = null; r(); }, ms);
       this.wake = () => { clearTimeout(t); r(); };
