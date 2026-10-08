@@ -208,7 +208,7 @@ test('Sign in for gh opens its login in Terminal, then looks for the new account
 });
 
 test('HTTP: /api/tools, installing, unknown tools, and scanners have nothing to sign in to', async () => {
-  const w = fakeWorld({ brew: true, have: ['claude', 'gh', 'gitleaks', 'osv-scanner'] });
+  const w = fakeWorld({ brew: true, hold: true, have: ['claude', 'gh', 'gitleaks', 'osv-scanner'] });
   const db = openDb();
   ensureDefaults(db);
   const mgr = new RunManager(db, new ClaudeRunner(db));
@@ -231,6 +231,7 @@ test('HTTP: /api/tools, installing, unknown tools, and scanners have nothing to 
     const all = await call('POST', '/api/tools/install-missing');
     assert.equal(all.status, 202);
     assert.deepEqual(await all.json(), { installing: [] }, 'zizmor is already queued');
+    w.release();                              // brew held zizmor until now, so it couldn't finish first and be queued again
     assert.equal((await settled('zizmor')).installed, true);
     assert.equal((await (await call('GET', '/api/state')).json()).tools.zizmor, true, 'the sidebar summary updates after an install');
 

@@ -7,7 +7,7 @@ import { existsSync, realpathSync } from 'node:fs';
 import type { DB, PushOutcome } from './db.ts';
 import { lsRemote, remoteUrl } from './git.ts';
 import { addRepo } from './http.ts';
-import { type OpenPr, type PrInfo, ghAuthed, githubRepo, openPrsForAllAccounts, prForBranch } from './gh.ts';
+import { type PrFetch, type PrInfo, ghAuthed, githubRepo, openPrsForAllAccounts, prForBranch } from './gh.ts';
 import { discoverRepos } from './discovery.ts';
 import { statSync } from 'node:fs';
 import { join } from 'node:path';
@@ -16,7 +16,7 @@ import type { RunManager } from './manager.ts';
 
 /** What the watcher asks of git and GitHub; the tests swap these out. */
 export interface WatcherDeps {
-  fetchPrs: () => Promise<OpenPr[] | null>;
+  fetchPrs: () => Promise<PrFetch | null>;
   lsRemote: (cwd: string, remote: string, branch: string) => Promise<string | null>;
   ghAuthed: () => Promise<boolean>;
   prForBranch: (repoPath: string, branch: string) => Promise<PrInfo | null>;
@@ -33,7 +33,8 @@ export class PostPushWatcher {
   private polling = false;
   private lastDiscovery = 0;
   private startedAt = Date.now();
-  private lastFetch = 0;
+  /** per gh account: when its PR list last got an answer */
+  private lastFetch = new Map<string, number>();
   private deps: WatcherDeps;
   /** push confirmations still waiting for the remote */
   private confirming = new Set<Promise<void>>();
@@ -149,14 +150,24 @@ export class PostPushWatcher {
       this.lastDiscovery = Date.now();
       await discoverRepos(this.db).catch(() => 0);
     }
-    const prs = await this.deps.fetchPrs();
-    if (!prs) return;
-    // PRs opened before the last good poll were there to be seen then (two minutes' slack for GitHub's clock)
-    const since = Math.max(this.startedAt, this.lastFetch - 2 * 60_000);
-    this.lastFetch = Date.now();
+    const fetched = await this.deps.fetchPrs();
+    if (!fetched) return;
+    const { prs } = fetched;
+    // PRs opened before their account's last answered poll were there to be seen then (two minutes' slack for
+    // GitHub's clock). Per account: one whose query failed (asleep, offline, token expired) keeps its old mark
+    // An account answering for the first time after the first poll (just signed in) starts from now: its PRs are
+    // already open, not new
+    const firstPoll = this.lastFetch.size === 0;
+    const since = (account: string) => {
+      const last = this.lastFetch.get(account) ?? (firstPoll ? 0 : Date.now());
+      return Math.max(this.startedAt, last - 2 * 60_000);
+    };
+    const marks = new Map(prs.map((pr) => [pr.account, since(pr.account)]));
+    for (const a of fetched.answered) this.lastFetch.set(a, Date.now());
     const clones = await this.clonesByRepo();
     for (const pr of prs) {
-      const repo = clones.get(pr.repo)?.[0];
+      // the first clone (main checkouts first) with post-push on; none: leave the PR alone, and claim nothing
+      const repo = clones.get(pr.repo)?.find((c) => this.mgr.resolveFlow('post-push', c.id));
       if (!repo) continue;
       const key = `${pr.repo}#${pr.number}`;
       const seen = this.seenPr.get(key);
@@ -166,7 +177,7 @@ export class PostPushWatcher {
       if (this.lastSeen.get(handled) === pr.headRefOid) continue;   // the push hook (from any clone) has it
       if (seen === undefined) {
         const opened = pr.createdAt ? Date.parse(pr.createdAt) : 0;
-        if (!(opened >= since)) continue;
+        if (!(opened >= (marks.get(pr.account) ?? this.startedAt))) continue;
       }
       this.lastSeen.set(handled, pr.headRefOid);
       this.mgr.schedulePostPush({

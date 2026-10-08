@@ -60,7 +60,8 @@ export async function ghAccounts(): Promise<string[]> {
   try {
     const r = await exec('gh', ['auth', 'status', '--hostname', 'github.com'], { timeoutMs: 15_000 });
     const parsed = parseGhStatus(r.stdout + r.stderr);
-    multiAccount = parsed.multi;
+    // only a clean answer says which kind of gh this is: a timeout says nothing
+    if (r.code === 0 && parsed.accounts.length) multiAccount = parsed.multi;
     // signed in (exit 0) in words PuRR doesn't know: still use gh, as its default login
     list = parsed.accounts.length || r.code !== 0 ? parsed.accounts : ['github.com'];
   } catch { /* gh missing */ }
@@ -102,22 +103,26 @@ export async function prForBranch(repoPath: string, branch: string): Promise<PrI
 const OPEN_PRS = `query($n: Int!) { viewer { login pullRequests(first: $n, states: OPEN, orderBy: { field: UPDATED_AT, direction: DESC }) {
   nodes { number title body url isDraft createdAt baseRefName headRefName headRefOid repository { nameWithOwner } } } } }`;
 
+/** Open PRs, and the accounts whose query got an answer (an account that failed this time may have PRs it didn't list). */
+export interface PrFetch { prs: OpenPr[]; answered: string[] }
+
 /** Every open PR authored by any signed-in account: one GraphQL call per account. null if gh isn't usable at all. */
-export async function openPrsForAllAccounts(): Promise<OpenPr[] | null> {
+export async function openPrsForAllAccounts(): Promise<PrFetch | null> {
   const accounts = await ghAccounts();
   if (!accounts.length) return null;
-  const all: OpenPr[] = [];
+  const prs: OpenPr[] = [], answered: string[] = [];
   for (const account of accounts) {
     const out = await gh(process.cwd(), ['api', 'graphql', '-F', 'n=100', '-f', `query=${OPEN_PRS}`], { account });
     if (!out) continue;
     try {
       const nodes = JSON.parse(out)?.data?.viewer?.pullRequests?.nodes ?? [];
       for (const n of nodes) {
-        all.push({ ...n, body: n.body ?? '', repo: String(n.repository?.nameWithOwner ?? '').toLowerCase(), account });
+        prs.push({ ...n, body: n.body ?? '', repo: String(n.repository?.nameWithOwner ?? '').toLowerCase(), account });
       }
+      answered.push(account);
     } catch { /* skip this account this time */ }
   }
-  return all;
+  return { prs, answered };
 }
 
 /**
@@ -125,7 +130,11 @@ export async function openPrsForAllAccounts(): Promise<OpenPr[] | null> {
  * post the comment twice, since a timed-out `gh pr comment` may still have posted it.
  */
 export async function commentOnPr(repoPath: string, number: number, body: string, account?: string | null): Promise<boolean> {
-  const as = account || (await ghAccounts())[0];
-  if (!as) return false;
-  return (await gh(repoPath, ['pr', 'comment', String(number), '--body-file', '-'], { input: body, account: as })) !== null;
+  const accounts = await ghAccounts();
+  // that account first, else the active one; one signed out since (no token, nothing sent yet) gives way to the next
+  for (const as of account ? [account, ...accounts.filter((a) => a !== account)] : accounts) {
+    if (multiAccount && !(await tokenFor(as))) continue;
+    return (await gh(repoPath, ['pr', 'comment', String(number), '--body-file', '-'], { input: body, account: as })) !== null;
+  }
+  return false;
 }

@@ -65,7 +65,7 @@ test('the poller: reviews new PRs and new pushes, across accounts, never the bac
     repo, number, headRefOid: sha, headRefName: `branch-${number}`, baseRefName: 'main', title: `PR ${number}`, body: '',
     url: `https://github.com/${repo}/pull/${number}`, isDraft: false, account: 'work', createdAt: new Date(now - 86_400_000).toISOString(), ...opts,
   });
-  const watcher = new PostPushWatcher(db, mgr, { fetchPrs: async () => prs });
+  const watcher = new PostPushWatcher(db, mgr, { fetchPrs: async () => ({ prs, answered: [...new Set(prs.map((p) => p.account))] }) });
 
   // already open when PuRR starts (or its repo is just discovered): recorded, not reviewed
   prs = [pr('work-org/app-a', 1, 'aaa1'), pr('me/app-b', 7, 'bbb1', { account: 'personal' }), pr('elsewhere/unknown', 3, 'ccc')];
@@ -104,7 +104,7 @@ test('a push made before its PR is opened is reviewed when the PR opens; one rev
   let prs: OpenPr[] = [];
   let openPr: OpenPr | null = null;   // what `gh pr view <branch>` finds
   const watcher = new PostPushWatcher(db, mgr, {
-    fetchPrs: async () => prs,
+    fetchPrs: async () => ({ prs, answered: ['work'] }),
     lsRemote: async () => pushed,    // the push has landed
     ghAuthed: async () => true,
     prForBranch: async () => openPr,
@@ -160,6 +160,15 @@ test('a push made before its PR is opened is reviewed when the PR opens; one rev
   await watcher.poll();
   assert.deepEqual(scheduled.map((r) => r.head), ['c1', 'c2', 'c3', 'c4', 'c5']);
   assert.equal(scheduled[4].repoPath, a, 'reviewed in the main checkout');
+
+  // and the other way round: off for the main checkout, on for the worktree, so the poller reviews there
+  db.deleteTrigger('post-push', db.getRepoByPath(wt)!.id);
+  db.setTrigger({ trigger: 'post-push', repoId: db.getRepoByPath(a)!.id, flowId: null });
+  prs = [{ ...prs[0], headRefOid: 'c6' }];
+  await watcher.poll();
+  assert.deepEqual(scheduled.map((r) => r.head), ['c1', 'c2', 'c3', 'c4', 'c5', 'c6']);
+  assert.equal(scheduled[5].repoPath, wt, 'the first clone with post-push on');
+  db.deleteTrigger('post-push', db.getRepoByPath(a)!.id);
   db.close();
 });
 
@@ -193,17 +202,19 @@ test('a PR opened during a gh outage longer than ten minutes is still reviewed; 
   const { root, a } = projectsFolder();
   sh(a, 'remote', 'add', 'origin', 'https://github.com/work-org/app-d.git');
   db.setSettings({ ...db.getSettings(), projectFolders: [root] });
-  let prs: OpenPr[] | null = [];
-  const watcher = new PostPushWatcher(db, mgr, { fetchPrs: async () => prs });
+  let prs: OpenPr[] = [];
+  let answered = ['me'];
+  const watcher = new PostPushWatcher(db, mgr, { fetchPrs: async () => ({ prs, answered }) });
   const pr = (n: number, sha: string, opened: number): OpenPr => ({ repo: 'work-org/app-d', number: n, headRefOid: sha, headRefName: `b${n}`,
     baseRefName: 'main', title: 't', body: '', url: 'u', isDraft: false, account: 'me', createdAt: new Date(opened).toISOString() });
   try {
     await watcher.poll();                      // a good poll
-    prs = null;                                // gh is down...
+    answered = [];                             // offline: every account's query fails, and the list is empty...
     t.mock.timers.tick(5 * 60_000);
     const openedInOutage = Date.now();
     t.mock.timers.tick(20 * 60_000);
     await watcher.poll();
+    answered = ['me'];
     prs = [pr(1, 's1', openedInOutage)];       // ...and back, 25 minutes on
     await watcher.poll();
     assert.deepEqual(scheduled, ['s1']);
@@ -212,4 +223,75 @@ test('a PR opened during a gh outage longer than ten minutes is still reviewed; 
     await watcher.poll();
     assert.deepEqual(scheduled, ['s1'], 'opened before the last good poll: already open, not new');
   } finally { t.mock.timers.reset(); db.close(); }
+});
+
+test('poll marks are per account: one account\'s outage loses none of its PRs, and a newly added account\'s old PRs aren\'t new', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
+  const db = openDb(); ensureDefaults(db);
+  const mgr = new RunManager(db, new ClaudeRunner(db));
+  const scheduled: string[] = [];
+  mgr.schedulePostPush = (req: RunRequest) => { scheduled.push(req.head!); };
+  const { root, a } = projectsFolder();
+  sh(a, 'remote', 'add', 'origin', 'https://github.com/work-org/app-e.git');
+  db.setSettings({ ...db.getSettings(), projectFolders: [root] });
+  let prs: OpenPr[] = [];
+  let answered = ['me', 'work'];
+  const watcher = new PostPushWatcher(db, mgr, { fetchPrs: async () => ({ prs, answered }) });
+  const pr = (n: number, account: string, opened: number): OpenPr => ({ repo: 'work-org/app-e', number: n, headRefOid: `s${n}`, headRefName: `b${n}`,
+    baseRefName: 'main', title: 't', body: '', url: 'u', isDraft: false, account, createdAt: new Date(opened).toISOString() });
+  try {
+    await watcher.poll();
+    answered = ['me'];                               // work's token fails for a while; me keeps answering
+    t.mock.timers.tick(60_000);
+    const gap = Date.now();
+    t.mock.timers.tick(20 * 60_000);
+    await watcher.poll();
+    answered = ['me', 'work'];
+    prs = [pr(1, 'work', gap)];
+    await watcher.poll();
+    assert.deepEqual(scheduled, ['s1'], "opened during work's outage: still new to work");
+
+    t.mock.timers.tick(60_000);
+    const before = Date.now() - 30 * 60_000;         // opened long ago by an account signed in only now
+    answered = ['me', 'work', 'personal'];
+    prs = [...prs, pr(2, 'personal', before)];
+    await watcher.poll();
+    assert.deepEqual(scheduled, ['s1'], 'an account seen for the first time brings already-open PRs');
+    t.mock.timers.tick(5 * 60_000);
+    prs = [...prs, pr(3, 'personal', Date.now())];
+    await watcher.poll();
+    assert.deepEqual(scheduled, ['s1', 's3'], 'its new PRs are reviewed');
+  } finally { t.mock.timers.reset(); db.close(); }
+});
+
+test('a push is reviewed by the hook when gh is signed out or reviews aren\'t PR-only, and the poller doesn\'t review it again', async () => {
+  const db = openDb(); ensureDefaults(db);
+  const mgr = new RunManager(db, new ClaudeRunner(db));
+  const scheduled: RunRequest[] = [];
+  mgr.schedulePostPush = (req: RunRequest) => { scheduled.push(req); };
+  const { root, a } = projectsFolder();
+  sh(a, 'remote', 'add', 'origin', 'https://github.com/work-org/app-f.git');
+  db.setSettings({ ...db.getSettings(), projectFolders: [root], postPushPrsOnly: true });
+  let authed = false, pushed = '';
+  let prs: OpenPr[] = [];
+  const watcher = new PostPushWatcher(db, mgr, {
+    fetchPrs: async () => ({ prs, answered: ['me'] }), lsRemote: async () => pushed, ghAuthed: async () => authed, prForBranch: async () => null,
+  });
+  await watcher.poll();
+  pushed = 'h1';
+  await watcher.pushIntent({ repoPath: a, branch: 'feat', sha: 'h1' });
+  await watcher.settled();
+  assert.deepEqual(scheduled.map((r) => [r.head, r.pr]), [['h1', null]], 'no gh: reviewed against the default branch, no PR');
+
+  authed = true;
+  db.setSettings({ ...db.getSettings(), postPushPrsOnly: false });
+  pushed = 'h2';
+  await watcher.pushIntent({ repoPath: a, branch: 'feat', sha: 'h2' });
+  await watcher.settled();
+  assert.deepEqual(scheduled.map((r) => r.head), ['h1', 'h2'], 'not PR-only: reviewed without a PR');
+  prs = [{ repo: 'work-org/app-f', number: 4, headRefOid: 'h2', headRefName: 'feat', baseRefName: 'main', title: 't', body: '', url: 'u',
+    isDraft: false, account: 'me', createdAt: new Date().toISOString() }];
+  await watcher.poll();
+  assert.deepEqual(scheduled.map((r) => r.head), ['h1', 'h2'], 'the PR then opened on h2 is not reviewed twice');
+  db.close();
 });

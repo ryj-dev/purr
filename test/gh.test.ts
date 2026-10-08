@@ -81,3 +81,27 @@ test('an older gh (one login, no --user) is used as it is, without a token per a
   const out = fakeGh('You are not logged into any GitHub hosts.\n', {}, 1);
   try { assert.deepEqual(await ghAccounts(), []); } finally { out.restore(); }
 });
+
+test('a run keeps the account that found its PR, from the poller and from a manual review alike', async () => {
+  const { runPr } = await import('../src/server/manager.ts');
+  assert.deepEqual(runPr({ ...pr('OPEN'), account: 'work-me' } as any), { number: 7, title: 't', body: '', url: 'u', account: 'work-me' });
+});
+
+test('a comment falls back to another account only when the finding account is signed out, before anything is sent', async () => {
+  const gh = fakeGh(TWO, {});
+  try {
+    assert.equal(await commentOnPr(process.cwd(), 7, 'b', 'no-token'), true);
+    assert.deepEqual(gh.comments(), ['tok-me 7'], 'no token for it: posted as the active account');
+  } finally { gh.restore(); }
+});
+
+test("a gh status that fails says nothing about which gh this is: comments still go as the account that found the PR", async () => {
+  let gh = fakeGh(TWO, {});
+  try { assert.deepEqual(await ghAccounts(), ['me', 'work-me']); } finally { gh.restore(); }
+  gh = fakeGh('error connecting to api.github.com\n', {}, 1);
+  try {
+    assert.deepEqual(await ghAccounts(), []);
+    await commentOnPr(process.cwd(), 7, 'b', 'work-me');
+    assert.deepEqual(gh.comments(), ['tok-work-me 7'], 'still multi-account: a token for that account');
+  } finally { gh.restore(); }
+});
