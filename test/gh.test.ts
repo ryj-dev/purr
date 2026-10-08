@@ -29,7 +29,7 @@ function fakeGh(status: string, prs: Record<string, object>, statusExit = 0, com
 D="${dir}"
 case "$1 $2" in
   "auth status") cat "$D/status"; exit ${statusExit} ;;
-  "auth token") [ "$6" = "no-token" ] && exit 1; echo "tok-$6" ;;
+  "auth token") [ "$6" = "no-token" ] && exit 1; [ -e "$D/blip-$6" ] && { rm "$D/blip-$6"; exit 1; }; echo "tok-$6" ;;
   "pr view") f="$D/pr-\${GH_TOKEN:-none}.json"; [ -f "$f" ] || exit 1; cat "$f" ;;
   "api graphql") f="$D/graphql-\${GH_TOKEN:-none}.json"; [ -f "$f" ] || exit 1; cat "$f" ;;
   "pr comment") cat > /dev/null; echo "\${GH_TOKEN:-none} $3" >> "$D/comments"; exit ${commentExit} ;;
@@ -112,6 +112,15 @@ test('a comment falls back, when the finding account has signed out, to an accou
     assert.equal(await commentOnPr(process.cwd(), 7, 'b', 'no-token'), false);
     assert.deepEqual(none.comments(), [], 'no account can see it: nothing posted');
   } finally { none.restore(); }
+});
+
+test('a keychain blip on the finding account is tried again, and the comment goes as that account', async () => {
+  const gh = fakeGh(TWO, {});
+  writeFileSync(join(gh.dir, 'blip-work-me'), '');   // the first token read fails, the next works
+  try {
+    assert.equal(await commentOnPr(process.cwd(), 7, 'b', 'work-me'), true);
+    assert.deepEqual(gh.comments(), ['tok-work-me 7']);
+  } finally { gh.restore(); }
 });
 
 test("a keychain blip on the finding account doesn't switch who the comment is from", async () => {
