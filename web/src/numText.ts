@@ -30,14 +30,26 @@ export function numFieldStep(s: { text: string; value: number }, e: NumEvent): {
  * A number box's handlers, used by NumField itself and by its tests: a keystroke, leaving the box, and the setting
  * changing from outside (NumField calls `value` from an effect on the setting, so only when it actually changes).
  */
-export function numFieldHandlers(get: () => { text: string; value: number }, setText: (t: string) => void, save: (v: number) => void) {
+export function numFieldHandlers(get: () => { text: string; value: number }, setText: (t: string) => void, save: (v: number) => void,
+  memo: { before: number | null } = { before: null }) {
   return {
+    /** Remembers the value from before this edit: backspacing 7878 away saves 787, 78 and 7 on the way. */
+    focus: () => { memo.before = get().value; },
     type: (text: string) => {
+      if (memo.before === null) memo.before = get().value;
       const r = numFieldStep(get(), { type: 'type', text });
       setText(r.text);
       if (r.emit !== null) save(r.emit);
     },
-    blur: () => setText(numFieldStep(get(), { type: 'blur' }).text),
+    /** Left empty (or not a number): back to the value from before the edit, saved again if typing changed it. */
+    blur: () => {
+      const { text, value } = get();
+      const before = memo.before ?? value;
+      memo.before = null;
+      if (parseNumText(text) !== null) return;
+      setText(String(before));
+      if (before !== value) save(before);
+    },
     value: (value: number) => setText(numFieldStep(get(), { type: 'value', value }).text),
   };
 }

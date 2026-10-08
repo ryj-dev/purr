@@ -68,13 +68,14 @@ function DesktopCard() {
  */
 function NumField({ label, hint, value, onChange }: { label: string; hint?: string; value: number; onChange: (v: number) => void }) {
   const [text, setText] = useState(String(value));
-  const box = numFieldHandlers(() => ({ text, value }), setText, onChange);
+  const memo = useRef({ before: null as number | null }).current;   // kept across renders, for the edit in progress
+  const box = numFieldHandlers(() => ({ text, value }), setText, onChange, memo);
   const last = useRef<number | undefined>(undefined);
   useEffect(() => { last.current = syncValue(last.current, value, box); });
   return (
     <label className="field">
       <span>{label}</span>
-      <input type="number" min={0} value={text} onChange={(e) => box.type(e.target.value)} onBlur={box.blur} />
+      <input type="number" min={0} value={text} onChange={(e) => box.type(e.target.value)} onFocus={box.focus} onBlur={box.blur} />
       {hint && <span className="hint">{hint}</span>}
     </label>
   );
