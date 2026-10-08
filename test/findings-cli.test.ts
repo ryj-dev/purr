@@ -237,16 +237,24 @@ test('the daemon that gets the port fails runs and gives up on pushes the last o
   db.putRun(left);
   db.setPushOutcome({ sha: 'abcd000002', kind: 'pending', reason: 'waiting', repoPath: repo.path, branch: 'feat' });
   db.close();
-  const free = createServer();
-  await new Promise<void>((r) => free.listen(0, '127.0.0.1', () => r()));
-  const port = (free.address() as { port: number }).port;
-  await new Promise<void>((r) => free.close(() => r()));
-  const d = spawn(process.execPath, [CLI, 'daemon', '--port', String(port)], { env: { ...process.env, PURR_HOME: home, PURR_NO_GLOBAL_HOOKS: '1' } });
-  try {
-    await new Promise<void>((res, rej) => {
-      const t = setTimeout(() => rej(new Error('daemon never listened')), 20_000);
-      d.stdout.on('data', (b) => { if (String(b).includes('listening')) { clearTimeout(t); res(); } });
+  // a free port, and if something takes it before the daemon does, another
+  const start = async (): Promise<ReturnType<typeof spawn>> => {
+    const free = createServer();
+    await new Promise<void>((r) => free.listen(0, '127.0.0.1', () => r()));
+    const port = (free.address() as { port: number }).port;
+    await new Promise<void>((r) => free.close(() => r()));
+    const d = spawn(process.execPath, [CLI, 'daemon', '--port', String(port)], { env: { ...process.env, PURR_HOME: home, PURR_NO_GLOBAL_HOOKS: '1' } });
+    let err = '';
+    d.stderr!.on('data', (b) => { err += b; });
+    const ok = await new Promise<boolean>((res, rej) => {
+      const t = setTimeout(() => rej(new Error(`daemon never listened: ${err}`)), 20_000);
+      d.stdout!.on('data', (b) => { if (String(b).includes('listening')) { clearTimeout(t); res(true); } });
+      d.on('exit', () => { clearTimeout(t); if (/in use/.test(err)) res(false); else rej(new Error(`daemon exited: ${err}`)); });
     });
+    return ok ? d : start();
+  };
+  const d = await start();
+  try {
     const after = openDb(join(home, 'purr.db'));
     assert.equal(after.getRun(left.id)!.status, 'failed');
     assert.equal(after.getPushOutcomes('abcd000002', [repo.path])[0]?.kind, 'skipped');

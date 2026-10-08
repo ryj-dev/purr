@@ -106,6 +106,9 @@ export class PostPushWatcher {
         if (tip === body.sha) {
           const gh = await this.deps.ghAuthed();
           const pr = gh ? await this.deps.prForBranch(body.repoPath, body.branch) : null;
+          // gh can take a while: if the branch moved on meanwhile (a quick second push), look again from the top,
+          // so this older push doesn't take the newer one's place in the debounce
+          if ((await this.deps.lsRemote(body.repoPath, remote, body.branch)) !== body.sha) continue;
           // no open PR (a push to main, or a branch not yet proposed): no review, and nothing marked as handled, so
           // the poller reviews this commit when its PR is opened
           if (prOnly && gh && !pr) return note('no-pr', `${body.branch} has no open PR; it's reviewed once one is opened`);

@@ -115,6 +115,10 @@ test('ReviewWatch follows a newer push that took a commit\'s place, and stops wh
   assert.deepEqual(await new ReviewWatch(db, { ...q, sha: 'fafa01' }, openPr).check(), { run: null, done: false }, 'PR open: its review is coming');
   assert.match((await new ReviewWatch(db, { ...q, sha: 'fafa01' }, async () => null).check()).stop ?? '', /no open PR/);
 
+  // gh couldn't say whether there's a PR (offline, a timeout): keep waiting, don't conclude "won't be reviewed"
+  outcome('fbfb01', 'no-pr');
+  assert.deepEqual(await new ReviewWatch(db, { ...q, sha: 'fbfb01' }, async () => undefined).check(), { run: null, done: false });
+
   // pushes bouncing between two commits: no endless following, just waiting for the review that's coming
   outcome('baba01', 'superseded', 'baba02');
   outcome('baba02', 'superseded', 'baba01');
@@ -272,6 +276,18 @@ test('pushes that get no review of their own say why: superseded in the debounce
   // the branch moves past the push before it's seen: superseded by what's there, whether or not it's local
   await push('eee1', 'eee0', ['eee0', 'eee2']);
   assert.deepEqual(kind('eee1'), ['superseded', 'eee2']);
+
+  // A lands, but while gh is asked about its PR, B is pushed on top: A mustn't take B's place in the debounce
+  pr = { number: 3, title: 't', body: '', url: 'u', baseRefName: 'main', headRefName: 'feat', headRefOid: 'aba1', isDraft: false };
+  db.setSettings({ ...db.getSettings(), debounceSec: 3600 });
+  const slow = new PostPushWatcher(db, mgr, {
+    lsRemote: async () => (tips.length > 1 ? tips.shift()! : tips[0]) ?? null, ghAuthed: async () => true,
+    prForBranch: async () => { tips = ['aba2']; return pr; }, ancestry: async () => 'yes', confirmEveryMs: 5,
+  });
+  tips = ['aba0', 'aba1'];
+  await slow.pushIntent({ repoPath, branch: 'feat', sha: 'aba1', from: 'aba0' });
+  await slow.settled();
+  assert.deepEqual(kind('aba1'), ['superseded', 'aba2'], 'covered by B, not scheduled over it');
 
   // the branch moved to something that doesn't include the push (rejected: a teammate's went in instead)
   line = 'no';

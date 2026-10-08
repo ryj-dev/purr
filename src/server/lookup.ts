@@ -2,7 +2,7 @@
 import { existsSync, realpathSync } from 'node:fs';
 import type { Finding, Run } from '../shared/types.ts';
 import type { DB, RunQuery } from './db.ts';
-import { type PrInfo, githubRepo, prForBranch } from './gh.ts';
+import { type PrInfo, githubRepo, prLookup } from './gh.ts';
 import { remoteUrl, repoRoot } from './git.ts';
 import { TERMINAL } from './manager.ts';
 
@@ -54,11 +54,11 @@ export class ReviewWatch {
   q: RunQuery;
   notes: string[] = [];
   private db: DB;
-  private findPr: typeof prForBranch;
+  private findPr: typeof prLookup;
   private prChecked = new Map<string, { at: number; pr: PrInfo | null }>();
   private visited = new Set<string>();
   private via: { repoPath: string; branch: string } | null = null;
-  constructor(db: DB, q: RunQuery, findPr: typeof prForBranch = prForBranch) {
+  constructor(db: DB, q: RunQuery, findPr: typeof prLookup = prLookup) {
     this.db = db; this.q = q; this.findPr = findPr;
     if (q.sha) this.visited.add(q.sha.toLowerCase());
   }
@@ -88,6 +88,7 @@ export class ReviewWatch {
         // reviewed through its PR (once there's one, or by another clone): depends on that PR now
         if ((out.kind !== 'no-pr' && out.kind !== 'elsewhere') || !out.branch) continue;
         const pr = await this.prOf(out.repoPath, out.branch);
+        if (pr === undefined) return { run: null, done: false };   // gh couldn't say: no conclusions
         if (pr && !pr.isDraft) {
           // a PR is open now, and the poller reviews its head: this commit, or a later push that covers it
           if (pr.headRefOid && pr.headRefOid !== out.sha) {
@@ -122,6 +123,7 @@ export class ReviewWatch {
   /** For a push nothing here noted: reviewed if its branch's PR is open (not a draft), or if reviews aren't PR-only. */
   private async byPr(via: { repoPath: string; branch: string }): Promise<ReviewState> {
     const pr = await this.prOf(via.repoPath, via.branch);
+    if (pr === undefined) return { run: null, done: false };
     if (pr?.isDraft) return { run: null, done: true, stop: `${via.branch}'s PR is a draft: PuRR reviews it once it's marked ready` };
     if (!pr && this.db.getSettings().postPushPrsOnly) {
       return { run: null, done: true, stop: `${via.branch} has no open PR, so the newer push won't be reviewed until one is opened` };
@@ -129,14 +131,18 @@ export class ReviewWatch {
     return { run: null, done: false };
   }
 
-  /** The branch's open PR now (a draft included), or null; asked of gh at most every 20s. */
-  private async prOf(repoPath: string, branch: string): Promise<PrInfo | null> {
+  /**
+   * The branch's open PR now (a draft included), null for none, or undefined when gh couldn't say (then keep
+   * waiting rather than conclude anything). A real answer is kept for 20s.
+   */
+  private async prOf(repoPath: string, branch: string): Promise<PrInfo | null | undefined> {
     const c = this.prChecked.get(branch);
     if (c && Date.now() - c.at < 20_000) return c.pr;
-    const pr = await this.findPr(repoPath, branch).catch(() => null);
-    this.prChecked.set(branch, { at: Date.now(), pr });
+    const pr = await this.findPr(repoPath, branch).catch(() => undefined);
+    if (pr !== undefined) this.prChecked.set(branch, { at: Date.now(), pr });
     return pr;
   }
+
 
 }
 

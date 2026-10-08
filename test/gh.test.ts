@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { chmodSync, mkdtempSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { accountSignedInSince, commentOnPr, forgetGhAccounts, ghAccounts, openPrsForAllAccounts, parseGhStatus, prForBranch } from '../src/server/gh.ts';
+import { accountSignedInSince, prLookup, commentOnPr, forgetGhAccounts, ghAccounts, openPrsForAllAccounts, parseGhStatus, prForBranch } from '../src/server/gh.ts';
 
 const TWO = `github.com
   ✓ Logged in to github.com account work-me (keyring)
@@ -30,7 +30,9 @@ D="${dir}"
 case "$1 $2" in
   "auth status") cat "$D/status"; exit ${statusExit} ;;
   "auth token") [ "$6" = "no-token" ] && exit 1; echo "tok-$6" ;;
-  "pr view") f="$D/pr-\${GH_TOKEN:-none}.json"; [ -f "$f" ] || exit 1; cat "$f" ;;
+  "pr view") f="$D/pr-\${GH_TOKEN:-none}.json"; [ -f "$f" ] && { cat "$f"; exit 0; }
+    [ -e "$D/offline" ] && { echo "error connecting to api.github.com" >&2; exit 1; }
+    echo "no pull requests found for branch \"$3\"" >&2; exit 1 ;;
   "api graphql") f="$D/graphql-\${GH_TOKEN:-none}.json"; [ -f "$f" ] || exit 1; cat "$f" ;;
   "pr comment") cat > /dev/null; echo "\${GH_TOKEN:-none} $3" >> "$D/comments"; exit ${commentExit} ;;
   *) exit 2 ;;
@@ -213,4 +215,17 @@ test('a manual review keeps the account that found its PR', async () => {
     assert.equal(run.pr?.number, 7);
     assert.equal(run.pr?.account, 'work-me', 'found by the non-active account: it comments as that one');
   } finally { gh.restore(); db.close(); }
+});
+
+test("a branch's PR: found, none, or gh couldn't say, which is not the same as none", async () => {
+  const gh = fakeGh(TWO, { 'tok-work-me': pr('OPEN') });
+  try {
+    assert.equal((await prLookup(process.cwd(), 'feat'))?.account, 'work-me');
+  } finally { gh.restore(); }
+  const none = fakeGh(TWO, {});
+  try {
+    assert.equal(await prLookup(process.cwd(), 'feat'), null, 'gh says there is none');
+    writeFileSync(join(none.dir, 'offline'), '');
+    assert.equal(await prLookup(process.cwd(), 'feat'), undefined, "offline: gh couldn't say");
+  } finally { none.restore(); }
 });
