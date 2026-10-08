@@ -85,9 +85,22 @@ test('an older gh (one login, no --user) is used as it is, without a token per a
   try { assert.deepEqual(await ghAccounts(), []); } finally { out.restore(); }
 });
 
-test('a run keeps the account that found its PR, from the poller and from a manual review alike', async () => {
-  const { runPr } = await import('../src/server/manager.ts');
+test("a run created from the poller's request keeps the account that found its PR", async () => {
+  const { RunManager, runPr } = await import('../src/server/manager.ts');
+  const { ClaudeRunner } = await import('../src/server/claude.ts');
+  const { openDb } = await import('../src/server/db.ts');
+  const { ensureDefaults } = await import('../src/server/flows/store.ts');
+  const { tempRepo } = await import('./helpers.ts');
   assert.deepEqual(runPr({ ...pr('OPEN'), account: 'work-me' } as any), { number: 7, title: 't', body: '', url: 'u', account: 'work-me' });
+  const db = openDb(join(mkdtempSync(join(process.env.TMPDIR!, 'purr-db-')), 'purr.db'));
+  ensureDefaults(db);
+  try {
+    const mgr = new RunManager(db, new ClaudeRunner(db));
+    const openPr = { ...pr('OPEN'), repo: 'org/app', account: 'work-me' };   // as the poller passes it on
+    const run = mgr.createRun({ trigger: 'post-push', repoPath: tempRepo(), mode: 'range', head: 'abc', branch: 'feat', pr: openPr, base: 'main' })!;
+    assert.equal(run.pr?.account, 'work-me');
+    assert.equal(db.getRun(run.id)!.pr?.account, 'work-me', 'and keeps it once saved');
+  } finally { db.close(); }
 });
 
 test('a comment falls back, when the finding account has signed out, to an account that can see the PR', async () => {
@@ -101,6 +114,15 @@ test('a comment falls back, when the finding account has signed out, to an accou
     assert.equal(await commentOnPr(process.cwd(), 7, 'b', 'no-token'), false);
     assert.deepEqual(none.comments(), [], 'no account can see it: nothing posted');
   } finally { none.restore(); }
+});
+
+test("a keychain blip on the finding account doesn't switch who the comment is from", async () => {
+  // no-token is still signed in, but its token can't be read: no comment rather than one as somebody else
+  const gh = fakeGh(TWO.replace('account me', 'account no-token'), { 'tok-work-me': pr('OPEN') });
+  try {
+    assert.equal(await commentOnPr(process.cwd(), 7, 'b', 'no-token'), false);
+    assert.deepEqual(gh.comments(), []);
+  } finally { gh.restore(); }
 });
 
 test('a review posts its PR comment as the account that found the PR', async () => {

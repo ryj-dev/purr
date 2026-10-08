@@ -10,7 +10,7 @@ import { ClaudeRunner } from '../src/server/claude.ts';
 import { RunManager } from '../src/server/manager.ts';
 import { startHttp } from '../src/server/http.ts';
 import { PostPushWatcher } from '../src/server/triggers.ts';
-import { asString, installMissing, installTool, onToolchainChange, openSignIn, refreshToolchain, signInCommand, toolchainStatus } from '../src/server/toolchain.ts';
+import { HOMEBREW_INSTALL, asString, installMissing, installTool, onToolchainChange, openHomebrewInstall, openSignIn, refreshToolchain, signInCommand, toolchainStatus } from '../src/server/toolchain.ts';
 import { expectGhSignIn, forgetGhAccounts, ghAccounts } from '../src/server/gh.ts';
 
 // A PATH holding only fake tools (plus the system basics), and a fake brew that "installs" by writing a fake tool.
@@ -248,4 +248,30 @@ test('HTTP: /api/tools, installing, unknown tools, and scanners have nothing to 
     db.close();
     w.restore();
   }
+});
+
+test('Sign in for claude opens its own login, Install Homebrew opens its installer, and a failed install can be retried', async () => {
+  const w = fakeWorld({ brew: true, brewFails: true, have: ['claude'] });
+  const ran = join(w.dir, 'osascript.log');
+  writeFileSync(join(w.dir, 'osascript'), `#!/bin/sh\nprintf '%s\\n' "$@" >> "${ran}"\n`);
+  chmodSync(join(w.dir, 'osascript'), 0o755);
+  process.env.PURR_OSASCRIPT = join(w.dir, 'osascript');
+  try {
+    await openSignIn('claude');
+    assert.match(readFileSync(ran, 'utf8'), /do script ".*claude' auth login"/);
+
+    installTool('zizmor');
+    let z = await settled('zizmor');
+    assert.equal(z.job?.state, 'failed');
+    // brew works now (say the network is back): Install again
+    writeFileSync(process.env.PURR_BREW!, `#!/bin/sh\nprintf '#!/bin/sh\\necho "zizmor 9.9.9"\\n' > "${w.dir}/zizmor"\nchmod +x "${w.dir}/zizmor"\n`);
+    installTool('zizmor');
+    z = await settled('zizmor');
+    assert.deepEqual([z.installed, z.job], [true, null]);
+
+    process.env.PURR_BREW = '';                  // no Homebrew at all
+    refreshToolchain();
+    await openHomebrewInstall();
+    assert.ok(readFileSync(ran, 'utf8').includes(asString(HOMEBREW_INSTALL)), "Homebrew's own installer, in Terminal");
+  } finally { delete process.env.PURR_OSASCRIPT; w.restore(); }
 });
