@@ -86,18 +86,26 @@ export class PostPushWatcher {
     this.reporting.add(body.sha);
     const confirm = (async () => {
       const deadline = Date.now() + 90_000;
+      let from: string | null | undefined;   // the branch's tip at the first look that answered, before this push landed
       while (Date.now() < deadline) {
-        if ((await this.deps.lsRemote(body.repoPath, remote, body.branch)) === body.sha) {
+        const tip = await this.deps.lsRemote(body.repoPath, remote, body.branch);
+        if (from === undefined && tip) from = tip === body.sha ? null : tip;
+        // the branch moved past this push before it was seen landing (a bot or another machine pushed on top): that
+        // push is the one to review, by its own hook if one here reports it, else by this one
+        const overtaken = !!tip && tip !== body.sha && tip !== from;
+        if (overtaken && this.reporting.has(tip!)) return;
+        if (tip === body.sha || overtaken) {
           const gh = await this.deps.ghAuthed();
           const pr = gh ? await this.deps.prForBranch(body.repoPath, body.branch) : null;
-          // gh can be slow: if a newer push landed meanwhile, it's the one to review, and this older push mustn't take
+          // gh can be slow: if a newer push landed meanwhile, it's the one to review, and an older one mustn't take
           // its place in the debounce. Left to its own hook (one here is still confirming it) or to the poller (an
-          // open PR); with neither (another machine's or a bot's push, no PR), this hook reviews it, which covers
-          // this push too. No answer from ls-remote is no news
-          let head = body.sha;
+          // open PR it lists: only PRs by the signed-in accounts); otherwise (another machine's or a bot's push, or a
+          // teammate's PR) this hook reviews it, which covers this push too. No answer from ls-remote is no news
+          let head = overtaken ? tip! : body.sha;
           const again = await this.deps.lsRemote(body.repoPath, remote, body.branch);
-          if (again && again !== body.sha) {
-            if ((pr && !pr.isDraft) || this.reporting.has(again)) return;
+          if (again && again !== head) {
+            const pollerSees = !!pr && !pr.isDraft && this.seenPr.has(`${githubRepo(repo.remoteUrl)}#${pr.number}`);
+            if (pollerSees || this.reporting.has(again)) return;
             head = again;
           }
           // no open PR (a push to main, or a branch not yet proposed): no review, and nothing marked as handled, so
