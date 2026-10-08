@@ -58,9 +58,11 @@ export function ToolchainPopup({ onClose }: { onClose: () => void }) {
     // done once signed in and the account list changed; signing in again as a listed gh account changes nothing,
     // so that wait can be dismissed (or ends by itself after five minutes)
     const before = [...(t.auth?.accounts ?? [])].sort().join('\n');
+    const wasIn = !!t.auth?.signedIn;
     inTerminal(`signing in to ${t.name}`, () => api.signIn(t.name as 'claude' | 'gh'), (d) => {
       const now = d.tools.find((x) => x.name === t.name)?.auth;
-      return !!now?.signedIn && [...now.accounts].sort().join('\n') !== before;
+      // signed out before and in now (whether or not an account name shows), or a new account on a signed-in gh
+      return !!now?.signedIn && (!wasIn || [...now.accounts].sort().join('\n') !== before);
     });
   };
   const install = async (t: ToolStatus) => {

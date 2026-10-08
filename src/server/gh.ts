@@ -152,7 +152,9 @@ export async function commentOnPr(repoPath: string, number: number, body: string
   // as that account; else (signed out since, nothing sent yet) the first other account that can see the PR, which a
   // read-only `gh pr view` tells without posting anything
   let as: string | undefined = account ? undefined : accounts[0];   // none known: the active account, as gh would
-  if (account && (!multiAccount || await tokenFor(account))) as = account;
+  if (account && (!multiAccount || await tokenFor(account) || await tokenFor(account))) as = account;   // a second try: a keychain blip
+  // still signed in but no token even so: don't post as somebody else
+  if (account && !as && accounts.includes(account)) return false;
   for (const a of as ? [] : accounts.filter((x) => x !== account)) {
     if ((await gh(repoPath, ['pr', 'view', String(number), '--json', 'number'], { account: a })) !== null) { as = a; break; }
   }
