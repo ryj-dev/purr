@@ -132,3 +132,19 @@ export function extractJson(text: string, kind: 'array' | 'object' = 'array'): u
   }
   return found;
 }
+
+/**
+ * `fn` at most once per `ttlMs`: concurrent callers share one call, and a failed call isn't kept, so the next caller
+ * tries again.
+ */
+export function sharedCache<T>(fn: () => Promise<T>, ttlMs: number): () => Promise<T> {
+  let cache: { at: number; v: Promise<T> } | null = null;
+  return () => {
+    if (!cache || Date.now() - cache.at >= ttlMs) {
+      const v = fn();
+      cache = { at: Date.now(), v };
+      v.catch(() => { if (cache?.v === v) cache = null; });
+    }
+    return cache.v;
+  };
+}
