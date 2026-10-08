@@ -254,7 +254,10 @@ export function openDb(file = paths.db) {
       try { db.prepare('DELETE FROM push_outcomes WHERE sha = ? AND repo_path = ? AND branch = ?').run(sha.toLowerCase(), repoPath, branch ?? ''); } catch { /* as above */ }
     },
     /** The commit has its review now: whatever was noted about its pushes no longer matters. */
-    clearPushOutcome: (sha: string) => { try { db.prepare('DELETE FROM push_outcomes WHERE sha = ?').run(sha.toLowerCase()); } catch { /* as above */ } },
+    /** On every clone: pushed to another branch, the same commit may still be owed a review of its own there. */
+    clearPushOutcome: (sha: string, branch: string | null) => {
+      try { db.prepare('DELETE FROM push_outcomes WHERE sha = ? AND branch = ?').run(sha.toLowerCase(), branch ?? ''); } catch { /* as above */ }
+    },
     /**
      * What was noted about a commit's pushes (by sha prefix), newest first, from `repoPaths` only: another repo's
      * commit can share a short prefix. One per branch it went to.

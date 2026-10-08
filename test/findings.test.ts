@@ -157,6 +157,12 @@ test('ReviewWatch follows a newer push that took a commit\'s place, and stops wh
     { run: null, done: false });
   assert.match((await new ReviewWatch(db, { ...q, sha: 'dede01' }, async () => ({ number: 9, isDraft: true }) as any).check()).stop ?? '', /draft/);
 
+  // a review of the commit on one branch leaves what it's owed on another
+  outcome('efef01', 'no-pr');
+  db.setPushOutcome({ sha: 'efef01', kind: 'pending', reason: 'pending', repoPath, branch: 'feat-a' });
+  db.clearPushOutcome('efef01', 'feat-a');
+  assert.deepEqual(db.getPushOutcomes('efef01', [repoPath]).map((o) => [o.branch, o.kind]), [['feat', 'no-pr']]);
+
   // a restart loses what was pending
   outcome('abab01', 'pending');
   db.expirePendingPushes();
@@ -266,6 +272,12 @@ test('pushes that get no review of their own say why: superseded in the debounce
   assert.equal(kindOf('acd1'), 'pending', 'landed and scheduled');
   await push('acd2', undefined, ['acd2']);
   assert.equal(kindOf('acd2'), 'pending', 'already there at first look');
+
+  // something going wrong while confirming the push is reported, not left pending
+  const broken = new PostPushWatcher(db, mgr, { lsRemote: async () => { throw new Error('git crashed'); }, confirmMs: 60, confirmEveryMs: 10 });
+  await broken.pushIntent({ repoPath, branch: 'feat', sha: 'bad001', from: null });
+  await broken.settled();
+  assert.match(one(db, 'bad001', [repoPath])!.reason, /couldn't confirm the push: git crashed/);
 
   // a push that never lands is given up on, and says so
   const quick = new PostPushWatcher(db, mgr, { lsRemote: async () => 'old0', ghAuthed: async () => true, prForBranch: async () => null,

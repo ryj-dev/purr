@@ -126,7 +126,10 @@ export class PostPushWatcher {
         await new Promise((r) => setTimeout(r, this.deps.confirmEveryMs));
       }
       note('skipped', `the push never showed up on ${remote}/${body.branch}`);
-    })().catch(() => {});
+    })().catch((e) => {
+      // a waiting `purr findings` must hear that this went wrong, not wait out its timeout on "pending"
+      try { note('skipped', `PuRR couldn't confirm the push: ${e?.message ?? e}`); } catch { /* nothing more to do */ }
+    });
     this.confirming.add(confirm);
     void confirm.finally(() => this.confirming.delete(confirm));
     return { queued: true, prOnly };

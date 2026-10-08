@@ -44,7 +44,7 @@ test('git push: pre-push scan blocks a secret; a clean push lands and queues the
   const repo = tempRepo({ 'app.js': 'export const x = 1;\n' });
   sh(repo, 'remote', 'add', 'origin', remote);
   sh(repo, 'push', '-q', 'origin', 'main', '--no-verify');
-  await addRepo(db, repo);
+  const registered = await addRepo(db, repo);
   await installGlobalHooks();                      // writes the throwaway GIT_CONFIG_GLOBAL from helpers.ts
   writeFileSync(PID_FILE, String(process.pid));   // the service "runs" in this process
   try {
@@ -85,7 +85,7 @@ test('git push: pre-push scan blocks a secret; a clean push lands and queues the
     assert.equal(out.run.id, post!.id);
     assert.equal(out.findings.length, findings.length);
     assert.equal(w.status, findings.some((f) => f.severity === 'must_fix') ? 1 : 0, 'exit 1 on a must-fix, like purr run');
-    const prePush = db.listRuns(50).filter((r) => r.trigger === 'pre-push');
+    const prePush = db.listRuns(50).filter((r) => r.trigger === 'pre-push' && r.repoId === registered.id);
     assert.deepEqual(prePush.map((r) => r.status).sort(), ['blocked', 'passed']);
   } finally {
     await uninstallGlobalHooks();

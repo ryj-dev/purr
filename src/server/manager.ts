@@ -162,7 +162,7 @@ export class RunManager {
       this.debounces.delete(key);
       const run = this.createRun(req);
       if (!run) return skip('the post-push trigger is off for this repo');
-      if (req.head) this.db.clearPushOutcome(req.head);   // it has its review now
+      if (req.head) this.db.clearPushOutcome(req.head, req.branch ?? null);   // its push to this branch has its review now
       this.supersede(req.repoPath, req.branch ?? null, run.id);
       this.start(req, run);
     }, delay);

@@ -141,6 +141,23 @@ test('purr findings: exit codes, usage errors, --json and purr runs', async () =
   assert.match(text, /bug t2.*\[fixed since\]/);
   assert.match(text, /bug t3/);
   assert.match(purr(repoPath, 'findings', '--sha', 'dddd000001', '--all').stderr, /bug t1.*\[dismissed\]/);
+  assert.equal(purr(repoPath, 'findings', '--sha', 'dddd000001').status, 1, 't3 is still a must-fix');
+  const t2 = openDb();
+  const onlyFixed = run({ repoId: repo.id, repoPath, headSha: 'dddd000003', branch: 'txt', queuedAt: '2025-12-31T00:00:00.000Z' });   // before the review that fixed t2
+  t2.putRun(onlyFixed);
+  t2.setRunFindings(onlyFixed.id, [mustFix('t2')]);
+  t2.close();
+  assert.equal(purr(repoPath, 'findings', '--sha', 'dddd000003').status, 0, 'its only must-fix was fixed since');
+
+  // --trigger: full reviews by default, hook runs on request
+  const t3 = openDb();
+  t3.putRun(run({ id: 'run-hook1', repoId: repo.id, repoPath, headSha: 'dddd000004', branch: 'hooked', trigger: 'pre-push' }));
+  t3.close();
+  const listed = (...a: string[]) => purr(repoPath, 'runs', '--branch', 'hooked', ...a).stdout;
+  assert.doesNotMatch(listed(), /run-hook1/);
+  assert.match(listed('--trigger', 'pre-push'), /run-hook1/);
+  assert.match(listed('--trigger', 'all'), /run-hook1/);
+  assert.equal(purr(repoPath, 'runs', '--trigger', 'bogus').status, 4);
   assert.match(purr(repoPath, 'findings', '--sha', 'dddd000002').stderr, /Resolved by this review[\s\S]*fixed\s+a\.ts:1\s+bug t2/);
 
   // pushed as another name (git push -u origin foo:renamed): found under the name it was reviewed as
@@ -162,6 +179,22 @@ test('purr findings: exit codes, usage errors, --json and purr runs', async () =
   db5.putRun(run({ repoId: repo.id, repoPath, headSha: 'eeee000002', branch: 'feat2' }));
   db5.close();
   assert.equal(JSON.parse(purr(repoPath, 'findings', '--json').stdout).run.branch, 'feat2');
+
+  // a branch made from origin/main tracks main: main's review isn't its review
+  execFileSync('git', ['push', '-q', 'origin', 'main', '--no-verify'], { cwd: repoPath });
+  execFileSync('git', ['checkout', '-q', '-b', 'feat3', '--track', 'origin/main'], { cwd: repoPath });
+  const db6 = openDb();
+  db6.putRun(run({ repoId: repo.id, repoPath, headSha: 'eeee000003', branch: 'main' }));
+  db6.close();
+  assert.equal(purr(repoPath, 'findings').status, 3, "no review of feat3 yet, and main's doesn't count");
+
+  // nothing committed yet: --wait has no commit to wait for
+  const empty = mkdtempSync(join(process.env.TMPDIR!, 'purr-empty-'));
+  execFileSync('git', ['init', '-q', '-b', 'main', empty]);
+  const db7 = openDb();
+  await addRepo(db7, empty);
+  db7.close();
+  assert.equal(purr(empty, 'findings', '--wait').status, 4);
 
   const runs = purr(repoPath, 'runs', '--branch', 'feat');
   assert.equal(runs.status, 0);

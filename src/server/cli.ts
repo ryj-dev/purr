@@ -9,7 +9,7 @@ import { type DB, type RunQuery, openDb } from './db.ts';
 import { ensureDefaults } from './flows/store.ts';
 import { exportFlow, importFlow, previewImport } from './flows/share.ts';
 import { readFileSync } from 'node:fs';
-import { currentBranch, headSha, repoRoot, upstreamBranch } from './git.ts';
+import { currentBranch, defaultBaseRef, headSha, repoRoot, upstreamBranch } from './git.ts';
 import { ReviewWatch, blockSessions, currentFindings, isActive, isFinished, resolvedBy, sameRepoIds, waitForReview } from './lookup.ts';
 import { addRepo, startHttp } from './http.ts';
 import { installGlobalHooks, removePidFile, uninstallGlobalHooks, writePidFile } from './globalHooks.ts';
@@ -260,7 +260,12 @@ async function runQuery(db: DB, currentBranchByDefault: boolean): Promise<RunQue
     q.branch = local;
     // reviews are recorded under the name it was pushed as (git push -u origin foo:bar is reviewed as bar): the
     // upstream's name, if nothing is recorded under the local one (a branch made from origin/main tracks main)
-    if (local && !db.findRuns({ ...q, limit: 1 }).length) q.branch = (await upstreamBranch(cwd, local)) ?? local;
+    if (local && !db.findRuns({ ...q, limit: 1 }).length) {
+      const up = await upstreamBranch(cwd, local);
+      // but not the default branch: a branch made from origin/main tracks main, and main's review isn't its review
+      const dflt = (await defaultBaseRef(cwd))?.replace(/^[^/]+\//, '');
+      if (up && up !== dflt) q.branch = up;
+    }
     // detached (a review worktree, CI): the commit checked out, not every branch's latest review
     if (!q.branch) q.sha = await headSha(cwd);
     if (!q.branch && !q.sha) throw new UsageError('nothing is checked out here: pass --pr, --branch or --sha');
@@ -293,7 +298,11 @@ async function findingsCmd(): Promise<number> {
     if (wait && !runId) {
       // with nothing to narrow it, wait for the review of the commit checked out here (the one just pushed), under
       // whatever name it was pushed as
-      if (q.pr == null && !q.sha && !value('branch')) { q.sha = await headSha(value('repo') ?? process.cwd()); q.branch = null; }
+      if (q.pr == null && !q.sha && !value('branch')) {
+        q.sha = await headSha(value('repo') ?? process.cwd());
+        if (!q.sha) throw new UsageError('nothing is committed here yet: pass --pr, --branch or --sha');
+        q.branch = null;
+      }
       const watch = new ReviewWatch(db, q);
       const label = describe(q);
       let notes = 0;
