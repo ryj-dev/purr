@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { chmodSync, mkdtempSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { commentOnPr, forgetGhAccounts, ghAccounts, parseGhStatus, prForBranch } from '../src/server/gh.ts';
+import { accountSignedInSince, commentOnPr, forgetGhAccounts, ghAccounts, openPrsForAllAccounts, parseGhStatus, prForBranch } from '../src/server/gh.ts';
 
 const TWO = `github.com
   ✓ Logged in to github.com account work-me (keyring)
@@ -31,6 +31,7 @@ case "$1 $2" in
   "auth status") cat "$D/status"; exit ${statusExit} ;;
   "auth token") [ "$6" = "no-token" ] && exit 1; echo "tok-$6" ;;
   "pr view") f="$D/pr-\${GH_TOKEN:-none}.json"; [ -f "$f" ] || exit 1; cat "$f" ;;
+  "api graphql") f="$D/graphql-\${GH_TOKEN:-none}.json"; [ -f "$f" ] || exit 1; cat "$f" ;;
   "pr comment") cat > /dev/null; echo "\${GH_TOKEN:-none} $3" >> "$D/comments"; exit ${commentExit} ;;
   *) exit 2 ;;
 esac
@@ -39,7 +40,7 @@ esac
   const path = process.env.PATH;
   process.env.PATH = `${dir}:${path}`;
   forgetGhAccounts();
-  return { dir, comments: () => existsSync(join(dir, 'comments')) ? readFileSync(join(dir, 'comments'), 'utf8').trim().split('\n') : [],
+  return { dir, setStatus: (s: string) => writeFileSync(join(dir, 'status'), s), comments: () => existsSync(join(dir, 'comments')) ? readFileSync(join(dir, 'comments'), 'utf8').trim().split('\n') : [],
     restore: () => { process.env.PATH = path; forgetGhAccounts(); } };
 }
 
@@ -156,4 +157,45 @@ test('the Toolchain popup shows gh signed in, but no made-up account name, when 
     const auth = (await toolchainStatus()).tools.find((t) => t.name === 'gh')!.auth;
     assert.deepEqual(auth, { signedIn: true, accounts: [], detail: 'signed in' });
   } finally { gh.restore(); refreshToolchain(); }
+});
+
+test("the PR fetch says which accounts answered, when each was asked, and since when a newly listed one can have been signed in", async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: 1_000_000 });
+  const one = (login: string) => `  ✓ Logged in to github.com account ${login} (keyring)\n  - Active account: true\n`;
+  const gh = fakeGh(one('early-me'), {});
+  writeFileSync(join(gh.dir, 'graphql-tok-early-me.json'), JSON.stringify({ data: { viewer: { pullRequests: { nodes: [
+    { number: 1, title: 't', body: null, url: 'u', isDraft: false, createdAt: 'x', baseRefName: 'main', headRefName: 'f', headRefOid: 'a',
+      repository: { nameWithOwner: 'Org/App' } }] } } } }));
+  try {
+    await ghAccounts();
+    t.mock.timers.tick(6 * 60_000);              // the five-minute account cache runs out...
+    gh.setStatus(one('early-me') + one('late-me').replace('true', 'false'));   // ...after late-me signed in, in a terminal
+    const f = (await openPrsForAllAccounts())!;
+    assert.deepEqual(f.accounts, ['early-me', 'late-me']);
+    assert.deepEqual(f.answered, ['early-me'], "late-me's query failed");
+    assert.deepEqual(f.prs.map((p) => [p.repo, p.account, p.body]), [['org/app', 'early-me', '']]);
+    assert.equal(f.askedAt!['early-me'], 1_000_000 + 6 * 60_000);
+    assert.equal(accountSignedInSince('late-me'), 1_000_000, 'not listed at the read before: signed in since then');
+  } finally { t.mock.timers.reset(); gh.restore(); }
+});
+
+test('a manual review keeps the account that found its PR', async () => {
+  const { RunManager } = await import('../src/server/manager.ts');
+  const { ClaudeRunner } = await import('../src/server/claude.ts');
+  const { openDb } = await import('../src/server/db.ts');
+  const { tempRepo, sh } = await import('./helpers.ts');
+  const db = openDb(join(mkdtempSync(join(process.env.TMPDIR!, 'purr-db-')), 'purr.db'));
+  const repo = tempRepo();
+  const head = sh(repo, 'rev-parse', 'HEAD');
+  const gh = fakeGh(TWO, { 'tok-work-me': { ...pr('OPEN'), headRefName: 'main', headRefOid: head } });
+  try {
+    const mgr = new RunManager(db, new ClaudeRunner(db));
+    const req = { trigger: 'manual' as const, repoPath: repo, mode: 'range' as const, flowId: null, base: null, head: null };
+    const { ensureDefaults } = await import('../src/server/flows/store.ts');
+    ensureDefaults(db);
+    const run = mgr.createRun(req)!;
+    await (mgr as any).prepare(req, run);
+    assert.equal(run.pr?.number, 7);
+    assert.equal(run.pr?.account, 'work-me', 'found by the non-active account: it comments as that one');
+  } finally { gh.restore(); db.close(); }
 });

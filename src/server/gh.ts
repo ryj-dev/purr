@@ -68,9 +68,15 @@ export async function ghAccounts(): Promise<string[]> {
     list = parsed.accounts.length || r.code !== 0 ? parsed.accounts : [GH_DEFAULT_LOGIN];
     if (r.code === 0 && !parsed.accounts.length) multiAccount = false;   // that placeholder has no token: use gh's own login
   } catch { /* gh missing */ }
+  // an account not in the last list was signed in since that list was read: not before it
+  for (const a of list) if (!signedInSince.has(a)) signedInSince.set(a, accountsCache?.at ?? Date.now());
   accountsCache = { at: Date.now(), list };
   return list;
 }
+
+/** Per account, the earliest it can have been signed in: when PuRR last read an account list without it. */
+const signedInSince = new Map<string, number>();
+export const accountSignedInSince = (account: string) => signedInSince.get(account) ?? null;
 
 /** Forget the cached account list (after a sign-in, or gh was just installed). */
 export function forgetGhAccounts() { accountsCache = null; }
@@ -110,7 +116,7 @@ const OPEN_PRS = `query($n: Int!) { viewer { login pullRequests(first: $n, state
  * Open PRs; the accounts whose query got an answer (one that failed this time may have PRs it didn't list); and every
  * account asked (default: those that answered).
  */
-export interface PrFetch { prs: OpenPr[]; answered: string[]; accounts?: string[]; askedAt?: Record<string, number> }
+export interface PrFetch { prs: OpenPr[]; answered: string[]; accounts?: string[]; askedAt?: Record<string, number>; signedInSince?: Record<string, number> }
 
 /** Every open PR authored by any signed-in account: one GraphQL call per account. null if gh isn't usable at all. */
 export async function openPrsForAllAccounts(): Promise<PrFetch | null> {
@@ -129,7 +135,9 @@ export async function openPrsForAllAccounts(): Promise<PrFetch | null> {
       answered.push(account);
     } catch { /* skip this account this time */ }
   }
-  return { prs, answered, accounts, askedAt };
+  const since: Record<string, number> = {};
+  for (const a of accounts) { const t = accountSignedInSince(a); if (t !== null) since[a] = t; }
+  return { prs, answered, accounts, askedAt, signedInSince: since };
 }
 
 /**
