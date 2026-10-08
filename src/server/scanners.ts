@@ -1,7 +1,13 @@
-// Deterministic scanners on the lines a change ADDS, ported from tc-ai-reviewer (src/worker/scanners.py):
-// gitleaks (any hit), zizmor (high severity), osv-scanner (new critical/high vulns vs base).
-// gitleaks runs on a sparse copy of each changed file holding only the added lines (others blank), so line numbers
-// stay right. Only the rule id and description are kept, never the secret itself.
+// Deterministic scanners on the lines a change ADDS, ported from tc-ai-reviewer (src/worker/scanners.py). Blocking:
+// betterleaks (any hit), zizmor (high; the unpinned-* rules only consider), osv-scanner (new critical/high vulns vs
+// base). Advice, never blocking: hadolint (error level, changed Dockerfiles) and actionlint (changed workflows), both
+// consider. Repeats of one rule in one file become one finding with `lines`. Everything is offline except osv, which
+// sends package names and versions.
+//
+// betterleaks (the gitleaks successor, same flags and report) runs on a sparse copy of each changed file holding only
+// the added lines (others blank), so line numbers stay right. Only the rule id and description are kept, never the
+// secret itself, and its live validation (which would send the secret to its provider) stays off. Without betterleaks,
+// an installed gitleaks does the same job.
 
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from 'node:fs';
 import { basename, dirname, join, relative } from 'node:path';
@@ -10,7 +16,12 @@ import { type ChangeSpec, type ChangedFile, fileAt, fileAtBase } from './git.ts'
 import { exec, newId, paths } from './util.ts';
 
 const WF = /(^|\/)\.github\/workflows\/[^/]+\.ya?ml$/;
-const LOCKS = /(^|\/)(package-lock\.json|yarn\.lock|pnpm-lock\.yaml|composer\.lock|uv\.lock|poetry\.lock|Pipfile\.lock|requirements[^/]*\.txt|Gemfile\.lock|go\.sum|Cargo\.lock)$/;
+const DOCKERFILE = /(^|\/)(Dockerfile(\.[^/]+)?|[^/]+\.Dockerfile)$/;
+// full pinned trees osv-scanner reads as they are (go.mod lists every module the build uses; osv can't parse go.sum)
+const LOCKS = /(^|\/)(package-lock\.json|npm-shrinkwrap\.json|yarn\.lock|pnpm-lock\.yaml|composer\.lock|uv\.lock|poetry\.lock|pdm\.lock|Pipfile\.lock|requirements[^/]*\.txt|Gemfile\.lock|go\.mod|Cargo\.lock)$/;
+// a change's own scanner config or ignore file must never steer the scan of that change
+const SCAN_CONFIG = new Set(['.betterleaks.toml', '.gitleaks.toml', '.betterleaksignore', '.gitleaksignore']);
+const FILE_MS = 60_000;   // one hadolint / actionlint call (one file)
 
 // zizmor rule -> [headline, what goes wrong, fix]
 const ZIZMOR: Record<string, [string, string, string]> = {
@@ -71,11 +82,14 @@ function secretKind(rule: string) {
 
 const safePath = (p: string) => !p.split('/').includes('..') && !p.startsWith('/');
 
-async function gitleaks(blockId: string, files: ChangedFile[], work: string): Promise<Finding[] | null> {
-  const root = join(work, 'gitleaks');
+const isMissing = (e: any) => e?.code === 'ENOENT';
+
+/** betterleaks, or gitleaks if only that is installed: same report either way, findings say which one ran. */
+async function secrets(blockId: string, files: ChangedFile[], work: string): Promise<Finding[] | null> {
+  const root = join(work, 'secrets');
   let any = false;
   for (const f of files) {
-    if (!f.added.size || f.binary || !safePath(f.path)) continue;
+    if (!f.added.size || f.binary || !safePath(f.path) || SCAN_CONFIG.has(basename(f.path))) continue;
     const max = Math.max(...f.added.keys());
     const lines: string[] = [];
     for (let i = 1; i <= max; i++) lines.push(f.added.get(i) ?? '');
@@ -84,12 +98,24 @@ async function gitleaks(blockId: string, files: ChangedFile[], work: string): Pr
     any = true;
   }
   if (!any) return null;
-  const rep = join(work, 'gitleaks.json');
-  const r = await exec('gitleaks', ['dir', root, '--no-banner', '--redact', '-f', 'json', '-r', rep, '--exit-code', '0', '-l', 'error'],
-    { timeoutMs: 300_000 });
-  if (r.code !== 0 && !existsSync(rep)) throw new Error(`gitleaks exited ${r.code}: ${clean(r.stderr)}`);
-  const hits = existsSync(rep) ? (JSON.parse(readFileSync(rep, 'utf8') || '[]') as Array<Record<string, any>>) : [];
-  return hits.map((h) => hit(blockId, 'gitleaks', relative(root, h.File), h.StartLine ?? null, h.RuleID, 'secrets',
+  const rep = join(work, 'secrets.json');
+  const common = ['dir', root, '--no-banner', '--no-color', '--redact', '-f', 'json', '-r', rep, '--exit-code', '0', '-l', 'error'];
+  // run in the scratch folder, not the repo: a config file there must not steer the scan.
+  // --validation=false: never send a found secret to its provider to check it (betterleaks' default; said on purpose)
+  let tool: 'betterleaks' | 'gitleaks' = 'betterleaks';
+  let r;
+  try {
+    r = await exec('betterleaks', [...common, '--validation=false'], { cwd: work, timeoutMs: 300_000 });
+  } catch (e) {
+    if (!isMissing(e)) throw e;
+    tool = 'gitleaks';   // older installs: gitleaks has the same flags, and never validates
+    r = await exec('gitleaks', common, { cwd: work, timeoutMs: 300_000 });
+  }
+  if (r.code !== 0) throw new Error(`${tool} exited ${r.code}: ${clean(r.stderr)}`);
+  let hits: Array<Record<string, any>> | null = null;
+  try { hits = existsSync(rep) ? JSON.parse(readFileSync(rep, 'utf8') || 'null') : null; } catch { /* below */ }
+  if (!Array.isArray(hits)) throw new Error(`${tool} wrote no readable report`);   // never a silent pass
+  return hits.map((h) => hit(blockId, tool, relative(root, h.File), h.StartLine ?? null, h.RuleID, 'secrets',
     'A secret is committed here; anyone with repo access can use it',
     `This line holds what looks like a real ${secretKind(h.RuleID)}. Anyone who can read the repo, or its history, can use it.`,
     "Revoke and rotate it now; deleting the line doesn't remove it from git history."));
@@ -127,10 +153,14 @@ async function zizmor(blockId: string, files: ChangedFile[], change: ChangeSpec,
 
 type Vuln = { ver: string; sev: number; summary: string; fixed: string[] };
 async function osvScan(path: string): Promise<Map<string, Vuln>> {
-  const r = await exec('osv-scanner', ['scan', 'source', '-L', path, '--format', 'json'], { timeoutMs: 300_000 });
+  // --no-resolve: the file is a full pinned tree, read as it is
+  const r = await exec('osv-scanner', ['scan', 'source', '--no-resolve', '--all-packages', '--format', 'json', '-L', path], { timeoutMs: 120_000 });
   const vulns = new Map<string, Vuln>();
-  let data: any = {};
-  try { data = JSON.parse(r.stdout || '{}'); } catch { if (r.code > 1) throw new Error(`osv-scanner failed: ${clean(r.stderr)}`); }
+  if (r.code === 128) return vulns;   // no packages in the file
+  let data: any = null;
+  try { data = r.code === 0 || r.code === 1 ? JSON.parse(r.stdout) : null; } catch { /* below */ }
+  // an unreadable result is never a clean pass
+  if (!data || typeof data !== 'object') throw new Error(`osv-scanner failed (exit ${r.code}): ${clean(r.stderr)}`);
   for (const res of data.results ?? []) {
     for (const pk of res.packages ?? []) {
       const sev = Math.max(0, ...(pk.groups ?? []).map((g: any) => Number(g.max_severity || 0)));
@@ -213,20 +243,96 @@ async function osv(blockId: string, files: ChangedFile[], change: ChangeSpec, wo
   return out;
 }
 
+type Incomplete = Array<{ file: string; reason: string }>;
+
+/** Changed files matching `rx` that still exist, with their contents written under `root`. */
+async function writeChanged(files: ChangedFile[], rx: RegExp, change: ChangeSpec, root: string) {
+  const picked = files.filter((f) => rx.test(f.path) && f.status !== 'deleted' && safePath(f.path) && !f.path.endsWith('.dockerignore'));
+  for (const f of picked) {
+    mkdirSync(dirname(join(root, f.path)), { recursive: true });
+    writeFileSync(join(root, f.path), (await fileAt(change, f.path)) ?? '');
+  }
+  return picked;
+}
+
+/**
+ * Runs `args(path)` once per file, each with its own timeout -> [(file, parsed JSON list)]. A file whose run fails is
+ * listed in `incomplete` (state partial); every file failing throws (state failed). Never a silent pass.
+ */
+async function eachFile(tool: string, picked: ChangedFile[], args: (path: string) => string[], cwd: string, ok: number[], incomplete: Incomplete) {
+  const out: Array<[ChangedFile, Array<Record<string, any>>]> = [];
+  for (const f of picked) {
+    const r = await exec(tool, args(f.path), { cwd, timeoutMs: FILE_MS });   // a missing tool throws ENOENT: not installed
+    if (r.timedOut) { incomplete.push({ file: f.path, reason: `timed out after ${FILE_MS / 1000}s` }); continue; }
+    if (!ok.includes(r.code)) { incomplete.push({ file: f.path, reason: `${tool} exited ${r.code}: ${clean(r.stderr)}` }); continue; }
+    let got: unknown = null;
+    try { got = JSON.parse(r.stdout || 'null'); } catch { /* below */ }
+    // actionlint prints nothing at all for a clean file
+    if (got === null && tool === 'actionlint' && r.code === 0 && !r.stdout.trim()) got = [];
+    if (!Array.isArray(got)) { incomplete.push({ file: f.path, reason: `${tool}'s output was unreadable` }); continue; }
+    out.push([f, got]);
+  }
+  if (incomplete.length && !out.length) throw new Error(incomplete[0].reason);
+  return out;
+}
+
+/**
+ * Error-level hadolint results on lines this change adds (warnings, info and style are left out) -> consider findings.
+ * A result sits on an instruction's first line, so an edit only to a later line of a multi-line RUN isn't raised.
+ */
+async function hadolint(blockId: string, files: ChangedFile[], change: ChangeSpec, work: string, incomplete: Incomplete): Promise<Finding[] | null> {
+  const root = join(work, 'hadolint');
+  const picked = await writeChanged(files, DOCKERFILE, change, root);
+  if (!picked.length) return null;
+  const out: Finding[] = [];
+  for (const [f, res] of await eachFile('hadolint', picked, (p) => ['--no-fail', '--no-color', '-f', 'json', p], root, [0], incomplete)) {
+    for (const h of res) {
+      if (h.level !== 'error' || !f.added.has(h.line)) continue;
+      out.push(hit(blockId, 'hadolint', f.path, h.line, h.code, 'lint', `Dockerfile problem: ${clean(h.message).slice(0, 120)}`,
+        clean(h.message), `See hadolint's rule \`${h.code}\` for the fix.`, 'consider'));
+    }
+  }
+  return out;
+}
+
+/** actionlint errors on lines this change adds to a workflow -> consider findings. Its shellcheck and pyflakes checks run
+ * when those tools are installed. */
+async function actionlint(blockId: string, files: ChangedFile[], change: ChangeSpec, work: string, incomplete: Incomplete): Promise<Finding[] | null> {
+  const root = join(work, 'actionlint');
+  const picked = await writeChanged(files, WF, change, root);
+  if (!picked.length) return null;
+  const out: Finding[] = [];
+  for (const [f, res] of await eachFile('actionlint', picked, (p) => ['-no-color', '-format', '{{json .}}', p], root, [0, 1], incomplete)) {
+    for (const h of res) {
+      if (!f.added.has(h.line)) continue;
+      out.push(hit(blockId, 'actionlint', f.path, h.line, h.kind, 'lint', `Workflow problem: ${clean(h.message).slice(0, 120)}`,
+        clean(h.message), 'Fix the workflow so GitHub runs it as intended.', 'consider'));
+    }
+  }
+  return out;
+}
+
 /** Runs one scanner. Never throws: a missing or failing tool is reported in the state and yields no findings. */
 export async function runScanner(name: ScannerName, blockId: string, files: ChangedFile[], change: ChangeSpec):
   Promise<{ findings: Finding[]; state: ScannerState }> {
   const work = mkdtempSync(join(paths.scratch, `${name}-`));
   const t0 = Date.now();
+  const incomplete: Incomplete = [];
+  const secs = () => (Date.now() - t0) / 1000;
   try {
-    const got = name === 'gitleaks' ? await gitleaks(blockId, files, work)
+    // 'gitleaks': a flow saved before betterleaks replaced it
+    const got = name === 'betterleaks' || name === 'gitleaks' ? await secrets(blockId, files, work)
       : name === 'zizmor' ? await zizmor(blockId, files, change, work)
+      : name === 'hadolint' ? await hadolint(blockId, files, change, work, incomplete)
+      : name === 'actionlint' ? await actionlint(blockId, files, change, work, incomplete)
       : await osv(blockId, files, change, work);
     const findings = got ? group(got) : [];
-    return { findings, state: got === null ? { state: 'n/a', secs: (Date.now() - t0) / 1000 } : { state: 'ran', hits: findings.length, secs: (Date.now() - t0) / 1000 } };
+    if (got === null) return { findings, state: { state: 'n/a', secs: secs() } };
+    return { findings, state: incomplete.length ? { state: 'partial', hits: findings.length, incomplete, secs: secs() } : { state: 'ran', hits: findings.length, secs: secs() } };
   } catch (e: any) {
-    const missing = e?.code === 'ENOENT';
-    return { findings: [], state: { state: missing ? 'not installed' : 'failed', error: missing ? `${name} is not on PATH` : String(e?.message ?? e), secs: (Date.now() - t0) / 1000 } };
+    const missing = isMissing(e);
+    const tool = name === 'gitleaks' ? 'betterleaks' : name;
+    return { findings: [], state: { state: missing ? 'not installed' : 'failed', error: missing ? `${tool} is not on PATH` : String(e?.message ?? e), secs: secs() } };
   } finally {
     rmSync(work, { recursive: true, force: true });
   }

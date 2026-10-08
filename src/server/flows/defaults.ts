@@ -1,4 +1,5 @@
 import type { Block, BlockConfigMap, BlockType, Edge, Flow, ScannerName, TriggerKind } from '../../shared/types.ts';
+import { SCANNER_LABEL } from '../../shared/scanners.ts';
 import { blockTypeInfo } from './blockTypes.ts';
 import { CONTEXT_PROMPT, DEFAULT_ALLOWED_TOOLS, LENS_PROMPTS, SEVERITY_PROMPT, VERIFY_PROMPT } from './prompts.ts';
 
@@ -11,34 +12,34 @@ function block<T extends BlockType>(id: string, type: T, label: string, col: num
   };
 }
 const edge = (source: string, target: string): Edge => ({ id: `e-${source}-${target}`, source, target });
-const scanner = (name: ScannerName, col: number, row: number) =>
-  block(`scan-${name}`, 'scanner', { gitleaks: 'gitleaks · secrets', zizmor: 'zizmor · workflows', osv: 'osv · dependencies' }[name], col, row, { scanner: name });
+const scanner = (name: ScannerName, col: number, row: number) => block(`scan-${name}`, 'scanner', SCANNER_LABEL[name], col, row, { scanner: name });
 
 const STAMP = '2026-10-07T00:00:00.000Z';
 
 function preCommit(): Flow {
   const blocks = [
-    scanner('gitleaks', 0, 1),
+    scanner('betterleaks', 0, 1),
     block('gate', 'gate', 'Block commit on must-fix', 1, 1, { blockOn: 'must_fix' }),
     block('out', 'output', 'Results', 2, 1, { notify: false, postPrComment: false }),
   ];
   return {
     id: 'default-pre-commit', name: 'Default · Pre-commit scan', isDefault: true, createdAt: STAMP, updatedAt: STAMP,
-    description: 'gitleaks on the staged lines. A secret blocks the commit. No Claude, so it adds no quota and runs in a second or two.',
-    blocks, edges: [edge('scan-gitleaks', 'gate'), edge('gate', 'out'), edge('scan-gitleaks', 'out')],
+    description: 'betterleaks on the staged lines. A secret blocks the commit. No Claude, so it adds no quota and runs in a second or two.',
+    blocks, edges: [edge('scan-betterleaks', 'gate'), edge('gate', 'out'), edge('scan-betterleaks', 'out')],
   };
 }
 
 function prePush(): Flow {
   const blocks = [
-    scanner('gitleaks', 0, 0), scanner('zizmor', 0, 1), scanner('osv', 0, 2),
+    // the blocking three only: hadolint and actionlint advise (consider), so they wait for the review after the push
+    scanner('betterleaks', 0, 0), scanner('zizmor', 0, 1), scanner('osv', 0, 2),
     block('gate', 'gate', 'Block push on must-fix', 1, 1, { blockOn: 'must_fix' }),
     block('out', 'output', 'Results', 2, 1, { notify: false, postPrComment: false }),
   ];
-  const s = ['scan-gitleaks', 'scan-zizmor', 'scan-osv'];
+  const s = ['scan-betterleaks', 'scan-zizmor', 'scan-osv'];
   return {
     id: 'default-pre-push', name: 'Default · Pre-push scan', isDefault: true, createdAt: STAMP, updatedAt: STAMP,
-    description: 'gitleaks, zizmor and osv-scanner on the commits being pushed. A must-fix hit blocks the push. No Claude.',
+    description: 'betterleaks, zizmor and osv-scanner on the commits being pushed. A must-fix hit blocks the push. No Claude.',
     blocks, edges: [...s.map((x) => edge(x, 'gate')), ...s.map((x) => edge(x, 'out')), edge('gate', 'out')],
   };
 }
@@ -46,7 +47,7 @@ function prePush(): Flow {
 function fullReview(): Flow {
   const lensKeys = Object.keys(LENS_PROMPTS);
   const blocks: Block[] = [
-    scanner('gitleaks', 0, 1.5), scanner('zizmor', 0, 2.5), scanner('osv', 0, 3.5),
+    scanner('betterleaks', 0, 0.5), scanner('zizmor', 0, 1.5), scanner('osv', 0, 2.5), scanner('hadolint', 0, 3.5), scanner('actionlint', 0, 4.5),
     block('context', 'context', 'Context · gather facts', 1, 2.5, {
       model: 'opus', effort: 'medium', tools: ['Read', 'Grep', 'Glob', 'Bash'], allowedTools: DEFAULT_ALLOWED_TOOLS,
       maxTurns: 40, prompt: CONTEXT_PROMPT, includeDiff: true, includeFiles: true, budgetChars: 140_000,
@@ -66,7 +67,7 @@ function fullReview(): Flow {
     }),
     block('out', 'output', 'Results', 7, 2.5, { notify: true, postPrComment: false }),
   ];
-  const scans = ['scan-gitleaks', 'scan-zizmor', 'scan-osv'];
+  const scans = ['scan-betterleaks', 'scan-zizmor', 'scan-osv', 'scan-hadolint', 'scan-actionlint'];
   const edges: Edge[] = [
     ...scans.map((s) => edge(s, 'context')),
     ...scans.map((s) => edge(s, 'out')),            // scanner hits are deterministic: straight to the results

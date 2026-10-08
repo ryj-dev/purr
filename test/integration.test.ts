@@ -43,9 +43,12 @@ test('full review flow: scanners -> seed -> branch x6 -> merge -> severity -> ve
   const blocks = db.listBlockRuns(run.id);
   const byId = Object.fromEntries(blocks.map((b) => [b.blockId, b]));
   for (const b of blocks) assert.equal(b.status, 'done', `${b.blockId}: ${b.error}`);
-  assert.equal(byId['scan-gitleaks'].output?.scanner?.state, 'ran');
-  assert.equal(byId['scan-gitleaks'].output?.findings?.length, 1, 'gitleaks flags the AWS key');
+  // betterleaks, or the gitleaks it falls back to on a machine without it: real tools, the same report
+  assert.equal(byId['scan-betterleaks'].output?.scanner?.state, 'ran');
+  assert.equal(byId['scan-betterleaks'].output?.findings?.length, 1, 'the secrets scanner flags the AWS key');
   assert.equal(byId['scan-zizmor'].output?.scanner?.state, 'n/a');
+  assert.equal(byId['scan-hadolint'].output?.scanner?.state, 'n/a', 'no Dockerfile changed');
+  assert.equal(byId['scan-actionlint'].output?.scanner?.state, 'n/a', 'no workflow changed');
 
   // every lens forked the seed session
   const calls = readFileSync(log, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
@@ -65,8 +68,8 @@ test('full review flow: scanners -> seed -> branch x6 -> merge -> severity -> ve
   const div = findings.find((f) => /Divides/.test(f.title));
   assert.equal(div?.severity, 'consider');
   assert.ok(findings.every((f) => f.fingerprint && f.ledger === 'new'));
-  // the security lens' AWS-key finding duplicates the gitleaks hit: merged into it, scanner copy wins
-  const key = findings.find((f) => f.source.scanner === 'gitleaks')!;
+  // the security lens' AWS-key finding duplicates the secrets scanner's hit: merged into it, scanner copy wins
+  const key = findings.find((f) => f.source.scanner === 'betterleaks' || f.source.scanner === 'gitleaks')!;
   assert.deepEqual(key.alsoFoundBy, ['lens-security']);
   // the verifier refuted the concurrency lens' must-fix, so it is gone
   assert.ok(!titles.some((t) => /Race on shared counter/.test(t)), 'refuted finding dropped');
@@ -163,10 +166,10 @@ test('HTTP API: state, default flows read-only, duplicate/edit/delete, triggers,
     const dup = await api('POST', '/api/flows', { duplicateOf: 'default-review' });
     assert.equal(dup.status, 201);
     assert.equal(dup.json.isDefault, false);
-    assert.equal(dup.json.blocks.length, 15);
+    assert.equal(dup.json.blocks.length, 17, 'five scanners, context, branch, six lenses, merge, severity, verify, results');
     const edited = await api('PUT', `/api/flows/${dup.json.id}`, { name: 'Mine', blocks: dup.json.blocks.filter((b: any) => b.id !== 'lens-tests'), edges: dup.json.edges.filter((e: any) => !e.id.includes('lens-tests')) });
     assert.equal(edited.json.name, 'Mine');
-    assert.equal(edited.json.blocks.length, 14);
+    assert.equal(edited.json.blocks.length, 16);
     const t = await api('PUT', '/api/triggers', { trigger: 'post-push', repoId: null, flowId: dup.json.id });
     assert.ok(t.json.some((x: any) => x.trigger === 'post-push' && x.flowId === dup.json.id));
     assert.equal((await api('DELETE', `/api/flows/${dup.json.id}`)).status, 204);

@@ -31,5 +31,5 @@ export function sh(dir: string, ...a: string[]) {
   return execFileSync('git', a, { cwd: dir, stdio: 'pipe' }).toString().trim();
 }
 
-// A real-looking AWS access key id that gitleaks flags (not a live credential).
+// A real-looking AWS access key id that betterleaks and gitleaks flag (not a live credential).
 export const FAKE_AWS = 'AKIA' + 'Z3MXQ7PLV2RT4WNE';

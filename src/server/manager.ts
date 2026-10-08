@@ -3,6 +3,7 @@ import { EventEmitter } from 'node:events';
 import { existsSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
 import type { BlockRun, Finding, Flow, OutputConfig, Run, ServerEvent, TriggerKind } from '../shared/types.ts';
+import { foundBy } from '../shared/scanners.ts';
 import type { ClaudeRunner } from './claude.ts';
 import type { DB } from './db.ts';
 import { DEFAULT_TRIGGERS } from './flows/defaults.ts';
@@ -301,6 +302,8 @@ export function renderComment(run: Run, findings: Finding[]): string {
     lines.push(`**${{ must_fix: 'Must fix', consider: 'Consider', minor: 'Minor' }[sev]}**`, '');
     for (const f of fs) {
       lines.push(`- \`${f.file}${f.line ? `:${f.line}` : ''}\` **${f.title}**. ${f.scenario}${f.fix ? ` Fix: ${f.fix}` : ''}`);
+      const by = f.source.kind === 'scanner' ? foundBy(f) : '';   // which tool, and what it is, for a reader who doesn't know it
+      if (by) lines.push(`  ${by}`);
     }
     lines.push('');
   }

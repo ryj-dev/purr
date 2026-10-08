@@ -65,9 +65,9 @@ const prompt = { prompt: 'p {{finding_schema}}', allowedTools: [], output: 'find
 test('validation catches cycles, sessionless prompts, bad forkFrom and branch misuse', () => {
   const msgs = (blocks: Block[], edges: Edge[]) => validateFlow(blocks, edges).filter((i) => i.level === 'error').map((i) => i.message).join(' | ');
   assert.match(msgs([b('a', 'merge'), b('c', 'merge')], [e('a', 'c'), e('c', 'a')]), /cycle/);
-  assert.match(msgs([b('s', 'scanner', { scanner: 'gitleaks' }), b('p', 'prompt', prompt)], [e('s', 'p')]), /Needs a session/);
+  assert.match(msgs([b('s', 'scanner', { scanner: 'betterleaks' }), b('p', 'prompt', prompt)], [e('s', 'p')]), /Needs a session/);
   assert.match(msgs([b('c', 'context', ctx), b('p', 'prompt', { ...prompt, forkFrom: 'c' })], []), /must come before/);
-  assert.match(msgs([b('s', 'scanner', { scanner: 'gitleaks' }), b('br', 'branch')], [e('s', 'br')]), /must follow a context/);
+  assert.match(msgs([b('s', 'scanner', { scanner: 'betterleaks' }), b('br', 'branch')], [e('s', 'br')]), /must follow a context/);
   assert.match(msgs([b('c1', 'context', ctx), b('c2', 'context', ctx), b('p', 'prompt', prompt)], [e('c1', 'p'), e('c2', 'p')]), /more than one session/);
   assert.equal(msgs([b('c', 'context', ctx), b('br', 'branch'), b('p1', 'prompt', prompt), b('p2', 'prompt', prompt)],
     [e('c', 'br'), e('br', 'p1'), e('br', 'p2')]), '');

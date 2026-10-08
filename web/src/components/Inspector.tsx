@@ -4,6 +4,7 @@ import type {
   ScannerConfig, ScannerName, Severity, ValidationIssue, VerifyConfig,
 } from '../../../src/shared/types.ts';
 import { PREFERENCE_OPTIONS } from '../../../src/shared/types.ts';
+import { SCANNERS, SCANNER_CHOICE } from '../../../src/shared/scanners.ts';
 import { useApp } from '../state.tsx';
 import { BLOCK_META, SEVERITIES, SEVERITY_LABEL, resolveContext } from '../util.ts';
 import { PromptField } from './PromptField.tsx';
@@ -121,9 +122,10 @@ export function Inspector({ block, blocks, edges, readOnly, issues, onChange, on
           <label className="field">
             <span>Scanner</span>
             <select value={c.scanner} disabled={d} onChange={(e) => set<'scanner'>({ scanner: e.target.value as ScannerName })}>
-              <option value="gitleaks">gitleaks: secrets in added lines</option>
-              <option value="zizmor">zizmor: GitHub Actions workflow risks</option>
-              <option value="osv">osv-scanner: new vulnerable dependencies</option>
+              {/* a flow saved before betterleaks replaced gitleaks shows its old choice (which runs betterleaks) */}
+              {[...SCANNERS, ...(c.scanner === 'gitleaks' ? ['gitleaks' as const] : [])].map((s) => (
+                <option key={s} value={s}>{SCANNER_CHOICE[s]}</option>
+              ))}
             </select>
           </label>
           <div className="hint" style={{ marginTop: -4 }}>Scans only what this change adds: staged lines for pre-commit, the pushed range otherwise. Connect it to a Context block to feed its findings in as <code>{'{{scanner_findings}}'}</code>.</div>

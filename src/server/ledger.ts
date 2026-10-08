@@ -47,7 +47,9 @@ export function applyLedger(db: DB, run: Run, findings: Finding[], completeBlock
   if (completeBlocks && run.branch && run.mode === 'range' && wholeBranch) {
     for (const item of db.listLedger(run.repoId, 'open')) {
       if (item.branch !== run.branch || item.flowId !== run.flowId || seen.has(item.fingerprint)) continue;
-      if (!completeBlocks.has(item.finding.source.blockId)) continue;
+      const by = item.finding.source.blockId;
+      // the default flows' secrets block was scan-gitleaks before betterleaks replaced it: the same block, renamed
+      if (!completeBlocks.has(by) && !(by === 'scan-gitleaks' && completeBlocks.has('scan-betterleaks'))) continue;
       db.putLedger({ ...item, state: 'fixed', lastRunId: run.id, updatedAt: ts });
     }
   }

@@ -37,7 +37,7 @@ function writeAppState(s: AppFile) {
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
-// PATH: apps launched from Finder or at login get a minimal PATH, which would hide claude, gh, gitleaks, brew tools.
+// PATH: apps launched from Finder or at login get a minimal PATH, which would hide claude, gh, the scanners, brew tools.
 // Ask the user's login shell once, the way a terminal would see it.
 
 async function loginShellPath(): Promise<string> {
