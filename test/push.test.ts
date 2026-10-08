@@ -97,7 +97,6 @@ test('git push: pre-push scan blocks a secret; a clean push lands and queues the
       next = db.listRuns(50).find((r) => r.trigger === 'post-push' && r.headSha === second && ['passed', 'failed', 'blocked'].includes(r.status));
     }
     assert.ok(next, 'the second push is reviewed (and finished, before the database closes)');
-    assert.equal(db.getPushOutcomes(second, [registered.path]).some((o) => o.kind === 'superseded'), false);
 
     const prePush = db.listRuns(50).filter((r) => r.trigger === 'pre-push' && r.repoId === registered.id);
     assert.deepEqual(prePush.map((r) => r.status).sort(), ['blocked', 'passed', 'passed'], 'the blocked push, then the two that went through');

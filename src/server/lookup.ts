@@ -154,8 +154,66 @@ export class ReviewWatch {
 
 }
 
-/** Polls until the watch is done or the timeout passes, then returns its last state. */
-export async function waitForReview(watch: { check: () => Promise<ReviewState> }, opts: { timeoutMs: number; intervalMs?: number; onChange?: (run: Run | null) => void }) {
+/**
+ * The PuRR service's event stream (GET /api/events) as what wakes a waiting `purr findings`: an event about a run or
+ * a pushed commit wakes it to look again, and the stream failing or ending means the service stopped, so no review
+ * will come. Nothing here polls the service.
+ */
+export class ServiceEvents {
+  down = false;
+  private wake: (() => void) | null = null;
+  private ac = new AbortController();
+
+  /** Connected, or null when the service isn't running (nothing listening, or no answer within `timeoutMs`). */
+  static async connect(port: number, timeoutMs = 3000): Promise<ServiceEvents | null> {
+    const ev = new ServiceEvents();
+    const t = setTimeout(() => ev.ac.abort(), timeoutMs);
+    let res: Response;
+    try { res = await fetch(`http://127.0.0.1:${port}/api/events`, { signal: ev.ac.signal }); } catch { return null; } finally { clearTimeout(t); }
+    if (!res.ok || !res.body) { ev.ac.abort(); return null; }
+    void ev.read(res.body);
+    return ev;
+  }
+
+  private async read(body: ReadableStream<Uint8Array>) {
+    const dec = new TextDecoder();
+    let buf = '';
+    try {
+      for (const reader = body.getReader(); ;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        for (let i = buf.indexOf('\n\n'); i >= 0; i = buf.indexOf('\n\n')) {
+          const data = buf.slice(0, i).split('\n').filter((l) => l.startsWith('data:')).map((l) => l.slice(5)).join('\n');
+          buf = buf.slice(i + 2);
+          try { if (['run', 'push'].includes(JSON.parse(data)?.type)) this.poke(); } catch { /* a ping, or not ours */ }
+        }
+      }
+    } catch { /* the connection dropped */ }
+    this.down = true;
+    this.poke();
+  }
+
+  private poke() { const w = this.wake; this.wake = null; w?.(); }
+
+  /** Until an event, the stream ends, or `ms` pass (a slow look anyway, in case an event was missed). */
+  wait(ms: number) {
+    if (this.down) return Promise.resolve();
+    return new Promise<void>((r) => {
+      const t = setTimeout(() => { this.wake = null; r(); }, ms);
+      this.wake = () => { clearTimeout(t); r(); };
+    });
+  }
+
+  close() { this.ac.abort(); }
+}
+
+/**
+ * Looks, then waits for the service to say something changed, until the watch is done, the service stops (`stop`
+ * says so) or the timeout passes. Returns the last state. Without `events` (tests), it looks every `intervalMs`.
+ */
+export async function waitForReview(watch: { check: () => Promise<ReviewState> },
+  opts: { timeoutMs: number; intervalMs?: number; events?: ServiceEvents | null; onChange?: (run: Run | null) => void }) {
   if (!Number.isFinite(opts.timeoutMs) || opts.timeoutMs < 0) throw new Error(`Bad timeout: ${opts.timeoutMs}`);
   const deadline = Date.now() + opts.timeoutMs;
   let lastKey = '\0';   // nothing a state gives: the first check always reports, even "no review yet"
@@ -164,7 +222,10 @@ export async function waitForReview(watch: { check: () => Promise<ReviewState> }
     const key = st.run ? `${st.run.id}:${st.run.status}` : '';
     if (key !== lastKey) { lastKey = key; opts.onChange?.(st.run); }
     if (st.done || Date.now() >= deadline) return st;
-    await new Promise((r) => setTimeout(r, Math.min(opts.intervalMs ?? 3000, Math.max(0, deadline - Date.now()))));
+    if (opts.events?.down) return { ...st, done: true, stop: st.stop ?? "the PuRR service stopped, so no review will come (start PuRR and push again)" };
+    const left = Math.max(0, deadline - Date.now());
+    if (opts.events) await opts.events.wait(Math.min(opts.intervalMs ?? 30_000, left));
+    else await new Promise((r) => setTimeout(r, Math.min(opts.intervalMs ?? 3000, left)));
   }
 }
 

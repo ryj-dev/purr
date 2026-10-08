@@ -356,6 +356,19 @@ test('pushes that get no review of their own say why: superseded in the debounce
   assert.equal(kindOf('aef1'), 'no-pr');
   assert.deepEqual(await new ReviewWatch(db, { repoIds: [repo.id], sha: 'aef1' }, async () => undefined).check(), { run: null, done: false });
 
+  // reviews not PR-only, no PR: a bot pushes on top (through no hook here) while gh is asked: this push is still reviewed
+  db.setSettings({ ...db.getSettings(), postPushPrsOnly: false });
+  pr = null;
+  const bot = new PostPushWatcher(db, mgr, {
+    lsRemote: async () => (tips.length > 1 ? tips.shift()! : tips[0]) ?? null, ghAuthed: async () => true,
+    prForBranch: async () => { tips = ['bbb9']; return null; }, ancestry: async () => 'yes', confirmEveryMs: 5,
+  });
+  tips = ['bbb0', 'bbb1'];
+  sched.length = 0;
+  await bot.pushIntent({ repoPath, branch: 'feat', sha: 'bbb1', from: 'bbb0' });
+  await bot.settled();
+  assert.deepEqual(sched, ['bbb1'], "the bot's push has no review coming, so this one isn't left out");
+
   // the branch moved to something that doesn't include the push (rejected: a teammate's went in instead)
   line = 'no';
   await push('eee3', 'eee0', ['eee0', 'eee4']);
@@ -453,6 +466,21 @@ test('pushes across clones: left to the clone with post-push on, one note per re
   assert.equal(note('aa02', w.path), null, "the second clone's note is cleared: the first one's review covers it");
   assert.equal(note('aa02', a.path), 'pending');
 
+  // post-push off in the worktree, and no PR yet: noted as waiting for a PR; once one is opened, the main checkout
+  // (post-push on) reviews it
+  db.setTrigger({ trigger: 'post-push', repoId: w.id, flowId: null });
+  pr = null;
+  pushed = 'aa05';
+  await watcher.pushIntent({ repoPath: wtPath, branch: 'early', sha: 'aa05', from: null });
+  await watcher.settled();
+  assert.equal(note('aa05', w.path), 'no-pr');
+  prs = [{ repo: 'work-org/app-x', number: 8, headRefOid: 'aa05', headRefName: 'early', baseRefName: 'main', title: 't', body: '', url: 'u',
+    isDraft: false, account: 'me', createdAt: new Date(Date.now() - 86_400_000).toISOString() }];
+  await watcher.poll();
+  assert.deepEqual(scheduled.slice(-1), ['aa05@main'], 'owed its review, given by the clone with post-push on');
+  db.deleteTrigger('post-push', w.id);
+  prs = [];
+
   // pushed with no PR; the PR is then opened while PuRR is down, so the poller first sees it as an old PR
   pr = null;
   pushed = 'aa03';
@@ -462,7 +490,7 @@ test('pushes across clones: left to the clone with post-push on, one note per re
   prs = [{ repo: 'work-org/app-x', number: 6, headRefOid: 'aa03', headRefName: 'late', baseRefName: 'main', title: 't', body: '', url: 'u',
     isDraft: false, account: 'me', createdAt: new Date(Date.now() - 86_400_000).toISOString() }];
   await watcher.poll();
-  assert.deepEqual(scheduled, ['aa02@main', 'aa03@main'], 'still owed its review');
+  assert.deepEqual(scheduled.slice(-1), ['aa03@main'], 'still owed its review');
   db.close();
 });
 

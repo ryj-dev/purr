@@ -84,8 +84,10 @@ export class PostPushWatcher {
     const prOnly = this.db.getSettings().postPushPrsOnly;
     // what became of the push, for `purr findings --wait`: pending until its review exists (createRun clears it) or
     // it's clear none will; a restart turns what's still pending into skipped
-    const note = (kind: PushOutcome['kind'], reason: string, nextSha: string | null = null) =>
+    const note = (kind: PushOutcome['kind'], reason: string, nextSha: string | null = null) => {
       this.db.setPushOutcome({ sha: body.sha, kind, reason, repoPath: body.repoPath, branch: body.branch, nextSha });
+      this.mgr.emit({ type: 'push', sha: body.sha });   // wakes a `purr findings --wait` on this commit
+    };
     note('pending', 'waiting for the push to land');
     const confirm = (async () => {
       const deadline = Date.now() + this.deps.confirmMs;
@@ -115,7 +117,13 @@ export class PostPushWatcher {
           // so this older push doesn't take the newer one's place in the debounce. No answer is no news: it landed
           landed = true;
           const again = await this.deps.lsRemote(body.repoPath, remote, body.branch);
-          if (again && again !== body.sha) continue;
+          if (again && again !== body.sha) {
+            // covered by that newer push only if something will review it: an open PR the poller sees, or a hook
+            // here that reported it. A bot's push with no PR has neither, so this push is reviewed after all
+            const key = githubRepo(repo.remoteUrl);
+            const paths = [body.repoPath, ...(key ? this.db.listRepos().filter((r) => githubRepo(r.remoteUrl) === key).map((r) => r.path) : [])];
+            if ((pr && !pr.isDraft) || this.db.getPushOutcomes(again, paths).length) continue;
+          }
           // no open PR (a push to main, or a branch not yet proposed): no review, and nothing marked as handled, so
           // the poller reviews this commit when its PR is opened
           if (prOnly && gh && !pr) return note('no-pr', `${body.branch} has no open PR; it's reviewed once one is opened`);

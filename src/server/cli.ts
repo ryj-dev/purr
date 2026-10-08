@@ -10,7 +10,7 @@ import { ensureDefaults } from './flows/store.ts';
 import { exportFlow, importFlow, previewImport } from './flows/share.ts';
 import { readFileSync } from 'node:fs';
 import { currentBranch, defaultBaseRef, headSha, repoRoot, upstreamBranch } from './git.ts';
-import { ReviewWatch, blockSessions, currentFindings, isActive, isFinished, resolvedBy, sameRepoIds, waitForReview } from './lookup.ts';
+import { ReviewWatch, ServiceEvents, blockSessions, currentFindings, isActive, isFinished, resolvedBy, sameRepoIds, waitForReview } from './lookup.ts';
 import { addRepo, startHttp } from './http.ts';
 import { installGlobalHooks, removePidFile, uninstallGlobalHooks, writePidFile } from './globalHooks.ts';
 import { type RunRequest, RunManager } from './manager.ts';
@@ -273,6 +273,10 @@ async function runQuery(db: DB, currentBranchByDefault: boolean): Promise<RunQue
   return q;
 }
 
+const NOT_RUNNING = "the PuRR service isn't running, so no review will come (start PuRR, then wait again)";
+/** The service's event stream, connected before the first look so no change slips between the two; null if it's down. */
+const listen = (db: DB) => ServiceEvents.connect(db.getSettings().port);
+
 /** PuRR itself went wrong before or outside a command's own handling (the database won't open): exit 5, not 2. */
 const purrFailed = (e: unknown) => { console.error(`purr: couldn't read the reviews: ${(e as Error)?.message ?? e}`); return 5; };
 
@@ -309,29 +313,37 @@ async function findingsCmd(): Promise<number> {
       const watch = new ReviewWatch(db, q);
       const label = describe(q);
       let notes = 0;
+      const events = await listen(db);
       const st = await waitForReview(watch, {
-        timeoutMs: timeoutSec * 1000,
+        timeoutMs: events ? timeoutSec * 1000 : 0, events,
         onChange: (r) => {
           for (; notes < watch.notes.length; notes++) process.stderr.write(`${C.dim}purr: ${watch.notes[notes]}${C.x}\n`);
           if (!r) process.stderr.write(`${C.dim}purr: no review of ${label} yet; waiting (a review starts about a minute after the push lands)…${C.x}\n`);
           else if (!isFinished(r)) process.stderr.write(`${C.dim}purr: review ${r.id} is ${r.status}…${C.x}\n`);
         },
       });
+      events?.close();
       for (; notes < watch.notes.length; notes++) process.stderr.write(`${C.dim}purr: ${watch.notes[notes]}${C.x}\n`);
       if (st.stop) { console.error(`purr: ${st.stop}`); return 3; }
+      if (!events && !st.done) { console.error(`purr: ${NOT_RUNNING}`); return 3; }
       run = st.run;
       if (!run) { console.error(`purr: no review of ${label} appeared within ${timeoutSec}s`); return 3; }
       if (!st.done) { console.error(`purr: review ${run.id} is still ${run.status} after ${timeoutSec}s`); return 3; }
     } else {
       const find = () => runId ? db.getRun(runId) : db.findRuns({ ...q, limit: 1 })[0] ?? null;
       // waits for a review that isn't queued yet, too (the PR's first, still in its debounce)
-      run = wait ? (await waitForReview({ check: async () => { const r = find(); return { run: r, done: !!r && isFinished(r) }; } }, {
-        timeoutMs: timeoutSec * 1000,
+      const events = wait ? await listen(db) : null;
+      const st = wait ? await waitForReview({ check: async () => { const r = find(); return { run: r, done: !!r && isFinished(r) }; } }, {
+        timeoutMs: events ? timeoutSec * 1000 : 0, events,
         onChange: (r) => {
           if (!r) process.stderr.write(`${C.dim}purr: no review of ${runId ? `run ${runId}` : describe(q)} yet; waiting…${C.x}\n`);
           else if (!isFinished(r)) process.stderr.write(`${C.dim}purr: review ${r.id} is ${r.status}…${C.x}\n`);
         },
-      })).run : find();
+      }) : null;
+      events?.close();
+      if (st && !st.done && !events) { console.error(`purr: ${NOT_RUNNING}`); return 3; }
+      if (st?.stop) { console.error(`purr: ${st.stop}`); return 3; }
+      run = st ? st.run : find();
       if (!run) { console.error(`purr: no review of ${runId ? `run ${runId}` : describe(q)} found (purr runs lists them)`); return 3; }
     }
     const findings = currentFindings(db, run);

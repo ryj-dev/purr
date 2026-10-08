@@ -286,4 +286,5 @@ export type ServerEvent =
   | { type: 'usage'; usage: Usage }
   | { type: 'state' }
   | { type: 'tools' }                    // a tool install started, moved on, finished or failed
+  | { type: 'push'; sha: string }        // what became of a pushed commit changed (wakes a waiting `purr findings`)
   | { type: 'notify'; title: string; body: string; runId: string };   // shown natively by PuRR.app

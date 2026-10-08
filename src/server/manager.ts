@@ -153,7 +153,9 @@ export class RunManager {
   /** Debounced post-push: a burst of pushes to one branch produces one review of the latest. */
   schedulePostPush(req: RunRequest) {
     const outcome = (sha: string | null | undefined, kind: 'superseded' | 'skipped', reason: string, nextSha: string | null = null) => {
-      if (sha) this.db.setPushOutcome({ sha, kind, reason, repoPath: req.repoPath, branch: req.branch ?? null, nextSha });
+      if (!sha) return;
+      this.db.setPushOutcome({ sha, kind, reason, repoPath: req.repoPath, branch: req.branch ?? null, nextSha });
+      this.emit({ type: 'push', sha });
     };
     const skip = (reason: string) => outcome(req.head, 'skipped', reason);
     // pushed again (back to it, say): a note that another push took its place no longer holds

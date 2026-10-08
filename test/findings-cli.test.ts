@@ -6,11 +6,22 @@ import { mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
 import { createServer } from 'node:net';
 import { openDb } from '../src/server/db.ts';
-import { addRepo } from '../src/server/http.ts';
+import { addRepo, startHttp } from '../src/server/http.ts';
+import { RunManager } from '../src/server/manager.ts';
+import { ClaudeRunner } from '../src/server/claude.ts';
+import { PostPushWatcher } from '../src/server/triggers.ts';
 import type { Finding, Run } from '../src/shared/types.ts';
 
 const CLI = new URL('../src/server/cli.ts', import.meta.url).pathname;
 const purr = (cwd: string, ...args: string[]) => spawnSync(process.execPath, [CLI, ...args], { cwd, encoding: 'utf8', env: process.env });
+/** For --wait: doesn't block this process, so the service running in it can answer the command meanwhile. */
+const purrA = (cwd: string, ...args: string[]) => new Promise<{ status: number | null; stdout: string; stderr: string }>((res) => {
+  const p = spawn(process.execPath, [CLI, ...args], { cwd, env: process.env });
+  let stdout = '', stderr = '';
+  p.stdout.on('data', (d) => { stdout += d; });
+  p.stderr.on('data', (d) => { stderr += d; });
+  p.on('close', (status) => res({ status, stdout, stderr }));
+});
 
 let n = 0;
 const run = (over: Partial<Run>): Run => ({
@@ -24,7 +35,23 @@ const mustFix = (fp: string): Finding => ({
   source: { blockId: 'lens', kind: 'model' }, ledger: 'new',
 });
 
-test('purr findings: exit codes, usage errors, --json and purr runs', async () => {
+/** A PuRR service in this process on a free port, which the CLI finds through the settings, as it does the real one. */
+async function service(home?: string) {
+  const sdb = openDb(home ? join(home, 'purr.db') : undefined);
+  const mgr = new RunManager(sdb, new ClaudeRunner(sdb));
+  const server = startHttp(sdb, mgr, new PostPushWatcher(sdb, mgr), 0);
+  await new Promise((r) => server.once('listening', r));
+  sdb.setSettings({ ...sdb.getSettings(), port: (server.address() as { port: number }).port });
+  return {
+    /** as the service does when a run changes */
+    announce: (run: Run) => mgr.emit({ type: 'run', run }),
+    stop: () => { server.closeAllConnections(); server.close(); sdb.close(); },
+  };
+}
+
+test('purr findings: exit codes, usage errors, --json and purr runs', async (tc) => {
+  const svc = await service();
+  tc.after(svc.stop);
   const db = openDb();
   const repoPath = tempRepo();
   const repo = await addRepo(db, repoPath);
@@ -52,7 +79,7 @@ test('purr findings: exit codes, usage errors, --json and purr runs', async () =
   assert.equal(code('--sha', 'aaaa000005'), 0, 'its must-fix was dismissed since');
   assert.equal(code('--sha', 'bbbb'), 3, 'no such review');
   assert.equal(code('--run', 'run-nope'), 3);
-  const skipped = purr(repoPath, 'findings', '--sha', 'aaaa000006', '--wait', '--timeout', '30');
+  const skipped = await purrA(repoPath, 'findings', '--sha', 'aaaa000006', '--wait', '--timeout', '30');
   assert.equal(skipped.status, 3);
   assert.match(skipped.stderr, /won't be reviewed: reviews are paused/);
 
@@ -90,6 +117,7 @@ test('purr findings: exit codes, usage errors, --json and purr runs', async () =
         sawRunning = true;
         const db = openDb();
         db.putRun({ ...db.getRun(id)!, status: 'passed' });
+        svc.announce(db.getRun(id)!);
         db.close();
       }
     });
@@ -103,7 +131,9 @@ test('purr findings: exit codes, usage errors, --json and purr runs', async () =
       if (!sawWaiting && String(d).includes('no review of branch later yet')) {
         sawWaiting = true;
         const db = openDb();
-        db.putRun(run({ repoId: repo.id, repoPath, headSha: 'cccc000009', branch: 'later' }));
+        const r = run({ repoId: repo.id, repoPath, headSha: 'cccc000009', branch: 'later' });
+        db.putRun(r);
+        svc.announce(r);
         db.close();
       }
     });
@@ -197,13 +227,13 @@ test('purr findings: exit codes, usage errors, --json and purr runs', async () =
   assert.equal(purr(empty, 'findings', '--wait').status, 4);
 
   // --wait gives up at its timeout: on a review that never appeared, and on one still running
-  const never = purr(repoPath, 'findings', '--sha', 'abab00ff', '--wait', '--timeout', '1');
+  const never = await purrA(repoPath, 'findings', '--sha', 'abab00ff', '--wait', '--timeout', '1');
   assert.equal(never.status, 3);
   assert.match(never.stderr, /no review of commit abab00ff appeared within 1s/);
   const db8 = openDb();
   db8.putRun(run({ repoId: repo.id, repoPath, headSha: 'abab00fe', branch: 'slow', status: 'running' }));
   db8.close();
-  const stuck = purr(repoPath, 'findings', '--sha', 'abab00fe', '--wait', '--timeout', '1');
+  const stuck = await purrA(repoPath, 'findings', '--sha', 'abab00fe', '--wait', '--timeout', '1');
   assert.equal(stuck.status, 3);
   assert.match(stuck.stderr, /is still running after 1s/);
 
@@ -213,7 +243,7 @@ test('purr findings: exit codes, usage errors, --json and purr runs', async () =
   db9.setRunFindings(db9.findRuns({ repoIds: [repo.id], pr: 12, limit: 1 })[0].id, [mustFix('p12')]);
   db9.close();
   assert.equal(purr(repoPath, 'findings', '--pr', '12').status, 1);
-  assert.equal(purr(repoPath, 'findings', '--pr', '12', '--wait', '--timeout', '5').status, 1);
+  assert.equal((await purrA(repoPath, 'findings', '--pr', '12', '--wait', '--timeout', '5')).status, 1);
   assert.equal(purr(repoPath, 'findings', '--pr', '13').status, 3, 'no review of PR 13');
 
   // a branch that tracks a local branch (feat/x): not looked up under 'x'
@@ -297,4 +327,34 @@ test("PuRR failing (its database won't open) exits 5, not 2 (a failed review)", 
   const r = spawnSync(process.execPath, [CLI, 'findings', '--sha', 'abcd'], { cwd: tempRepo(), encoding: 'utf8', env: { ...process.env, PURR_HOME: home } });
   assert.equal(r.status, 5, r.stderr);
   assert.match(r.stderr, /couldn't read the reviews/);
+});
+
+test("--wait doesn't wait on a PuRR service that isn't running, or that stops while it waits", async () => {
+  const home = mkdtempSync(join(process.env.TMPDIR!, 'purr-test-home-'));
+  const db = openDb(join(home, 'purr.db'));
+  const repoPath = tempRepo();
+  const repo = await addRepo(db, repoPath);
+  db.putRun(run({ repoId: repo.id, repoPath, headSha: 'beef0001', status: 'running' }));
+  const closed = createServer();
+  await new Promise<void>((r) => closed.listen(0, '127.0.0.1', () => r()));
+  const port = (closed.address() as { port: number }).port;
+  await new Promise<void>((r) => closed.close(() => r()));
+  db.setSettings({ ...db.getSettings(), port });   // nothing listens there
+  db.close();
+  const env = { ...process.env, PURR_HOME: home };
+  const t0 = Date.now();
+  const down = spawnSync(process.execPath, [CLI, 'findings', '--sha', 'beef0001', '--wait'], { cwd: repoPath, encoding: 'utf8', env });
+  assert.equal(down.status, 3);
+  assert.match(down.stderr, /service isn't running, so no review will come/);
+  assert.ok(Date.now() - t0 < 15_000, 'at once, not after the 30-minute timeout');
+
+  const svc = await service(home);
+  const stopped = await new Promise<{ status: number | null; stderr: string }>((res) => {
+    const p = spawn(process.execPath, [CLI, 'findings', '--sha', 'beef0001', '--wait'], { cwd: repoPath, env });
+    let stderr = '', once = false;
+    p.stderr.on('data', (d) => { stderr += d; if (!once && /is running/.test(stderr)) { once = true; svc.stop(); } });
+    p.on('close', (status) => res({ status, stderr }));
+  });
+  assert.equal(stopped.status, 3);
+  assert.match(stopped.stderr, /service stopped, so no review will come/);
 });
