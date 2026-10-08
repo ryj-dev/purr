@@ -83,7 +83,50 @@ test('repos with their own core.hooksPath are spotted; global and PuRR paths are
   git(repo, 'config', '--worktree', 'core.hooksPath', '.husky/_');
   assert.equal(await repoOwnHooksPath(repo), '.husky/_', 'worktree scope counts');
   assert.equal(await repoOwnHooksPath(join(repo, 'missing')), null, 'a repo that is gone is not flagged');
+  // a global hooks path that isn't PuRR's (PuRR not running, or the user's own) is still global, not the repo's own
+  writeFileSync(gitGlobal, `[core]\n\thooksPath = ${userHooks}\n`);
+  assert.equal(await repoOwnHooksPath(tempRepo()), null, 'a repo with no setting of its own is not flagged');
   writeFileSync(gitGlobal, '');
+});
+
+test("a git that doesn't answer within 2s makes the own-hooks check throw, so the repo keeps the flag it had", async () => {
+  const repo = tempRepo();
+  const slow = mkdtempSync(join(process.env.TMPDIR!, 'purr-slow-git-'));
+  writeFileSync(join(slow, 'git'), '#!/bin/sh\nsleep 5\n');
+  chmodSync(join(slow, 'git'), 0o755);
+  const path = process.env.PATH;
+  process.env.PATH = `${slow}:${path}`;
+  try { await assert.rejects(repoOwnHooksPath(repo), /timed out/); } finally { process.env.PATH = path; }
+});
+
+test('sharedCache: concurrent callers share one call, an answer is kept for its ttl, a failure is not kept', async (t) => {
+  const { sharedCache } = await import('../src/server/util.ts');
+  t.mock.timers.enable({ apis: ['Date'], now: 0 });
+  try {
+    let calls = 0, fail = true;
+    const get = sharedCache(async () => { calls++; if (fail) throw new Error('git failed'); return calls; }, 30_000);
+    const [a, b] = await Promise.allSettled([get(), get()]);
+    assert.equal(calls, 1, 'one call for both');
+    assert.equal(a.status, 'rejected');
+    assert.equal(b.status, 'rejected');
+    fail = false;
+    assert.equal(await get(), 2, 'the failure was not kept: tried again at once');
+    assert.equal(await get(), 2, 'kept');
+    t.mock.timers.tick(30_000);
+    assert.equal(await get(), 3, 'looked up again after the ttl');
+  } finally { t.mock.timers.reset(); }
+});
+
+test("own git hooks lock a repo's pre-commit and pre-push cells, and nothing else", async () => {
+  const { lockedBy, ownHooksCount } = await import('../src/shared/ownHooks.ts');
+  const own = { r1: '.husky/_' };
+  assert.equal(lockedBy('pre-commit', 'r1', own), '.husky/_');
+  assert.equal(lockedBy('pre-push', 'r1', own), '.husky/_');
+  assert.equal(lockedBy('post-push', 'r1', own), null, 'PR reviews still run');
+  assert.equal(lockedBy('manual', 'r1', own), null);
+  assert.equal(lockedBy('pre-commit', null, own), null, 'never the Global row');
+  assert.equal(lockedBy('pre-commit', 'r2', own), null);
+  assert.equal(ownHooksCount([{ id: 'r1' }, { id: 'r2' }], own), 1);
 });
 
 test('own-hooks flags refresh in the background: never awaited, one refresh at a time, change announced once', async () => {

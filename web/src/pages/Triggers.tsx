@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { TRIGGERS, type Repo, type TriggerAssignment, type TriggerKind } from '../../../src/shared/types.ts';
+import { lockedBy, ownHooksCount } from '../../../src/shared/ownHooks.ts';
 import { api, errMsg } from '../api.ts';
 import { useApp } from '../state.tsx';
 import { useToast } from '../components/Toast.tsx';
@@ -13,9 +14,6 @@ const EXPLAIN: Record<TriggerKind, string> = {
   'post-push': 'Runs in the background after a push lands on the remote.',
   manual: 'Used by Run now and `purr run`.',
 };
-
-// triggers that run from PuRR's git hooks, which a repo with its own core.hooksPath never calls
-const HOOK_TRIGGERS = new Set<TriggerKind>(['pre-commit', 'pre-push']);
 
 export function TriggersPage() {
   const { state, refresh } = useApp();
@@ -74,11 +72,11 @@ export function TriggersPage() {
   const flowName = (id: string | null | undefined) => (id ? flows.find((f) => f.id === id)?.name ?? 'missing flow' : 'Disabled');
 
   const ownHooks = gh?.ownHooks ?? {};
-  const ownCount = repos.filter((r) => ownHooks[r.id]).length;
+  const ownCount = ownHooksCount(repos, ownHooks);
 
   const cell = (trigger: TriggerKind, repoId: string | null) => {
-    const own = repoId ? ownHooks[repoId] : undefined;
-    if (own && HOOK_TRIGGERS.has(trigger)) {
+    const own = lockedBy(trigger, repoId, ownHooks);
+    if (own) {
       return (
         <div className="locked-cell" title={`This repo sets its own core.hooksPath (${own}), so git never runs PuRR's ${trigger} hook here. Its own hooks still run, and so do post-push PR reviews.`}>
           <Lock size={13} />Skipped: own hooks

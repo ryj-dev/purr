@@ -12,7 +12,7 @@ import { remoteUrl, repoRoot } from './git.ts';
 import { ghAuthed } from './gh.ts';
 import type { RunManager } from './manager.ts';
 import type { PostPushWatcher } from './triggers.ts';
-import { Semaphore, newId, now, which } from './util.ts';
+import { Semaphore, newId, now, sharedCache, which } from './util.ts';
 import { VERSION, WEB_DIR as WEB } from './runtime.ts';
 import { GLOBAL_HOOKS_DIR, currentGlobalHooksPath, repoOwnHooksPath } from './globalHooks.ts';
 
@@ -30,17 +30,9 @@ async function tools(): Promise<AppState['tools']> {
   return t;
 }
 
-let hooksCache: { at: number; v: Promise<{ active: boolean; hooksPath: string | null }> } | null = null;
-function globalHooksPath() {
-  // concurrent requests share one git call (every open window refetches state at once)
-  if (!hooksCache || Date.now() - hooksCache.at >= 30_000) {
-    const v = currentGlobalHooksPath().then((hooksPath) => ({ active: hooksPath === GLOBAL_HOOKS_DIR, hooksPath }));
-    hooksCache = { at: Date.now(), v };
-    // a failed call isn't cached: the next request tries again
-    v.catch(() => { if (hooksCache?.v === v) hooksCache = null; });
-  }
-  return hooksCache.v;
-}
+// every open window refetches state at once: they share one git call, kept for 30s (a failed one isn't kept)
+const globalHooksPath = sharedCache(
+  () => currentGlobalHooksPath().then((hooksPath) => ({ active: hooksPath === GLOBAL_HOOKS_DIR, hooksPath })), 30_000);
 
 /**
  * Which repos set their own core.hooksPath. That's a git call per repo, and a repo on a slow or unplugged volume can
