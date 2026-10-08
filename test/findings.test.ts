@@ -282,3 +282,68 @@ test('pushes that get no review of their own say why: superseded in the debounce
   db.deleteTrigger('post-push', repo.id);
   db.close();
 });
+
+test("a fix recorded by an earlier review of the branch doesn't mark a later review's finding fixed", () => {
+  const db = openDb(join(mkdtempSync(join(process.env.TMPDIR!, 'purr-db-')), 'purr.db'));
+  const earlier = fakeRun({ id: 'e1', repoId: 'r1', branch: 'feat' });
+  const viewed = fakeRun({ id: 'v1', repoId: 'r1', branch: 'feat' });
+  db.putRun(earlier);
+  db.putRun(viewed);
+  db.setRunFindings(viewed.id, [finding('fp')]);
+  db.putLedger({ fingerprint: 'fp', repoId: 'r1', branch: 'feat', state: 'fixed', flowId: null, finding: finding('fp'),
+    firstRunId: 'e1', lastRunId: 'e1', updatedAt: 'x' });
+  assert.notEqual(currentFindings(db, viewed)[0].ledger, 'fixed');
+  db.close();
+});
+
+test('pushes across clones: left to the clone with post-push on, one note per report, and a PR first seen late still owed its review', async () => {
+  const { ClaudeRunner } = await import('../src/server/claude.ts');
+  const { RunManager } = await import('../src/server/manager.ts');
+  const { PostPushWatcher } = await import('../src/server/triggers.ts');
+  const { ensureDefaults } = await import('../src/server/flows/store.ts');
+  const db = openDb(join(mkdtempSync(join(process.env.TMPDIR!, 'purr-db-')), 'purr.db'));
+  ensureDefaults(db);
+  const main = tempRepo();
+  sh(main, 'remote', 'add', 'origin', 'https://github.com/work-org/app-x.git');
+  const wtPath = join(realpathSync(mkdtempSync(join(process.env.TMPDIR!, 'purr-wt-'))), 'wt');
+  sh(main, 'worktree', 'add', '-q', wtPath, '-b', 'wt');
+  const a = await addRepo(db, main), w = await addRepo(db, wtPath);
+  const mgr = new RunManager(db, new ClaudeRunner(db));
+  const scheduled: string[] = [];
+  mgr.schedulePostPush = (req: any) => { scheduled.push(`${req.head}@${req.repoPath === a.path ? 'main' : 'wt'}`); };
+  let pushed = '', pr: any = null, prs: any[] = [];
+  const watcher = new PostPushWatcher(db, mgr, {
+    lsRemote: async () => pushed, ghAuthed: async () => true, prForBranch: async () => pr, fetchPrs: async () => ({ prs, answered: ['me'] }),
+  });
+  const note = (sha: string, path: string) => db.getPushOutcomes(sha, [path])[0]?.kind ?? null;
+  db.setSettings({ ...db.getSettings(), postPushPrsOnly: true });
+  await watcher.poll();
+
+  pr = { number: 5, title: 't', body: '', url: 'u', baseRefName: 'main', headRefName: 'feat', headRefOid: 'aa01', isDraft: false };
+  db.setTrigger({ trigger: 'post-push', repoId: w.id, flowId: null });
+  pushed = 'aa01';
+  await watcher.pushIntent({ repoPath: wtPath, branch: 'feat', sha: 'aa01', from: null });
+  await watcher.settled();
+  assert.equal(note('aa01', w.path), 'elsewhere', 'off here, on in the main checkout: left to its review of the PR');
+  db.deleteTrigger('post-push', w.id);
+
+  pushed = 'aa02';
+  await watcher.pushIntent({ repoPath: main, branch: 'feat', sha: 'aa02', from: 'aa01' });
+  await watcher.pushIntent({ repoPath: wtPath, branch: 'feat', sha: 'aa02', from: 'aa01' });
+  await watcher.settled();
+  assert.deepEqual(scheduled, ['aa02@main'], 'one review for the push both clones reported');
+  assert.equal(note('aa02', w.path), null, "the second clone's note is cleared: the first one's review covers it");
+  assert.equal(note('aa02', a.path), 'pending');
+
+  // pushed with no PR; the PR is then opened while PuRR is down, so the poller first sees it as an old PR
+  pr = null;
+  pushed = 'aa03';
+  await watcher.pushIntent({ repoPath: main, branch: 'late', sha: 'aa03', from: null });
+  await watcher.settled();
+  assert.equal(note('aa03', a.path), 'no-pr');
+  prs = [{ repo: 'work-org/app-x', number: 6, headRefOid: 'aa03', headRefName: 'late', baseRefName: 'main', title: 't', body: '', url: 'u',
+    isDraft: false, account: 'me', createdAt: new Date(Date.now() - 86_400_000).toISOString() }];
+  await watcher.poll();
+  assert.deepEqual(scheduled, ['aa02@main', 'aa03@main'], 'still owed its review');
+  db.close();
+});

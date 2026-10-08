@@ -95,6 +95,23 @@ test('purr findings: exit codes, usage errors, --json and purr runs', async () =
     });
     p.on('close', (status) => res({ status, stdout, sawRunning }));
   });
+  // --branch --wait before the branch's first review is queued: waits for it to appear
+  const later = await new Promise<{ status: number | null; sawWaiting: boolean }>((res) => {
+    const p = spawn(process.execPath, [CLI, 'findings', '--branch', 'later', '--wait', '--json', '--timeout', '30'], { cwd: repoPath });
+    let sawWaiting = false;
+    p.stderr.on('data', (d) => {
+      if (!sawWaiting && String(d).includes('no review of branch later yet')) {
+        sawWaiting = true;
+        const db = openDb();
+        db.putRun(run({ repoId: repo.id, repoPath, headSha: 'cccc000009', branch: 'later' }));
+        db.close();
+      }
+    });
+    p.on('close', (status) => res({ status, sawWaiting }));
+  });
+  assert.ok(later.sawWaiting);
+  assert.equal(later.status, 0);
+
   for (const [args, branch] of [[['--branch', 'live'], 'live'], [['--run', 'RUN'], 'byid']] as const) {
     const live = run({ repoId: repo.id, repoPath, headSha: 'cccc000001', branch, status: 'running' });
     db3.putRun(live);
@@ -139,6 +156,13 @@ test('purr findings: exit codes, usage errors, --json and purr runs', async () =
   assert.equal(renamed.status, 0, renamed.stderr);
   assert.equal(JSON.parse(renamed.stdout).run.branch, 'renamed');
 
+  // a branch made from the remote's (tracking it under another name) with reviews of its own: its own name wins
+  execFileSync('git', ['checkout', '-q', '-b', 'feat2', '--track', 'origin/renamed'], { cwd: repoPath });
+  const db5 = openDb();
+  db5.putRun(run({ repoId: repo.id, repoPath, headSha: 'eeee000002', branch: 'feat2' }));
+  db5.close();
+  assert.equal(JSON.parse(purr(repoPath, 'findings', '--json').stdout).run.branch, 'feat2');
+
   const runs = purr(repoPath, 'runs', '--branch', 'feat');
   assert.equal(runs.status, 0);
   assert.equal(runs.stdout.trim().split('\n').length, 5, runs.stdout);
@@ -167,4 +191,32 @@ test('a second purr daemon, started by mistake, leaves the live one\'s runs and 
   assert.equal(after.getRun(live.id)!.status, 'running', 'not failed as an orphan');
   assert.equal(after.getPushOutcomes('ffff000002', [repo.path])[0]?.kind, 'pending', 'not given up on');
   after.close();
+});
+
+test('the daemon that gets the port fails runs and gives up on pushes the last one left behind', async () => {
+  const home = mkdtempSync(join(process.env.TMPDIR!, 'purr-test-home-'));
+  const db = openDb(join(home, 'purr.db'));
+  // a daemon in a test must not review anything: no project folders, reviews paused
+  db.setSettings({ ...db.getSettings(), projectFolders: [], reviewsPaused: true });
+  const repoPath = tempRepo();
+  const repo = await addRepo(db, repoPath);
+  const left = run({ repoId: repo.id, repoPath, headSha: 'abcd000001', status: 'running' });
+  db.putRun(left);
+  db.setPushOutcome({ sha: 'abcd000002', kind: 'pending', reason: 'waiting', repoPath: repo.path, branch: 'feat' });
+  db.close();
+  const free = createServer();
+  await new Promise<void>((r) => free.listen(0, '127.0.0.1', () => r()));
+  const port = (free.address() as { port: number }).port;
+  await new Promise<void>((r) => free.close(() => r()));
+  const d = spawn(process.execPath, [CLI, 'daemon', '--port', String(port)], { env: { ...process.env, PURR_HOME: home, PURR_NO_GLOBAL_HOOKS: '1' } });
+  try {
+    await new Promise<void>((res, rej) => {
+      const t = setTimeout(() => rej(new Error('daemon never listened')), 20_000);
+      d.stdout.on('data', (b) => { if (String(b).includes('listening')) { clearTimeout(t); res(); } });
+    });
+    const after = openDb(join(home, 'purr.db'));
+    assert.equal(after.getRun(left.id)!.status, 'failed');
+    assert.equal(after.getPushOutcomes('abcd000002', [repo.path])[0]?.kind, 'skipped');
+    after.close();
+  } finally { d.kill(); }
 });

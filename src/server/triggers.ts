@@ -202,7 +202,11 @@ export class PostPushWatcher {
       if (this.lastSeen.get(handled) === pr.headRefOid) continue;   // the push hook (from any clone) has it
       if (seen === undefined) {
         const opened = pr.createdAt ? Date.parse(pr.createdAt) : 0;
-        if (!(opened >= (marks.get(pr.account) ?? this.startedAt))) continue;
+        // an older PR, unless its head is a push the hook saw with no PR to review it through (opened while PuRR
+        // was down, say): that push is still owed its review
+        const owed = this.db.getPushOutcomes(pr.headRefOid, local.map((c) => c.path))
+          .some((o) => o.kind === 'no-pr' && o.sha === pr.headRefOid.toLowerCase());
+        if (!owed && !(opened >= (marks.get(pr.account) ?? this.startedAt))) continue;
       }
       this.lastSeen.set(handled, pr.headRefOid);
       this.mgr.schedulePostPush({

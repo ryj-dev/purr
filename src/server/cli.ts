@@ -257,8 +257,10 @@ async function runQuery(db: DB, currentBranchByDefault: boolean): Promise<RunQue
   };
   if (currentBranchByDefault && pr == null && !q.branch && !q.sha) {
     const local = await currentBranch(cwd);
-    // reviews are recorded under the remote's name for the branch (git push origin foo:bar is reviewed as bar)
-    q.branch = local ? (await upstreamBranch(cwd, local)) ?? local : null;
+    q.branch = local;
+    // reviews are recorded under the name it was pushed as (git push -u origin foo:bar is reviewed as bar): the
+    // upstream's name, if nothing is recorded under the local one (a branch made from origin/main tracks main)
+    if (local && !db.findRuns({ ...q, limit: 1 }).length) q.branch = (await upstreamBranch(cwd, local)) ?? local;
     // detached (a review worktree, CI): the commit checked out, not every branch's latest review
     if (!q.branch) q.sha = await headSha(cwd);
     if (!q.branch && !q.sha) throw new UsageError('nothing is checked out here: pass --pr, --branch or --sha');
@@ -310,9 +312,13 @@ async function findingsCmd(): Promise<number> {
       if (!st.done) { console.error(`purr: review ${run.id} is still ${run.status} after ${timeoutSec}s`); return 3; }
     } else {
       const find = () => runId ? db.getRun(runId) : db.findRuns({ ...q, limit: 1 })[0] ?? null;
-      run = wait ? (await waitForReview({ check: async () => { const r = find(); return { run: r, done: !r || isFinished(r) }; } }, {
+      // waits for a review that isn't queued yet, too (the PR's first, still in its debounce)
+      run = wait ? (await waitForReview({ check: async () => { const r = find(); return { run: r, done: !!r && isFinished(r) }; } }, {
         timeoutMs: timeoutSec * 1000,
-        onChange: (r) => { if (r && !isFinished(r)) process.stderr.write(`${C.dim}purr: review ${r.id} is ${r.status}…${C.x}\n`); },
+        onChange: (r) => {
+          if (!r) process.stderr.write(`${C.dim}purr: no review of ${runId ? `run ${runId}` : describe(q)} yet; waiting…${C.x}\n`);
+          else if (!isFinished(r)) process.stderr.write(`${C.dim}purr: review ${r.id} is ${r.status}…${C.x}\n`);
+        },
       })).run : find();
       if (!run) { console.error(`purr: no review of ${runId ? `run ${runId}` : describe(q)} found (purr runs lists them)`); return 3; }
     }
