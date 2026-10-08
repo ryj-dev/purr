@@ -41,7 +41,7 @@ export class RunManager {
   bus = new EventEmitter();
   private controllers = new Map<string, AbortController>();
   private pending = new Map<string, { req: RunRequest; run: Run }>();   // queued while paused
-  private debounces = new Map<string, NodeJS.Timeout>();
+  private debounces = new Map<string, { timer: NodeJS.Timeout; head: string | null }>();
   private pauseTimer: NodeJS.Timeout | null = null;
 
   constructor(db: DB, claude: ClaudeRunner) {
@@ -143,20 +143,27 @@ export class RunManager {
 
   /** Debounced post-push: a burst of pushes to one branch produces one review of the latest. */
   schedulePostPush(req: RunRequest) {
-    if (this.db.getSettings().reviewsPaused) return; // paused from the tray or Settings
+    const outcome = (sha: string | null | undefined, kind: 'superseded' | 'skipped', reason: string, nextSha: string | null = null) => {
+      if (sha) this.db.setPushOutcome({ sha, kind, reason, repoPath: req.repoPath, branch: req.branch ?? null, nextSha });
+    };
+    const skip = (reason: string) => outcome(req.head, 'skipped', reason);
+    if (this.db.getSettings().reviewsPaused) return skip('reviews are paused'); // paused from the tray or Settings
     const key = `${req.repoPath}\u0000${req.branch}`;
     const prev = this.debounces.get(key);
-    if (prev) clearTimeout(prev);
+    if (prev) {
+      clearTimeout(prev.timer);
+      if (prev.head && req.head && prev.head !== req.head) outcome(prev.head, 'superseded', 'a newer push to the branch took its place', req.head);
+    }
     const delay = this.db.getSettings().debounceSec * 1000;
     const t = setTimeout(() => {
       this.debounces.delete(key);
       const run = this.createRun(req);
-      if (!run) return;
+      if (!run) return skip('the post-push trigger is off for this repo');
       this.supersede(req.repoPath, req.branch ?? null, run.id);
       this.start(req, run);
     }, delay);
     t.unref();
-    this.debounces.set(key, t);
+    this.debounces.set(key, { timer: t, head: req.head ?? null });
   }
 
   /** Prepares the change, runs the flow, applies the ledger and side effects. Resolves with the final run. */

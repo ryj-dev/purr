@@ -72,7 +72,7 @@ test('git push: pre-push scan blocks a secret; a clean push lands and queues the
     let post;
     for (let i = 0; i < 100 && !post; i++) {
       await new Promise((r) => setTimeout(r, 200));
-      post = db.listRuns(50).find((r) => r.trigger === 'post-push' && ['passed', 'failed', 'blocked'].includes(r.status));
+      post = db.listRuns(50).find((r) => r.trigger === 'post-push' && r.headSha === head && ['passed', 'failed', 'blocked'].includes(r.status));
     }
     assert.ok(post, 'post-push run finished');
     assert.equal(post!.status, 'passed', post!.error ?? '');

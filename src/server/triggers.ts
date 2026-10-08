@@ -76,7 +76,11 @@ export class PostPushWatcher {
           const pr = gh ? await this.deps.prForBranch(body.repoPath, body.branch) : null;
           // no open PR (a push to main, or a branch not yet proposed): no review, and nothing marked as handled, so
           // the poller reviews this commit when its PR is opened
-          if (prOnly && gh && !pr) return;
+          if (prOnly && gh && !pr) {
+            this.db.setPushOutcome({ sha: body.sha, kind: 'no-pr', reason: `${body.branch} has no open PR; it's reviewed once one is opened`,
+              repoPath: body.repoPath, branch: body.branch });
+            return;
+          }
           const key = this.handledKey(repo, body.branch);
           if (this.lastSeen.get(key) === body.sha) return;   // already scheduled from another clone
           this.lastSeen.set(key, body.sha);
@@ -88,6 +92,8 @@ export class PostPushWatcher {
         }
         await new Promise((r) => setTimeout(r, 3000));
       }
+      this.db.setPushOutcome({ sha: body.sha, kind: 'skipped', reason: `the push never showed up on ${remote}/${body.branch}`,
+        repoPath: body.repoPath, branch: body.branch });
     })().catch(() => {});
     this.confirming.add(confirm);
     void confirm.finally(() => this.confirming.delete(confirm));

@@ -10,7 +10,7 @@ import { ensureDefaults } from './flows/store.ts';
 import { exportFlow, importFlow, previewImport } from './flows/share.ts';
 import { readFileSync } from 'node:fs';
 import { currentBranch, headSha, repoRoot } from './git.ts';
-import { blockSessions, currentFindings, isActive, isFinished, resolvedBy, sameRepoIds, waitForRun } from './lookup.ts';
+import { ReviewWatch, blockSessions, currentFindings, isActive, isFinished, resolvedBy, sameRepoIds, waitForReview } from './lookup.ts';
 import { addRepo, startHttp } from './http.ts';
 import { installGlobalHooks, removePidFile, uninstallGlobalHooks, writePidFile } from './globalHooks.ts';
 import { type RunRequest, RunManager } from './manager.ts';
@@ -218,21 +218,38 @@ async function flowCmd(sub: string | undefined, arg: string | undefined): Promis
   }
 }
 
+class UsageError extends Error {}
+/** A flag's value: undefined when the flag is absent, a usage error when it's given without one. */
+function value(name: string): string | undefined {
+  const i = args.indexOf(`--${name}`);
+  if (i < 0) return undefined;
+  const v = args[i + 1];
+  if (v == null || v.startsWith('--')) throw new UsageError(`--${name} needs a value`);
+  return v;
+}
+function positiveInt(name: string): number | undefined {
+  const v = value(name);
+  if (v == null) return undefined;
+  if (!/^\d+$/.test(v) || Number(v) < 1) throw new UsageError(`--${name} takes a whole number above 0, not "${v}"`);
+  return Number(v);
+}
+
 /**
  * Filters shared by `purr findings` and `purr runs`: every clone of the repo at --repo (default: here), full reviews
  * (post-push and manual) unless --trigger says otherwise, and the current branch if `currentBranchByDefault` and no
- * --pr, --branch or --sha narrows it.
+ * --pr, --branch or --sha narrows it. null when PuRR doesn't know the repo.
  */
-async function runQuery(db: DB, currentBranchByDefault: boolean): Promise<RunQuery | string> {
-  const cwd = flag('repo') ?? process.cwd();
+async function runQuery(db: DB, currentBranchByDefault: boolean): Promise<RunQuery | null> {
+  const cwd = value('repo') ?? process.cwd();
+  const pr = positiveInt('pr') ?? null;
+  const sha = value('sha') ?? null;
+  if (sha != null && !/^[0-9a-f]{4,40}$/i.test(sha)) throw new UsageError(`--sha takes 4 to 40 hex digits of a commit, not "${sha}"`);
+  const trigger = value('trigger');
+  if (trigger && trigger !== 'all' && !TRIGGERS.includes(trigger as TriggerKind)) throw new UsageError(`--trigger is one of ${TRIGGERS.join(', ')} or all`);
   const repoIds = await sameRepoIds(db, cwd);
-  if (!repoIds.length) return `PuRR hasn't seen the repo at ${cwd} yet (commit or push through it, or run: purr repo add)`;
-  const pr = flag('pr') != null ? Number(flag('pr')) : null;
-  if (pr != null && !Number.isInteger(pr)) return '--pr takes a PR number';
-  const trigger = flag('trigger');
-  if (trigger && trigger !== 'all' && !TRIGGERS.includes(trigger as TriggerKind)) return `--trigger is one of ${TRIGGERS.join(', ')} or all`;
+  if (!repoIds.length) return null;
   const q: RunQuery = {
-    repoIds, pr, branch: flag('branch') ?? null, sha: flag('sha') ?? null,
+    repoIds, pr, branch: value('branch') ?? null, sha,
     triggers: trigger === 'all' ? undefined : trigger ? [trigger as TriggerKind] : ['post-push', 'manual'],
   };
   if (currentBranchByDefault && pr == null && !q.branch && !q.sha) q.branch = await currentBranch(cwd);
@@ -240,33 +257,51 @@ async function runQuery(db: DB, currentBranchByDefault: boolean): Promise<RunQue
 }
 
 const describe = (q: RunQuery) => q.pr != null ? `PR #${q.pr}` : q.sha ? `commit ${q.sha.slice(0, 12)}` : q.branch ? `branch ${q.branch}` : 'this repo';
+const unknownRepo = () => `PuRR hasn't seen the repo at ${value('repo') ?? process.cwd()} yet (commit or push through it, or run: purr repo add)`;
+/** Local time, to the minute. */
+const localTime = (iso: string) => {
+  const d = new Date(iso), p = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+};
 
-/** `purr findings`: the latest review's findings, optionally waiting for one in progress or about to start. */
+/**
+ * `purr findings`: the latest review's findings, optionally waiting for one in progress or about to start.
+ * Exit 0 clean, 1 must-fix, 2 the review failed / was cancelled / superseded, 3 no finished review (none, unknown
+ * repo, still running, won't be reviewed, or the wait timed out), 4 usage error.
+ */
 async function findingsCmd(): Promise<number> {
   const db = openDb();
   try {
-    const runId = flag('run');
+    const runId = value('run');
     const q = runId ? {} : await runQuery(db, true);
-    if (typeof q === 'string') { console.error(`purr: ${q}`); return 2; }
-    const find = () => runId ? db.getRun(runId) : db.findRuns({ ...q, limit: 1 })[0] ?? null;
+    if (!q) { console.error(`purr: ${unknownRepo()}`); return 3; }
+    const wait = args.includes('--wait');
+    const timeoutSec = positiveInt('timeout') ?? 1800;
     let run: Run | null;
-    if (args.includes('--wait')) {
-      // with nothing to narrow it, wait for the review of the commit checked out here (the one just pushed)
-      if (!runId && q.pr == null && !q.sha && !flag('branch')) q.sha = await headSha(flag('repo') ?? process.cwd());
-      const label = runId ? `run ${runId}` : describe(q);
-      const timeoutSec = Number(flag('timeout') ?? 1800);
-      if (!find()) process.stderr.write(`${C.dim}purr: no review of ${label} yet; waiting (a review starts about a minute after the push lands)…${C.x}\n`);
-      run = await waitForRun(find, {
+    if (wait && !runId) {
+      // with nothing to narrow it, wait for the review of the commit checked out here (the one just pushed), under
+      // whatever name it was pushed as
+      if (q.pr == null && !q.sha && !value('branch')) { q.sha = await headSha(value('repo') ?? process.cwd()); q.branch = null; }
+      const watch = new ReviewWatch(db, q);
+      const label = describe(q);
+      let notes = 0;
+      const st = await waitForReview(watch, {
         timeoutMs: timeoutSec * 1000,
-        onChange: (r) => { if (r && !isFinished(r)) process.stderr.write(`${C.dim}purr: review ${r.id} is ${r.status}…${C.x}\n`); },
+        onChange: (r) => {
+          for (; notes < watch.notes.length; notes++) process.stderr.write(`${C.dim}purr: ${watch.notes[notes]}${C.x}\n`);
+          if (!r) process.stderr.write(`${C.dim}purr: no review of ${label} yet; waiting (a review starts about a minute after the push lands)…${C.x}\n`);
+          else if (!isFinished(r)) process.stderr.write(`${C.dim}purr: review ${r.id} is ${r.status}…${C.x}\n`);
+        },
       });
-      if (!run) {
-        console.error(`purr: no review of ${label} appeared within ${timeoutSec}s. Was it pushed, and does it have an open PR (PuRR reviews only PRs by default)?`);
-        return 3;
-      }
-      if (!isFinished(run)) { console.error(`purr: review ${run.id} is still ${run.status} after ${timeoutSec}s`); return 3; }
+      for (; notes < watch.notes.length; notes++) process.stderr.write(`${C.dim}purr: ${watch.notes[notes]}${C.x}\n`);
+      if (st.stop) { console.error(`purr: ${st.stop}`); return 3; }
+      run = st.run;
+      if (!run) { console.error(`purr: no review of ${label} appeared within ${timeoutSec}s`); return 3; }
+      if (!st.done) { console.error(`purr: review ${run.id} is still ${run.status} after ${timeoutSec}s`); return 3; }
     } else {
-      run = find();
+      const find = () => runId ? db.getRun(runId) : db.findRuns({ ...q, limit: 1 })[0] ?? null;
+      run = wait ? (await waitForReview({ check: async () => { const r = find(); return { run: r, done: !r || isFinished(r) }; } },
+        { timeoutMs: timeoutSec * 1000 })).run : find();
       if (!run) { console.error(`purr: no review of ${runId ? `run ${runId}` : describe(q)} found (purr runs lists them)`); return 3; }
     }
     const findings = currentFindings(db, run);
@@ -275,7 +310,7 @@ async function findingsCmd(): Promise<number> {
     if (args.includes('--json')) {
       console.log(JSON.stringify({ run: { ...run, flow: undefined }, findings, resolved, sessions }, null, 2));
     } else {
-      const ref = [run.pr ? `PR #${run.pr.number} ${run.pr.url}` : run.branch, run.headSha?.slice(0, 12), run.finishedAt ?? run.queuedAt].filter(Boolean);
+      const ref = [run.pr ? `PR #${run.pr.number} ${run.pr.url}` : run.branch, run.headSha?.slice(0, 12), localTime(run.finishedAt ?? run.queuedAt)].filter(Boolean);
       process.stderr.write(`${C.dim}${run.id} · ${ref.join(' · ')}${C.x}\n`);
       report(run, findings, { all: args.includes('--all'), detail: true });
       if (resolved.length) {
@@ -288,29 +323,36 @@ async function findingsCmd(): Promise<number> {
         for (const b of asked) process.stderr.write(`  ${C.dim}${b}: ${sessions[b]}${C.x}\n`);
       }
     }
-    if (!isFinished(run) || run.status === 'failed' || run.status === 'cancelled' || run.status === 'superseded') return 2;
+    if (!isFinished(run)) return 3;
+    if (run.status === 'failed' || run.status === 'cancelled' || run.status === 'superseded') return 2;
     return findings.some((f) => f.severity === 'must_fix' && isActive(f)) ? 1 : 0;
+  } catch (e) {
+    if (e instanceof UsageError) { console.error(`purr: ${e.message}`); return 4; }
+    throw e;
   } finally {
     db.close();
   }
 }
 
-/** `purr runs`: recent reviews of this repo, newest first. */
+/** `purr runs`: recent reviews of this repo, newest first. Exit 3 for an unknown repo, 4 for a usage error. */
 async function runsCmd(): Promise<number> {
   const db = openDb();
   try {
     const q = await runQuery(db, false);
-    if (typeof q === 'string') { console.error(`purr: ${q}`); return 2; }
-    const runs = db.findRuns({ ...q, limit: Number(flag('limit') ?? 20) });
+    if (!q) { console.error(`purr: ${unknownRepo()}`); return 3; }
+    const runs = db.findRuns({ ...q, limit: positiveInt('limit') ?? 20 });
     if (args.includes('--json')) { console.log(JSON.stringify(runs.map((r) => ({ ...r, flow: undefined })), null, 2)); return 0; }
     if (!runs.length) { console.error(`purr: no reviews of ${describe(q)} found`); return 0; }
     for (const r of runs) {
       const c = r.counts;
-      console.log([r.id, r.status.padEnd(10), r.trigger.padEnd(9), (r.headSha ?? '').slice(0, 7).padEnd(7),
-        `${c.must_fix}/${c.consider}/${c.minor}`.padEnd(8), r.queuedAt.slice(0, 16).replace('T', ' '),
+      console.log([r.id, r.status.padEnd(10), r.trigger.padEnd(10), (r.headSha ?? '').slice(0, 7).padEnd(7),
+        `${c.must_fix}/${c.consider}/${c.minor}`.padEnd(8), localTime(r.queuedAt),
         [r.branch, r.pr ? `#${r.pr.number}` : null].filter(Boolean).join(' ')].join('  '));
     }
     return 0;
+  } catch (e) {
+    if (e instanceof UsageError) { console.error(`purr: ${e.message}`); return 4; }
+    throw e;
   } finally {
     db.close();
   }
@@ -362,7 +404,8 @@ const USAGE = `PuRR: Pull Request Reviewer
                                  run a flow now on the current branch (exit 0 clean, 1 must-fix, 2 failed)
   purr findings [--pr N | --branch B | --sha S | --run ID] [--wait [--timeout SECS]] [--all] [--json]
                                  the latest review's findings (default: this branch; with --wait, the review
-                                 of the commit checked out here). Exit 0 clean, 1 must-fix, 2 failed, 3 none
+                                 of the commit checked out here). Exit 0 clean, 1 must-fix, 2 failed or
+                                 superseded, 3 no finished review, 4 usage error
   purr runs [--pr N | --branch B | --sha S] [--limit N] [--json]
                                  recent reviews of this repo (must-fix/consider/minor counts)
                                  both take --repo P, and --trigger post-push|manual|pre-push|pre-commit|all

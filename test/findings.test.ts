@@ -5,7 +5,7 @@ import { mkdtempSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
 import { openDb } from '../src/server/db.ts';
 import { addRepo } from '../src/server/http.ts';
-import { currentFindings, isActive, resolvedBy, sameRepoIds, waitForRun } from '../src/server/lookup.ts';
+import { ReviewWatch, currentFindings, isActive, resolvedBy, sameRepoIds, waitForReview } from '../src/server/lookup.ts';
 import { applyLedger } from '../src/server/ledger.ts';
 import type { Finding, Run } from '../src/shared/types.ts';
 
@@ -38,6 +38,7 @@ test('findRuns filters by repo, branch, PR, sha prefix and trigger, newest first
   assert.deepEqual(ids({ repoIds: ['r1'], triggers: ['pre-push'] }), ['hook']);
   assert.deepEqual(ids({ repoIds: [] }), [], 'no known repo matches nothing');
   assert.deepEqual(ids({ sha: "a%' OR 1=1 --" }), [], 'sha is a hex prefix, nothing else');
+  assert.deepEqual(ids({ sha: '--zz' }), [], 'no hex at all matches nothing, not everything');
   db.close();
 });
 
@@ -72,17 +73,71 @@ test('currentFindings shows a dismissal made after the run, and a reopen', () =>
   db.close();
 });
 
-test('waitForRun waits for a run to appear and finish, and gives up at the timeout', async () => {
+test('waitForReview waits for the watch to finish, gives up at the timeout, and refuses a bad timeout', async () => {
   let calls = 0;
   const seen: (string | null)[] = [];
-  const run = await waitForRun(() => {
+  const watch = (f: () => Run | null) => ({ check: async () => { const run = f(); return { run, done: !!run && run.status === 'passed' }; } });
+  const st = await waitForReview(watch(() => {
     calls++;
     return calls < 2 ? null : fakeRun({ id: 'w', status: calls < 4 ? 'running' : 'passed' });
-  }, { timeoutMs: 5000, intervalMs: 5, onChange: (r) => seen.push(r?.status ?? null) });
-  assert.equal(run?.status, 'passed');
+  }), { timeoutMs: 5000, intervalMs: 5, onChange: (r) => seen.push(r?.status ?? null) });
+  assert.equal(st.run?.status, 'passed');
   assert.deepEqual(seen, ['running', 'passed']);
-  assert.equal(await waitForRun(() => null, { timeoutMs: 30, intervalMs: 5 }), null);
-  assert.equal((await waitForRun(() => fakeRun({ status: 'queued' }), { timeoutMs: 30, intervalMs: 5 }))?.status, 'queued');
+  assert.equal((await waitForReview(watch(() => null), { timeoutMs: 30, intervalMs: 5 })).run, null);
+  assert.equal((await waitForReview(watch(() => fakeRun({ status: 'queued' })), { timeoutMs: 30, intervalMs: 5 })).run?.status, 'queued');
+  await assert.rejects(waitForReview(watch(() => null), { timeoutMs: NaN }), /Bad timeout/);
+});
+
+test('ReviewWatch follows a newer push that took a commit\'s place, and stops when no review will come', async () => {
+  const db = openDb(join(mkdtempSync(join(process.env.TMPDIR!, 'purr-db-')), 'purr.db'));
+  const q = { repoIds: ['r1'], triggers: ['post-push' as const, 'manual' as const] };
+  const outcome = (sha: string, kind: 'no-pr' | 'superseded' | 'skipped', nextSha: string | null = null) =>
+    db.setPushOutcome({ sha, kind, reason: kind, repoPath: '/x', branch: 'feat', nextSha });
+
+  // a re-push in the debounce: no run for A ever, B's review covers it
+  outcome('aaaa01', 'superseded', 'bbbb01');
+  const w1 = new ReviewWatch(db, { ...q, sha: 'aaaa01' });
+  assert.deepEqual(await w1.check(), { run: null, done: false }, 'waits for B\'s review to exist');
+  db.putRun(fakeRun({ id: 'rb', repoId: 'r1', branch: 'feat', headSha: 'bbbb01', status: 'passed' }));
+  const st1 = await w1.check();
+  assert.equal(st1.run?.id, 'rb');
+  assert.equal(st1.done, true);
+  assert.match(w1.notes[0], /following the review of bbbb01/);
+
+  // a running review superseded by a newer push's review
+  db.putRun(fakeRun({ id: 'rc', repoId: 'r1', branch: 'feat', headSha: 'cccc01', status: 'superseded' }));
+  const w2 = new ReviewWatch(db, { ...q, sha: 'cccc01' });
+  assert.equal((await w2.check()).done, false, 'no newer review yet');
+  db.putRun(fakeRun({ id: 'rd', repoId: 'r1', branch: 'feat', headSha: 'dddd01', status: 'running' }));
+  assert.equal((await w2.check()).run?.id, 'rd');
+
+  // skipped for good, or for want of a PR unless one is open now
+  outcome('eeee01', 'skipped');
+  assert.match((await new ReviewWatch(db, { ...q, sha: 'eeee01' }).check()).stop ?? '', /won't be reviewed: skipped/);
+  outcome('ffff01', 'no-pr');
+  const noPr = await new ReviewWatch(db, { ...q, sha: 'ffff01' }, async () => null).check();
+  assert.equal(noPr.done, true);
+  const prNow = await new ReviewWatch(db, { ...q, sha: 'ffff01' }, async () => ({ number: 9 }) as any).check();
+  assert.deepEqual(prNow, { run: null, done: false }, 'a PR opened since: the poller reviews it, keep waiting');
+  db.close();
+});
+
+test('a fix on another branch, or by an earlier run, doesn\'t mark a run\'s finding fixed', () => {
+  const db = openDb(join(mkdtempSync(join(process.env.TMPDIR!, 'purr-db-')), 'purr.db'));
+  const review = (id: string, branch: string, raised: Finding[]) => {
+    const run = fakeRun({ id, repoId: 'r1', branch, flowId: 'full' });
+    db.putRun(run);
+    applyLedger(db, run, raised, new Set(['b']));
+    db.setRunFindings(run.id, raised);
+    return run;
+  };
+  review('b1', 'stack-b', [finding('shared')]);
+  const a = review('a1', 'stack-a', [finding('shared')]);   // the ledger row now belongs to stack-a
+  review('a2', 'stack-a', []);                               // stack-a fixed it
+  assert.equal(currentFindings(db, a)[0].ledger, 'fixed');
+  const b = db.getRun('b1')!;
+  assert.notEqual(currentFindings(db, b)[0].ledger, 'fixed', 'stack-b still has it');
+  db.close();
 });
 
 test('a finding the next full review no longer raises is resolved by that review, and shows as fixed on the old run', () => {

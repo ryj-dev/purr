@@ -53,6 +53,20 @@ export interface RunQuery {
   limit?: number;
 }
 
+/**
+ * Why a pushed commit got no review of its own: its branch had no open PR (it gets one once a PR is opened), a newer
+ * push to the branch took its place (`nextSha`, whose review covers it), or reviews were off.
+ */
+export interface PushOutcome {
+  sha: string;
+  kind: 'no-pr' | 'superseded' | 'skipped';
+  reason: string;
+  repoPath: string;
+  branch: string | null;
+  nextSha?: string | null;
+  at: string;
+}
+
 export function openDb(file = paths.db) {
   const db = new DatabaseSync(file);
   db.exec(`
@@ -71,6 +85,7 @@ export function openDb(file = paths.db) {
     CREATE TABLE IF NOT EXISTS ledger (fingerprint TEXT NOT NULL, repo_id TEXT NOT NULL, branch TEXT, state TEXT NOT NULL,
       data TEXT NOT NULL, first_run_id TEXT NOT NULL, last_run_id TEXT NOT NULL, updated_at TEXT NOT NULL,
       PRIMARY KEY (fingerprint, repo_id));
+    CREATE TABLE IF NOT EXISTS push_outcomes (sha TEXT PRIMARY KEY, data TEXT NOT NULL, at TEXT NOT NULL);
   `);
   try { db.exec('ALTER TABLE ledger ADD COLUMN flow_id TEXT'); } catch { /* already there */ }
 
@@ -185,7 +200,11 @@ export function openDb(file = paths.db) {
       if (q.repoIds) { where.push(`repo_id IN (${q.repoIds.map(() => '?').join(', ') || 'NULL'})`); args.push(...q.repoIds); }
       if (q.branch) { where.push("json_extract(data, '$.branch') = ?"); args.push(q.branch); }
       if (q.pr != null) { where.push("json_extract(data, '$.pr.number') = ?"); args.push(q.pr); }
-      if (q.sha) { where.push("json_extract(data, '$.headSha') LIKE ?"); args.push(`${q.sha.replace(/[^0-9a-f]/gi, '')}%`); }
+      if (q.sha != null) {
+        const hex = q.sha.replace(/[^0-9a-f]/gi, '');
+        if (!hex) return [];   // an empty prefix would match every run
+        where.push("json_extract(data, '$.headSha') LIKE ?"); args.push(`${hex}%`);
+      }
       if (q.triggers?.length) { where.push(`json_extract(data, '$.trigger') IN (${q.triggers.map(() => '?').join(', ')})`); args.push(...q.triggers); }
       const sql = `SELECT data FROM runs ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY queued_at DESC LIMIT ?`;
       return (db.prepare(sql).all(...args, q.limit ?? 50) as { data: string }[]).map((r) => {
@@ -216,6 +235,18 @@ export function openDb(file = paths.db) {
       return rows.length;
     },
 
+    // pushes the hook reported that PuRR then decided not to review, so `purr findings --wait` can stop waiting
+    setPushOutcome: (o: Omit<PushOutcome, 'at'>) =>
+      db.prepare('INSERT INTO push_outcomes (sha, data, at) VALUES (?, ?, ?) ON CONFLICT(sha) DO UPDATE SET data = excluded.data, at = excluded.at')
+        .run(o.sha, JSON.stringify(o), now()),
+    getPushOutcome: (shaPrefix: string): PushOutcome | null => {
+      const hex = shaPrefix.replace(/[^0-9a-f]/gi, '');
+      if (!hex) return null;
+      const r = db.prepare('SELECT data, at FROM push_outcomes WHERE sha LIKE ? ORDER BY at DESC LIMIT 1').get(`${hex}%`) as
+        { data: string; at: string } | undefined;
+      return r ? { ...JSON.parse(r.data), at: r.at } : null;
+    },
+
     // sessions (for the daily cap and audit)
     recordSession: (id: string, runId: string, blockId: string, data: unknown) =>
       db.prepare('INSERT OR REPLACE INTO sessions (id, run_id, block_id, created_at, data) VALUES (?, ?, ?, ?, ?)')
@@ -239,6 +270,10 @@ export function openDb(file = paths.db) {
       const sql = `SELECT * FROM ledger ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY updated_at DESC LIMIT 1000`;
       return (db.prepare(sql).all(...args) as unknown as LedgerRow[]).map(fromLedgerRow);
     },
+    /** Ledger items a run marked fixed (raised before on its branch, not by it). */
+    listFixedBy: (repoId: string, runId: string): LedgerItem[] =>
+      (db.prepare("SELECT * FROM ledger WHERE repo_id = ? AND state = 'fixed' AND last_run_id = ?").all(repoId, runId) as unknown as LedgerRow[])
+        .map(fromLedgerRow),
     findLedgerByFingerprint: (fingerprint: string, repoId?: string): LedgerItem | null => {
       const r = (repoId
         ? db.prepare('SELECT * FROM ledger WHERE fingerprint = ? AND repo_id = ?').get(fingerprint, repoId)
