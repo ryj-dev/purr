@@ -12,7 +12,7 @@ import { remoteUrl, repoRoot } from './git.ts';
 import { ghAuthed } from './gh.ts';
 import type { RunManager } from './manager.ts';
 import type { PostPushWatcher } from './triggers.ts';
-import { newId, now, which } from './util.ts';
+import { Semaphore, newId, now, which } from './util.ts';
 import { VERSION, WEB_DIR as WEB } from './runtime.ts';
 import { GLOBAL_HOOKS_DIR, currentGlobalHooksPath, repoOwnHooksPath } from './globalHooks.ts';
 
@@ -30,18 +30,50 @@ async function tools(): Promise<AppState['tools']> {
   return t;
 }
 
-let hooksCache: { at: number; checked: Set<string>; v: AppState['globalHooks'] } | null = null;
-async function globalHooksState(repos: Repo[]): Promise<AppState['globalHooks']> {
-  if (hooksCache && Date.now() - hooksCache.at < 30_000 && repos.every((r) => hooksCache!.checked.has(r.id))) return hooksCache.v;
-  const [hooksPath, own] = await Promise.all([
-    currentGlobalHooksPath(),
-    Promise.all(repos.map(async (r) => [r.id, await repoOwnHooksPath(r.path)] as const)),
-  ]);
-  const ownHooks: Record<string, string> = {};
-  for (const [id, p] of own) if (p) ownHooks[id] = p;
-  const v = { active: hooksPath === GLOBAL_HOOKS_DIR, hooksPath, ownHooks };
-  hooksCache = { at: Date.now(), checked: new Set(repos.map((r) => r.id)), v };
-  return v;
+let hooksCache: { at: number; v: Promise<{ active: boolean; hooksPath: string | null }> } | null = null;
+function globalHooksPath() {
+  // concurrent requests share one git call (every open window refetches state at once)
+  if (!hooksCache || Date.now() - hooksCache.at >= 30_000) {
+    hooksCache = { at: Date.now(), v: currentGlobalHooksPath().then((hooksPath) => ({ active: hooksPath === GLOBAL_HOOKS_DIR, hooksPath })) };
+  }
+  return hooksCache.v;
+}
+
+/**
+ * Which repos set their own core.hooksPath. That's a git call per repo, and a repo on a slow or unplugged volume can
+ * take seconds, so it never holds up /api/state (the desktop app gives up on it after 1.5s): the last result is
+ * served straight away and a stale one is refreshed in the background, a few repos at a time, one refresh at once.
+ * onChange fires when the answer changes, so open windows pick it up.
+ */
+export function ownHooksTracker(onChange: () => void, ttlMs = 30_000) {
+  let known: Record<string, string> = {};
+  let checked = new Set<string>();
+  let at = 0;
+  let refreshing: Promise<void> | null = null;
+  const gate = new Semaphore(4);
+  const refresh = async (repos: Repo[]) => {
+    const found = await Promise.all(repos.map(async (r) => {
+      const release = await gate.acquire();
+      // a repo that didn't answer in time keeps what was known about it
+      try { return [r.id, await repoOwnHooksPath(r.path)] as const; } catch { return [r.id, known[r.id] ?? null] as const; } finally { release(); }
+    }));
+    const next: Record<string, string> = {};
+    for (const [id, p] of found) if (p) next[id] = p;
+    const changed = JSON.stringify(next) !== JSON.stringify(known);
+    known = next;
+    checked = new Set(repos.map((r) => r.id));
+    at = Date.now();
+    if (changed) onChange();
+  };
+  return {
+    get(repos: Repo[]): Record<string, string> {
+      const stale = Date.now() - at >= ttlMs || repos.some((r) => !checked.has(r.id));
+      if (stale && !refreshing) refreshing = refresh(repos).catch(() => {}).finally(() => { refreshing = null; });
+      return known;
+    },
+    /** Resolves when the refresh in progress, if any, is done (for tests). */
+    settled: () => refreshing ?? Promise.resolve(),
+  };
 }
 
 async function body<T>(req: IncomingMessage): Promise<T> {
@@ -80,6 +112,7 @@ export function startHttp(db: DB, mgr: RunManager, watcher: PostPushWatcher, por
     for (const c of clients) c.write(line);
   });
   const broadcastState = () => mgr.emit({ type: 'state' });
+  const ownHooks = ownHooksTracker(broadcastState);
 
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://localhost');
@@ -116,7 +149,7 @@ export function startHttp(db: DB, mgr: RunManager, watcher: PostPushWatcher, por
         const state: AppState = {
           settings: db.getSettings(), usage: db.getUsage(), repos, flows: db.listFlows(),
           triggers: db.listTriggers(), tools: await tools(), version: VERSION,
-          globalHooks: await globalHooksState(repos),
+          globalHooks: { ...(await globalHooksPath()), ownHooks: ownHooks.get(repos) },
         };
         return send(200, state);
       }

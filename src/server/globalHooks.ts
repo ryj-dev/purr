@@ -66,9 +66,11 @@ async function gitGlobal(args: string[]) {
 /**
  * The hooks path a repo sets for itself (husky, a team's .githooks), or null. git prefers it over the global one, so
  * PuRR's commit and push checks don't run there; only repo and worktree scopes count, and PuRR's own folder doesn't.
+ * Throws if git doesn't answer within 2s (a slow or unplugged volume), so callers can keep what they knew.
  */
 export async function repoOwnHooksPath(repoPath: string): Promise<string | null> {
-  const r = await exec('git', ['-C', repoPath, 'config', '--show-scope', '--type=path', '--get', 'core.hooksPath'], { timeoutMs: 15_000 });
+  const r = await exec('git', ['-C', repoPath, 'config', '--show-scope', '--type=path', '--get', 'core.hooksPath'], { timeoutMs: 2_000 });
+  if (r.timedOut) throw new Error(`git config timed out in ${repoPath}`);
   if (r.code !== 0) return null;
   const [scope, ...rest] = r.stdout.trim().split('\t');
   const value = rest.join('\t');

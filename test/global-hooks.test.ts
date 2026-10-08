@@ -78,6 +78,39 @@ test('repos with their own core.hooksPath are spotted; global and PuRR paths are
   assert.equal(await repoOwnHooksPath(repo), null, "pointing at PuRR's own folder still runs PuRR");
   git(repo, 'config', '--unset', 'core.hooksPath');
   assert.equal(await repoOwnHooksPath(repo), null);
+  // set for one worktree only (husky can do this)
+  git(repo, 'config', 'extensions.worktreeConfig', 'true');
+  git(repo, 'config', '--worktree', 'core.hooksPath', '.husky/_');
+  assert.equal(await repoOwnHooksPath(repo), '.husky/_', 'worktree scope counts');
   assert.equal(await repoOwnHooksPath(join(repo, 'missing')), null, 'a repo that is gone is not flagged');
+  writeFileSync(gitGlobal, '');
+});
+
+test('own-hooks flags refresh in the background: never awaited, one refresh at a time, change announced once', async () => {
+  const { ownHooksTracker } = await import('../src/server/http.ts');
+  writeFileSync(gitGlobal, `[core]\n\thooksPath = ${GLOBAL_HOOKS_DIR}\n`);
+  const a = tempRepo();
+  const b = tempRepo();
+  git(a, 'config', 'core.hooksPath', '.githooks');
+  const repos = [a, b].map((path, i) => ({ id: `r${i}`, path, name: `r${i}`, remoteUrl: null, addedAt: '' }));
+  let changes = 0;
+  const t = ownHooksTracker(() => changes++, 50);
+  assert.deepEqual(t.get(repos), {}, 'the first call answers at once, before git has');
+  const first = t.settled();
+  t.get(repos);
+  assert.equal(t.settled(), first, 'a second call while refreshing shares the same refresh');
+  await first;
+  assert.deepEqual(t.get(repos), { r0: '.githooks' });
+  assert.equal(changes, 1, 'the change is announced so open windows refetch');
+  await new Promise((r) => setTimeout(r, 60));
+  t.get(repos);
+  await t.settled();
+  assert.equal(changes, 1, 'a refresh with the same answer stays quiet');
+  git(a, 'config', '--unset', 'core.hooksPath');
+  await new Promise((r) => setTimeout(r, 60));
+  t.get(repos);
+  await t.settled();
+  assert.deepEqual(t.get(repos), {});
+  assert.equal(changes, 2);
   writeFileSync(gitGlobal, '');
 });

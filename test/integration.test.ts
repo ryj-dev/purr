@@ -145,6 +145,8 @@ test('HTTP API: state, default flows read-only, duplicate/edit/delete, triggers,
   try {
     const st = await api('GET', '/api/state');
     assert.equal(st.status, 200);
+    assert.equal(typeof st.json.globalHooks.active, 'boolean');
+    assert.deepEqual(st.json.globalHooks.ownHooks, {}, 'own-hooks flags are served without waiting on git');
     assert.ok(st.json.flows.some((f: any) => f.id === 'default-review' && f.isDefault));
     assert.equal((await api('PUT', '/api/flows/default-review', { name: 'x' })).status, 403);
     assert.equal((await api('DELETE', '/api/flows/default-review')).status, 403);
