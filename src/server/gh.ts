@@ -16,10 +16,12 @@ export interface OpenPr extends PrInfo { repo: string; account: string }   // re
 
 const FIELDS = 'number,title,body,url,baseRefName,headRefName,headRefOid,isDraft,createdAt,state';
 
-async function gh(cwd: string, args: string[], opts: { input?: string; account?: string } = {}) {
+/** `token`: one already read for the account, used as it is (no second keychain read that could fail). */
+async function gh(cwd: string, args: string[], opts: { input?: string; account?: string; token?: string } = {}) {
   try {
     let env: NodeJS.ProcessEnv | undefined;
-    if (opts.account && multiAccount) {   // an older gh has one login and no --user: just use it
+    if (opts.token) env = { ...process.env, GH_TOKEN: opts.token };
+    else if (opts.account && multiAccount) {   // an older gh has one login and no --user: just use it
       const token = await tokenFor(opts.account);
       if (!token) return null;
       env = { ...process.env, GH_TOKEN: token };
@@ -149,15 +151,25 @@ export async function openPrsForAllAccounts(): Promise<PrFetch | null> {
  */
 export async function commentOnPr(repoPath: string, number: number, body: string, account?: string | null): Promise<boolean> {
   const accounts = await ghAccounts();
+  // each account's token is read once, with a second try for a keychain blip, and the post uses that same token
+  const tokenOf = async (a: string) => (await tokenFor(a)) ?? (await tokenFor(a));
   // as that account; else (signed out since, nothing sent yet) the first other account that can see the PR, which a
   // read-only `gh pr view` tells without posting anything
   let as: string | undefined = account ? undefined : accounts[0];   // none known: the active account, as gh would
-  if (account && (!multiAccount || await tokenFor(account) || await tokenFor(account))) as = account;   // a second try: a keychain blip
+  let token: string | null = null;
+  if (account) {
+    token = multiAccount ? await tokenOf(account) : null;
+    if (!multiAccount || token) as = account;
+  }
   // still signed in but no token even so: don't post as somebody else
   if (account && !as && accounts.includes(account)) return false;
   for (const a of as ? [] : accounts.filter((x) => x !== account)) {
-    if ((await gh(repoPath, ['pr', 'view', String(number), '--json', 'number'], { account: a })) !== null) { as = a; break; }
+    const t = multiAccount ? await tokenOf(a) : null;
+    if (multiAccount && !t) continue;
+    if ((await gh(repoPath, ['pr', 'view', String(number), '--json', 'number'], { account: a, token: t ?? undefined })) !== null) { as = a; token = t; break; }
   }
   if (!as) return false;
-  return (await gh(repoPath, ['pr', 'comment', String(number), '--body-file', '-'], { input: body, account: as })) !== null;
+  if (multiAccount && !token) token = await tokenOf(as);   // the active account, when no finding account was known
+  if (multiAccount && !token) return false;
+  return (await gh(repoPath, ['pr', 'comment', String(number), '--body-file', '-'], { input: body, account: as, token: token ?? undefined })) !== null;
 }

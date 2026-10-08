@@ -2,6 +2,7 @@
 // Installs run on the service (src/server/toolchain.ts); signing in and installing Homebrew happen in Terminal, so
 // while the popup is open it keeps checking and updates when they're done.
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { signInDone } from '../signIn.ts';
 import { Check, Download, LoaderCircle, LogIn, Plus, RotateCw, Terminal } from 'lucide-react';
 import type { ToolStatus, Toolchain } from '../../../src/shared/types.ts';
 import { api, errMsg } from '../api.ts';
@@ -55,15 +56,9 @@ export function ToolchainPopup({ onClose }: { onClose: () => void }) {
     } catch (e) { toast(errMsg(e), 'error'); }
   };
   const signIn = (t: ToolStatus) => {
-    // done once signed in and the account list changed; signing in again as a listed gh account changes nothing,
-    // so that wait can be dismissed (or ends by itself after five minutes)
-    const before = [...(t.auth?.accounts ?? [])].sort().join('\n');
-    const wasIn = !!t.auth?.signedIn;
-    inTerminal(`signing in to ${t.name}`, () => api.signIn(t.name as 'claude' | 'gh'), (d) => {
-      const now = d.tools.find((x) => x.name === t.name)?.auth;
-      // signed out before and in now (whether or not an account name shows), or a new account on a signed-in gh
-      return !!now?.signedIn && (!wasIn || [...now.accounts].sort().join('\n') !== before);
-    });
+    const before = t.auth;
+    inTerminal(`signing in to ${t.name}`, () => api.signIn(t.name as 'claude' | 'gh'),
+      (d) => signInDone(before, d.tools.find((x) => x.name === t.name)?.auth ?? null));
   };
   const install = async (t: ToolStatus) => {
     try { await api.installTool(t.name); load(); } catch (e) { toast(errMsg(e), 'error'); }
