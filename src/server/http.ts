@@ -133,7 +133,8 @@ export function startHttp(db: DB, mgr: RunManager, watcher: PostPushWatcher, por
         const next = { ...db.getSettings(), ...patch };
         if (Array.isArray(patch.projectFolders)) {
           const home = process.env.HOME ?? '';
-          next.projectFolders = uniqueFolders(patch.projectFolders.map((f) => resolve(String(f).trim().replace(/^~(?=\/|$)/, home))).filter(Boolean));
+          next.projectFolders = uniqueFolders(patch.projectFolders.map((f) => String(f).trim()).filter(Boolean)   // resolve('') would be the service's cwd
+            .map((f) => resolve(f.replace(/^~(?=\/|$)/, home))));
         }
         if (!(next.maxConcurrentClaude >= 1)) throw new HttpError(400, 'Max concurrent Claude sessions must be at least 1');
         if (!(next.port > 0 && next.port < 65536)) throw new HttpError(400, 'Port must be 1-65535');

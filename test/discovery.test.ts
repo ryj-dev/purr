@@ -1,7 +1,7 @@
 import { sh, tempRepo } from './helpers.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, realpathSync, renameSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, renameSync } from 'node:fs';
 import { join } from 'node:path';
 import { openDb } from '../src/server/db.ts';
 import { ensureDefaults } from '../src/server/flows/store.ts';
@@ -32,10 +32,11 @@ test('discovery finds main checkouts one and two levels down, not worktrees or n
   db.close();
 });
 
-test('project folders that differ only in letter case count once (case-insensitive disks)', async () => {
+test('project folders that differ only in letter case count once (case-insensitive disks)', async (t) => {
   const { uniqueFolders } = await import('../src/server/db.ts');
   const dir = realpathSync(mkdtempSync(join(process.env.TMPDIR!, 'purr-Case-')));
   const upper = dir.replace(/purr-Case-/, 'PURR-CASE-');
+  if (!existsSync(upper)) return t.skip('this disk is case-sensitive: the two names are two folders');
   assert.deepEqual(uniqueFolders([dir, upper, dir]), [dir]);
 });
 
@@ -147,5 +148,68 @@ test('a push made before its PR is opened is reviewed when the PR opens; one rev
   await watcher.pushIntent({ repoPath: wt, branch: 'feat', sha: 'c4' });
   await watcher.settled();
   assert.deepEqual(scheduled.map((r) => r.head), ['c1', 'c2', 'c3', 'c4'], 'hook from each clone: one review');
+
+  // post-push is off for the worktree's repo row only: its hook mustn't claim the push, so the poller reviews it
+  // through the main checkout (main checkouts come before worktrees)
+  db.setTrigger({ trigger: 'post-push', repoId: db.getRepoByPath(wt)!.id, flowId: null });
+  pushed = 'c5';
+  await watcher.pushIntent({ repoPath: wt, branch: 'feat', sha: 'c5' });
+  await watcher.settled();
+  assert.equal(scheduled.length, 4, 'the disabled clone schedules nothing');
+  prs = [{ ...prs[0], headRefOid: 'c5' }];
+  await watcher.poll();
+  assert.deepEqual(scheduled.map((r) => r.head), ['c1', 'c2', 'c3', 'c4', 'c5']);
+  assert.equal(scheduled[4].repoPath, a, 'reviewed in the main checkout');
   db.close();
+});
+
+test('project folders: the common ones by default, an emptied list stays empty, and Settings tidies what it saves', async () => {
+  const { openDb: open, defaultProjectFolders } = await import('../src/server/db.ts');
+  const { startHttp } = await import('../src/server/http.ts');
+  const db = open(join(mkdtempSync(join(process.env.TMPDIR!, 'purr-db-')), 'purr.db'));
+  assert.deepEqual(db.getSettings().projectFolders, defaultProjectFolders(), 'fresh: the common folders on this machine');
+  db.setSettings({ ...db.getSettings(), projectFolders: [] });
+  assert.deepEqual(db.getSettings().projectFolders, [], 'emptied on purpose: not refilled');
+
+  const mgr = new RunManager(db, new ClaudeRunner(db));
+  const server = startHttp(db, mgr, new PostPushWatcher(db, mgr), 0);
+  await new Promise((r) => server.once('listening', r));
+  try {
+    const home = realpathSync(process.env.HOME!);
+    const put = await fetch(`http://127.0.0.1:${(server.address() as { port: number }).port}/api/settings`, {
+      method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ projectFolders: ['~', '  ', '', ` ${home} `] }),
+    });
+    assert.equal(put.status, 200);
+    assert.deepEqual(db.getSettings().projectFolders, [home], '~ expanded, blanks dropped (not the cwd), duplicates merged');
+  } finally { server.close(); db.close(); }
+});
+
+test('a PR opened during a gh outage longer than ten minutes is still reviewed; one that predates the last poll is not', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
+  const db = openDb(); ensureDefaults(db);
+  const mgr = new RunManager(db, new ClaudeRunner(db));
+  const scheduled: string[] = [];
+  mgr.schedulePostPush = (req: RunRequest) => { scheduled.push(req.head!); };
+  const { root, a } = projectsFolder();
+  sh(a, 'remote', 'add', 'origin', 'https://github.com/work-org/app-d.git');
+  db.setSettings({ ...db.getSettings(), projectFolders: [root] });
+  let prs: OpenPr[] | null = [];
+  const watcher = new PostPushWatcher(db, mgr, { fetchPrs: async () => prs });
+  const pr = (n: number, sha: string, opened: number): OpenPr => ({ repo: 'work-org/app-d', number: n, headRefOid: sha, headRefName: `b${n}`,
+    baseRefName: 'main', title: 't', body: '', url: 'u', isDraft: false, account: 'me', createdAt: new Date(opened).toISOString() });
+  try {
+    await watcher.poll();                      // a good poll
+    prs = null;                                // gh is down...
+    t.mock.timers.tick(5 * 60_000);
+    const openedInOutage = Date.now();
+    t.mock.timers.tick(20 * 60_000);
+    await watcher.poll();
+    prs = [pr(1, 's1', openedInOutage)];       // ...and back, 25 minutes on
+    await watcher.poll();
+    assert.deepEqual(scheduled, ['s1']);
+    t.mock.timers.tick(60_000);
+    prs = [pr(1, 's1', openedInOutage), pr(2, 's2', openedInOutage)];   // first seen now (say its repo was just cloned)
+    await watcher.poll();
+    assert.deepEqual(scheduled, ['s1'], 'opened before the last good poll: already open, not new');
+  } finally { t.mock.timers.reset(); db.close(); }
 });

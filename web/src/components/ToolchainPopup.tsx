@@ -21,14 +21,26 @@ export function ToolchainPopup({ onClose }: { onClose: () => void }) {
   const waitingRef = useRef(waiting);
   waitingRef.current = waiting;
 
-  const load = useCallback(async () => {
-    try { setData(await api.toolchain(!!waitingRef.current)); setError(null); } catch (e) { setError(errMsg(e)); }
+  // one check at a time from the timer, and only the newest reply is shown: a slow check (gh, claude, --version)
+  // must not pile up behind the next, nor land late and flip a row back to how it was
+  const latest = useRef(0);
+  const pending = useRef(0);
+  const load = useCallback(async (fromTimer = false) => {
+    if (fromTimer && pending.current) return;
+    const n = ++latest.current;
+    pending.current++;
+    try {
+      const d = await api.toolchain(!!waitingRef.current);
+      if (n === latest.current) { setData(d); setError(null); }
+    } catch (e) {
+      if (n === latest.current) setError(errMsg(e));
+    } finally { pending.current--; }
   }, []);
 
   const busy = !!data?.tools.some((t) => t.job?.state === 'running');
   useEffect(() => {
     load();
-    const t = setInterval(load, busy ? 1200 : waiting ? 2500 : 5000);
+    const t = setInterval(() => load(true), busy ? 1200 : waiting ? 2500 : 5000);
     return () => clearInterval(t);
   }, [load, busy, waiting]);
   useEffect(() => {

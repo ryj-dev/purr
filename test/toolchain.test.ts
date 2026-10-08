@@ -10,7 +10,7 @@ import { ClaudeRunner } from '../src/server/claude.ts';
 import { RunManager } from '../src/server/manager.ts';
 import { startHttp } from '../src/server/http.ts';
 import { PostPushWatcher } from '../src/server/triggers.ts';
-import { asString, installMissing, installTool, refreshToolchain, signInCommand, toolchainStatus } from '../src/server/toolchain.ts';
+import { asString, installMissing, installTool, openSignIn, refreshToolchain, signInCommand, toolchainStatus } from '../src/server/toolchain.ts';
 import { expectGhSignIn, forgetGhAccounts, ghAccounts } from '../src/server/gh.ts';
 
 // A PATH holding only fake tools (plus the system basics), and a fake brew that "installs" by writing a fake tool.
@@ -181,7 +181,30 @@ test('after a gh sign-in starts, a new account shows up within seconds, not afte
     writeFileSync(accounts, 'me\n');
     t.mock.timers.tick(10_000);
     assert.equal((await ghAccounts()).length, 3, 'cached again');
-  } finally { t.mock.timers.reset(); forgetGhAccounts(); w.restore(); }
+  } finally { t.mock.timers.reset(); expectGhSignIn(0); w.restore(); }   // end the sign-in window for later tests
+});
+
+test('Sign in for gh opens its login in Terminal, then looks for the new account every few seconds', async (t) => {
+  const w = fakeWorld({ brew: false, have: [] });
+  const accounts = join(w.dir, 'accounts');
+  const ran = join(w.dir, 'osascript.log');
+  writeFileSync(join(w.dir, 'gh'), `#!/bin/sh\nwhile read a; do printf '  ✓ Logged in to github.com account %s (keyring)\\n  - Active account: false\\n' "$a"; done < "${accounts}"\n`);
+  writeFileSync(join(w.dir, 'osascript'), `#!/bin/sh\nprintf '%s\\n' "$@" >> "${ran}"\n`);
+  chmodSync(join(w.dir, 'gh'), 0o755);
+  chmodSync(join(w.dir, 'osascript'), 0o755);
+  process.env.PURR_OSASCRIPT = join(w.dir, 'osascript');
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
+  try {
+    writeFileSync(accounts, 'me\n');
+    forgetGhAccounts();
+    assert.deepEqual(await ghAccounts(), ['me']);
+    await openSignIn('gh');
+    assert.match(readFileSync(ran, 'utf8'), /do script ".*gh' auth login --hostname github\.com --web"/);
+    assert.deepEqual(await ghAccounts(), ['me']);
+    writeFileSync(accounts, 'me\nwork-me\n');   // the login finishes
+    t.mock.timers.tick(6_000);
+    assert.deepEqual(await ghAccounts(), ['me', 'work-me'], 'not the five-minute cache');
+  } finally { t.mock.timers.reset(); expectGhSignIn(0); delete process.env.PURR_OSASCRIPT; w.restore(); }
 });
 
 test('HTTP: /api/tools, installing, unknown tools, and scanners have nothing to sign in to', async () => {
