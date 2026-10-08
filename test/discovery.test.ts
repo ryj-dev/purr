@@ -450,7 +450,9 @@ test("a PR opened from a clone discovery only finds later (its own git hooks) is
   db.setSettings({ ...db.getSettings(), projectFolders: [root] });
   const pr: OpenPr = { repo: 'work-org/app-k', number: 1, headRefOid: 'h1', headRefName: 'f', baseRefName: 'main', title: 't', body: '', url: 'u',
     isDraft: false, account: 'me', createdAt: new Date(t0 + 3 * 60_000).toISOString() };
-  const watcher = new PostPushWatcher(db, mgr, { fetchPrs: async () => ({ prs: [pr], answered: ['me'] }) });
+  // opened after PuRR started, but long before the clone was: not one the clone's late discovery explains
+  const old: OpenPr = { ...pr, number: 2, headRefOid: 'h2', headRefName: 'g', createdAt: new Date(t0 + 30_000).toISOString() };
+  const watcher = new PostPushWatcher(db, mgr, { fetchPrs: async () => ({ prs: [pr, old], answered: ['me'] }) });
   try {
     await watcher.poll();                          // the PR is listed, but no clone of it is here yet
     t.mock.timers.tick(6 * 60_000);
@@ -459,8 +461,27 @@ test("a PR opened from a clone discovery only finds later (its own git hooks) is
     const dir = join(root, 'app-k');
     renameSync(tempRepo(), dir);
     sh(dir, 'remote', 'add', 'origin', 'https://github.com/work-org/app-k.git');
-    t.mock.timers.tick(5 * 60_000);
+    t.mock.timers.tick(6 * 60_000);   // discovered at t0 + 12min: PR 2 (t0 + 30s) is more than ten minutes before that
     await watcher.poll();
-    assert.deepEqual(scheduled, ['h1'], 'not taken for a PR that was already open');
+    assert.deepEqual(scheduled, ['h1'], 'PR 1 is new; PR 2 was already open long before the clone');
   } finally { t.mock.timers.reset(); db.close(); }
+});
+
+test("two quick pushes: the older one's slow PR lookup doesn't schedule it over the newer one", async () => {
+  const db = openDb(); ensureDefaults(db);
+  const mgr = new RunManager(db, new ClaudeRunner(db));
+  const scheduled: string[] = [];
+  mgr.schedulePostPush = (req: RunRequest) => { scheduled.push(req.head!); };
+  const { root, a } = projectsFolder();
+  sh(a, 'remote', 'add', 'origin', 'https://github.com/work-org/app-l.git');
+  db.setSettings({ ...db.getSettings(), projectFolders: [root], postPushPrsOnly: false });
+  let tip = 'c5';
+  const watcher = new PostPushWatcher(db, mgr, {
+    fetchPrs: async () => ({ prs: [], answered: ['me'] }), lsRemote: async () => tip, ghAuthed: async () => true,
+    prForBranch: async () => { tip = 'c6'; return null; },   // c6 lands while gh is asked about c5's PR
+  });
+  await watcher.pushIntent({ repoPath: a, branch: 'feat', sha: 'c5' });
+  await watcher.settled();
+  assert.deepEqual(scheduled, [], 'c5 is not scheduled: c6 is the push to review');
+  db.close();
 });
