@@ -258,6 +258,19 @@ test('purr findings: exit codes, usage errors, --json and purr runs', async (tc)
   db10.close();
   assert.equal(purr(repoPath, 'findings').status, 3, "no review of tracks-local; a branch named x's isn't its");
 
+  // the reviewer sessions to resume: the last one of the block behind a model finding, with the run's workdir
+  const dbS = openDb();
+  const reviewed = run({ repoId: repo.id, repoPath, headSha: 'abab0077', branch: 'sess', workdir: mkdtempSync(join(process.env.TMPDIR!, 'purr-workdir-')) });
+  dbS.putRun(reviewed);
+  dbS.setRunFindings(reviewed.id, [{ ...mustFix('s1f'), source: { blockId: 'lens-x', kind: 'model' } }]);
+  dbS.putBlockRun({ runId: reviewed.id, blockId: 'lens-x', status: 'done', startedAt: null, finishedAt: null, error: null,
+    output: { sessions: [{ sessionId: 'old-session' }, { sessionId: 'last-session' }] as any } });
+  dbS.close();
+  assert.equal(JSON.parse(purr(repoPath, 'findings', '--sha', 'abab0077', '--json').stdout).sessions['lens-x'], 'last-session');
+  const hint = purr(repoPath, 'findings', '--sha', 'abab0077').stderr;
+  assert.match(hint, /claude --resume <session>/);
+  assert.match(hint, /lens-x: last-session/);
+
   const runs = purr(repoPath, 'runs', '--branch', 'feat');
   assert.equal(runs.status, 0);
   assert.equal(runs.stdout.trim().split('\n').length, 5, runs.stdout);

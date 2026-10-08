@@ -299,9 +299,14 @@ test('pushes that get no review of their own say why: superseded in the debounce
   await push('ddd1', 'ddd0', ['ddd0', 'ddd1']);
   assert.equal(kindOf('ddd1'), 'no-pr');
 
-  // the branch moves past the push before it's seen: superseded by what's there, whether or not it's local
+  // the branch moves past the push before it's seen: superseded by what's there, whether or not it's local, when
+  // something will review that (here its own hook reported it)...
+  db.setPushOutcome({ sha: 'eee2', kind: 'pending', reason: 'its hook reported it', repoPath, branch: 'feat' });
   await push('eee1', 'eee0', ['eee0', 'eee2']);
   assert.deepEqual(kind('eee1'), ['superseded', 'eee2']);
+  // ...and when nothing will (a bot's push, no PR), this push isn't left out: here PR-only, so it waits for a PR
+  await push('efe1', 'efe0', ['efe0', 'efe2']);
+  assert.equal(kindOf('efe1'), 'no-pr');
 
   // A lands, but while gh is asked about its PR, B is pushed on top: A mustn't take B's place in the debounce
   pr = { number: 3, title: 't', body: '', url: 'u', baseRefName: 'main', headRefName: 'feat', headRefOid: 'aba1', isDraft: false };

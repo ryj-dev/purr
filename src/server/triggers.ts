@@ -111,23 +111,21 @@ export class PostPushWatcher {
           if (!landed && (await this.deps.ancestry(body.repoPath, body.sha, tip)) === 'no') {
             return note('skipped', `the branch moved to ${tip.slice(0, 12)}, which doesn't include this push (was it rejected?)`);
           }
-          return note('superseded', 'a newer push to the branch took its place', tip);
+          const pr0 = (await this.deps.ghAuthed()) ? await this.deps.prForBranch(body.repoPath, body.branch) : null;
+          if (await this.reviewed(repo, body.repoPath, tip, pr0)) return note('superseded', 'a newer push to the branch took its place', tip);
+          // overtaken by a push nothing will review (a bot's, with no PR the poller sees): review this one instead
         }
-        if (tip === body.sha) {
+        if (tip === body.sha || (tip && tip !== from)) {
           landed = true;
           const gh = await this.deps.ghAuthed();
           const pr = gh ? await this.deps.prForBranch(body.repoPath, body.branch) : null;
-          // gh can take a while: if the branch moved on meanwhile (a quick second push), look again from the top,
-          // so this older push doesn't take the newer one's place in the debounce. No answer is no news: it landed
-          landed = true;
+          // gh can be slow: if a newer push landed meanwhile, it's the one to review, and this older push mustn't take
+          // its place in the debounce. No answer from ls-remote is no news: it landed
           const again = await this.deps.lsRemote(body.repoPath, remote, body.branch);
-          if (again && again !== body.sha) {
-            // covered by that newer push only if something will review it: an open PR the poller sees, or a hook
-            // here that reported it. A bot's push with no PR has neither, so this push is reviewed after all
-            const key = githubRepo(repo.remoteUrl);
-            const paths = [body.repoPath, ...(key ? this.db.listRepos().filter((r) => githubRepo(r.remoteUrl) === key).map((r) => r.path) : [])];
-            if ((pr && !pr.isDraft) || this.db.getPushOutcomes(again, paths).length) continue;
+          if (again && again !== body.sha && await this.reviewed(repo, body.repoPath, again, pr)) {
+            return note('superseded', 'a newer push to the branch took its place', again);
           }
+          // (a newer push nothing will review, a bot's with no PR the poller sees: this push is reviewed after all)
           // no open PR (a push to main, or a branch not yet proposed): no review, and nothing marked as handled, so
           // the poller reviews this commit when its PR is opened
           if (prOnly && gh && !pr) return note('no-pr', `${body.branch} has no open PR; it's reviewed once one is opened`);
@@ -162,6 +160,17 @@ export class PostPushWatcher {
     return { queued: true, prOnly };
   }
 
+
+  /**
+   * Whether a push at `sha` will be reviewed by something: an open (not draft) PR the poller sees, or a hook here
+   * (any clone of the repo) that reported it.
+   */
+  private async reviewed(repo: Repo, repoPath: string, sha: string, pr: PrInfo | null): Promise<boolean> {
+    if (pr && !pr.isDraft) return true;
+    const key = githubRepo(repo.remoteUrl);
+    const paths = [repoPath, ...(key ? this.db.listRepos().filter((r) => githubRepo(r.remoteUrl) === key).map((r) => r.path) : [])];
+    return this.db.getPushOutcomes(sha, paths).length > 0;
+  }
 
   /** Local clones by GitHub repo ("owner/name"), main checkouts before worktrees. */
   private async clonesByRepo(): Promise<Map<string, Repo[]>> {
