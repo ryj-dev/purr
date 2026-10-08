@@ -369,20 +369,21 @@ test('signing in to gh after startup brings no old PRs; a slow multi-account pol
     await watcher.poll();
     assert.deepEqual(scheduled, [], 'PR 2 was open before signing in');
 
-    // registered with no remote, and its PR already known at k0: the hook adds origin's owner/name before marking
-    // its push of k1, so the poller, seeing the PR move to k1, knows the hook has it
+    // the poller knows PR 1 at k0 (an old PR, so not reviewed then). The hook then pushes k1 from a clone whose
+    // saved row has no remote yet: it must look the remote up before marking the push, or it marks it under the
+    // clone's path, and the poller, seeing PR 1 move to k1 under owner/name, reviews k1 a second time
     t.mock.timers.tick(60_000);
-    fetched = { ...fetched, prs: [pr(2, 'old', t0 + 60_000), pr(1, 'k0', Date.now())], askedAt: { me: Date.now() } };
-    db.setSettings({ ...db.getSettings(), postPushPrsOnly: true });
-    db.putRepo({ ...db.getRepoByPath(a)!, remoteUrl: null });
-    await watcher.poll();                          // no clone matches work-org/app-h yet
     sh(a, 'remote', 'add', 'origin', 'https://github.com/work-org/app-h.git');
+    fetched = { ...fetched, prs: [pr(2, 'old', t0 + 60_000), pr(1, 'k0', t0 + 60_000)], askedAt: { me: Date.now() } };
+    await watcher.poll();
+    assert.deepEqual(scheduled, [], 'k0: an old PR, seen but not new');
+    db.putRepo({ ...db.getRepoByPath(a)!, remoteUrl: null });
     db.setSettings({ ...db.getSettings(), postPushPrsOnly: false });
     pushed = 'k1';
     await watcher.pushIntent({ repoPath: a, branch: 'feat', sha: 'k1' });
     await watcher.settled();
     assert.deepEqual(scheduled, ['k1']);
-    fetched = { ...fetched, prs: [pr(2, 'old', t0 + 60_000), pr(1, 'k1', Date.now() - 60_000)], askedAt: { me: Date.now() - 5 * 60_000 } };
+    fetched = { ...fetched, prs: [pr(2, 'old', t0 + 60_000), pr(1, 'k1', t0 + 60_000)], askedAt: { me: Date.now() - 5 * 60_000 } };
     await watcher.poll();
     assert.deepEqual(scheduled, ['k1'], 'k1 reviewed once');
 
