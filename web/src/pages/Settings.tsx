@@ -48,10 +48,11 @@ export function SettingsPage() {
   const toast = useToast();
   const [s, setS] = useState<Settings | null>(null);
   const [extra, setExtra] = useState('');
+  const [folders, setFolders] = useState('');
   const [dirty, setDirty] = useState(false);
 
   useEffect(() => {
-    if (state && !dirty) { setS(state.settings); setExtra(state.settings.claudeExtraArgs.join('\n')); }
+    if (state && !dirty) { setS(state.settings); setExtra(state.settings.claudeExtraArgs.join('\n')); setFolders(state.settings.projectFolders.join('\n')); }
   }, [state, dirty]);
 
   if (!s || !state) {
@@ -74,7 +75,8 @@ export function SettingsPage() {
   );
   const save = async () => {
     try {
-      const next = await api.saveSettings({ ...s, claudeExtraArgs: extra.split('\n').map((x) => x.trim()).filter(Boolean) });
+      const lines = (t: string) => t.split('\n').map((x) => x.trim()).filter(Boolean);
+      const next = await api.saveSettings({ ...s, claudeExtraArgs: lines(extra), projectFolders: lines(folders) });
       setS(next);
       setDirty(false);
       toast(next.port !== state.settings.port ? 'Saved. Restart the daemon for the new port.' : 'Saved', 'ok');
@@ -119,6 +121,12 @@ export function SettingsPage() {
           {num('pollIntervalSec', 'PR poll interval (seconds)')}
           {num('debounceSec', 'Post-push debounce (seconds)', 'A newer push within this window replaces the queued run.')}
         </div>
+        <label className="field">
+          <span>Project folders (one per line)</span>
+          <textarea rows={3} value={folders} onChange={(e) => { setFolders(e.target.value); setDirty(true); }} spellCheck={false}
+            placeholder="~/Documents/github" />
+          <span className="hint">Git repos in these folders, and one level down, are registered automatically, so their open PRs are reviewed after each push even where git's hooks can't reach (a repo with its own <code>core.hooksPath</code>).</span>
+        </label>
         <label className="field">
           <span>Extra claude arguments (one per line)</span>
           <textarea rows={4} value={extra} onChange={(e) => { setExtra(e.target.value); setDirty(true); }} spellCheck={false} />

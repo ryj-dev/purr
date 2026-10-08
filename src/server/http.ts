@@ -8,6 +8,7 @@ import { BLOCK_TYPES } from './flows/blockTypes.ts';
 import { HttpError, createFlow, deleteFlow, setBlockOptions, updateFlow } from './flows/store.ts';
 import { validateFlow } from './flows/validate.ts';
 import { exportFlow, importFlow, previewImport } from './flows/share.ts';
+import { uniqueFolders } from './db.ts';
 import { remoteUrl, repoRoot } from './git.ts';
 import { ghAuthed } from './gh.ts';
 import type { RunManager } from './manager.ts';
@@ -118,6 +119,10 @@ export function startHttp(db: DB, mgr: RunManager, watcher: PostPushWatcher, por
       if (a === 'settings' && m === 'PUT') {
         const patch = await body<Partial<Settings>>(req);
         const next = { ...db.getSettings(), ...patch };
+        if (Array.isArray(patch.projectFolders)) {
+          const home = process.env.HOME ?? '';
+          next.projectFolders = uniqueFolders(patch.projectFolders.map((f) => resolve(String(f).trim().replace(/^~(?=\/|$)/, home))).filter(Boolean));
+        }
         if (!(next.maxConcurrentClaude >= 1)) throw new HttpError(400, 'Max concurrent Claude sessions must be at least 1');
         if (!(next.port > 0 && next.port < 65536)) throw new HttpError(400, 'Port must be 1-65535');
         db.setSettings(next);

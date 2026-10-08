@@ -1,22 +1,33 @@
 // Post-push detection. Git has no post-push hook, so two sources feed one debounced queue:
 //  1. fast path: the pre-push hook tells the daemon what it is about to push; we wait until the remote has the commit.
-//  2. source of truth: a `gh` poller over the user's open PRs in registered repos (catches pushes from other machines).
+//  2. source of truth: a poller over the open PRs of every account signed in to gh (one GraphQL call each), matched
+//     to local clones by their GitHub remote. It catches pushes from other machines, PRs opened after the push, and
+//     repos git's hooks can't reach. Repos in the project folders are discovered and registered every 10 minutes.
 import { existsSync, realpathSync } from 'node:fs';
 import type { DB } from './db.ts';
 import { lsRemote, remoteUrl } from './git.ts';
 import { addRepo } from './http.ts';
-import { ghAuthed, myOpenPrs, prForBranch } from './gh.ts';
+import { type OpenPr, ghAuthed, githubRepo, openPrsForAllAccounts, prForBranch } from './gh.ts';
+import { discoverRepos } from './discovery.ts';
+import { statSync } from 'node:fs';
+import { join } from 'node:path';
+import type { Repo } from '../shared/types.ts';
 import type { RunManager } from './manager.ts';
 
 export class PostPushWatcher {
   db: DB;
   mgr: RunManager;
-  private lastSeen = new Map<string, string>();   // repoId:branch -> head sha already handled
+  private lastSeen = new Map<string, string>();   // repoId:branch -> head sha already handled (push hook or poller)
+  private seenPr = new Map<string, string>();     // owner/name#number -> head sha the poller last saw
   private timer: NodeJS.Timeout | null = null;
   private polling = false;
-  private primed = false;
+  private lastDiscovery = 0;
+  private startedAt = Date.now();
+  private fetchPrs: () => Promise<OpenPr[] | null>;
 
-  constructor(db: DB, mgr: RunManager) { this.db = db; this.mgr = mgr; }
+  constructor(db: DB, mgr: RunManager, fetchPrs: () => Promise<OpenPr[] | null> = openPrsForAllAccounts) {
+    this.db = db; this.mgr = mgr; this.fetchPrs = fetchPrs;
+  }
 
   start() {
     const tick = async () => {
@@ -60,30 +71,55 @@ export class PostPushWatcher {
     return { queued: true, prOnly };
   }
 
-  /** One poll over every registered repo. The first poll only records what's there, so startup doesn't re-review every open PR. */
-  async poll() {
-    if (!(await ghAuthed())) return;
+  /** Local clones by GitHub repo ("owner/name"), main checkouts before worktrees. */
+  private async clonesByRepo(): Promise<Map<string, Repo[]>> {
+    const map = new Map<string, Repo[]>();
     for (const repo of this.db.listRepos()) {
-      if (!repo.remoteUrl) {
+      if (!repo.remoteUrl && existsSync(repo.path)) {
         // registered before it had a remote: look again rather than skipping it forever
-        const url = existsSync(repo.path) ? await remoteUrl(repo.path) : null;
+        const url = await remoteUrl(repo.path);
         if (url) { repo.remoteUrl = url; this.db.putRepo(repo); }
       }
-      if (!repo.remoteUrl || !/github\.com/.test(repo.remoteUrl)) continue;
-      const prs = await myOpenPrs(repo.path);
-      if (!prs) continue;
-      for (const pr of prs) {
-        const key = `${repo.id}:${pr.headRefName}`;
-        const seen = this.lastSeen.get(key);
-        this.lastSeen.set(key, pr.headRefOid);
-        if (!this.primed || seen === pr.headRefOid) continue;
-        if (pr.isDraft) continue;
-        this.mgr.schedulePostPush({
-          trigger: 'post-push', repoPath: repo.path, mode: 'range', head: pr.headRefOid, branch: pr.headRefName, pr,
-          base: pr.baseRefName,
-        });
-      }
+      const key = githubRepo(repo.remoteUrl);
+      if (!key || !existsSync(repo.path)) continue;
+      const list = map.get(key) ?? [];
+      list.push(repo);
+      map.set(key, list);
     }
-    this.primed = true;
+    const isMain = (r: Repo) => { try { return statSync(join(r.path, '.git')).isDirectory(); } catch { return false; } };
+    for (const list of map.values()) list.sort((a, b) => Number(isMain(b)) - Number(isMain(a)));
+    return map;
+  }
+
+  /**
+   * One poll. A PR's first sighting only counts if it was opened after the service started (within the last 10
+   * minutes): otherwise discovering a repo, or restarting PuRR, would review every PR that's already open.
+   */
+  async poll() {
+    if (Date.now() - this.lastDiscovery > 10 * 60_000) {
+      this.lastDiscovery = Date.now();
+      await discoverRepos(this.db).catch(() => 0);
+    }
+    const prs = await this.fetchPrs();
+    if (!prs) return;
+    const clones = await this.clonesByRepo();
+    for (const pr of prs) {
+      const repo = clones.get(pr.repo)?.[0];
+      if (!repo) continue;
+      const key = `${pr.repo}#${pr.number}`;
+      const seen = this.seenPr.get(key);
+      this.seenPr.set(key, pr.headRefOid);
+      if (seen === pr.headRefOid || pr.isDraft) continue;
+      if (this.lastSeen.get(`${repo.id}:${pr.headRefName}`) === pr.headRefOid) continue;   // the push hook has it
+      if (seen === undefined) {
+        const opened = pr.createdAt ? Date.parse(pr.createdAt) : 0;
+        if (!(opened >= this.startedAt && Date.now() - opened < 10 * 60_000)) continue;
+      }
+      this.lastSeen.set(`${repo.id}:${pr.headRefName}`, pr.headRefOid);
+      this.mgr.schedulePostPush({
+        trigger: 'post-push', repoPath: repo.path, mode: 'range', head: pr.headRefOid, branch: pr.headRefName, pr,
+        base: pr.baseRefName,
+      });
+    }
   }
 }

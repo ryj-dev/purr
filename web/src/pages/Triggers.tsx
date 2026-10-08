@@ -86,7 +86,7 @@ export function TriggersPage() {
   return (
     <div className="page">
       <PageHeader title="Repos & triggers"
-        sub={<>PuRR covers every git repository while it's running; each appears here on its first commit or push. Choose which flow runs on each trigger: the Global row applies everywhere, a repo row overrides it, and <b>Exclude</b> leaves a repo out entirely.</>} />
+        sub={<>PuRR covers every git repository while it's running. Repos appear here on their first commit or push, and repos in your project folders (Settings) are found automatically. Choose which flow runs on each trigger: the Global row applies everywhere, a repo row overrides it, and <b>Exclude</b> leaves a repo out entirely.</>} />
       {gh && (
         <div className={`banner inline ${gh.active ? 'info' : 'warn'}`} style={{ marginBottom: 16 }}>
           {gh.active ? <ShieldCheck size={15} /> : <TriangleAlert size={15} />}

@@ -190,6 +190,7 @@ export interface Settings {
   notifications: boolean;
   reviewsPaused: boolean;     // post-push reviews don't start (hooks and manual runs still do)
   postPushPrsOnly: boolean;   // review a push only when its branch has an open PR (needs gh; without gh every push is reviewed)
+  projectFolders: string[];   // git repos in these folders (and one level down) are registered automatically
   port: number;
 }
 
