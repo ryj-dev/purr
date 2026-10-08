@@ -60,7 +60,8 @@ export async function ghAccounts(): Promise<string[]> {
   try {
     const r = await exec('gh', ['auth', 'status', '--hostname', 'github.com'], { timeoutMs: 15_000 });
     const parsed = parseGhStatus(r.stdout + r.stderr);
-    multiAccount = parsed.multi;
+    // only a clean answer says which kind of gh this is: a timeout says nothing
+    if (r.code === 0 && parsed.accounts.length) multiAccount = parsed.multi;
     // signed in (exit 0) in words PuRR doesn't know: still use gh, as its default login
     list = parsed.accounts.length || r.code !== 0 ? parsed.accounts : ['github.com'];
   } catch { /* gh missing */ }
@@ -129,7 +130,11 @@ export async function openPrsForAllAccounts(): Promise<PrFetch | null> {
  * post the comment twice, since a timed-out `gh pr comment` may still have posted it.
  */
 export async function commentOnPr(repoPath: string, number: number, body: string, account?: string | null): Promise<boolean> {
-  const as = account || (await ghAccounts())[0];
-  if (!as) return false;
-  return (await gh(repoPath, ['pr', 'comment', String(number), '--body-file', '-'], { input: body, account: as })) !== null;
+  const accounts = await ghAccounts();
+  // that account first, else the active one; one signed out since (no token, nothing sent yet) gives way to the next
+  for (const as of account ? [account, ...accounts.filter((a) => a !== account)] : accounts) {
+    if (multiAccount && !(await tokenFor(as))) continue;
+    return (await gh(repoPath, ['pr', 'comment', String(number), '--body-file', '-'], { input: body, account: as })) !== null;
+  }
+  return false;
 }

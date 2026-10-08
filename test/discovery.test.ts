@@ -224,3 +224,74 @@ test('a PR opened during a gh outage longer than ten minutes is still reviewed; 
     assert.deepEqual(scheduled, ['s1'], 'opened before the last good poll: already open, not new');
   } finally { t.mock.timers.reset(); db.close(); }
 });
+
+test('poll marks are per account: one account\'s outage loses none of its PRs, and a newly added account\'s old PRs aren\'t new', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
+  const db = openDb(); ensureDefaults(db);
+  const mgr = new RunManager(db, new ClaudeRunner(db));
+  const scheduled: string[] = [];
+  mgr.schedulePostPush = (req: RunRequest) => { scheduled.push(req.head!); };
+  const { root, a } = projectsFolder();
+  sh(a, 'remote', 'add', 'origin', 'https://github.com/work-org/app-e.git');
+  db.setSettings({ ...db.getSettings(), projectFolders: [root] });
+  let prs: OpenPr[] = [];
+  let answered = ['me', 'work'];
+  const watcher = new PostPushWatcher(db, mgr, { fetchPrs: async () => ({ prs, answered }) });
+  const pr = (n: number, account: string, opened: number): OpenPr => ({ repo: 'work-org/app-e', number: n, headRefOid: `s${n}`, headRefName: `b${n}`,
+    baseRefName: 'main', title: 't', body: '', url: 'u', isDraft: false, account, createdAt: new Date(opened).toISOString() });
+  try {
+    await watcher.poll();
+    answered = ['me'];                               // work's token fails for a while; me keeps answering
+    t.mock.timers.tick(60_000);
+    const gap = Date.now();
+    t.mock.timers.tick(20 * 60_000);
+    await watcher.poll();
+    answered = ['me', 'work'];
+    prs = [pr(1, 'work', gap)];
+    await watcher.poll();
+    assert.deepEqual(scheduled, ['s1'], "opened during work's outage: still new to work");
+
+    t.mock.timers.tick(60_000);
+    const before = Date.now() - 30 * 60_000;         // opened long ago by an account signed in only now
+    answered = ['me', 'work', 'personal'];
+    prs = [...prs, pr(2, 'personal', before)];
+    await watcher.poll();
+    assert.deepEqual(scheduled, ['s1'], 'an account seen for the first time brings already-open PRs');
+    t.mock.timers.tick(5 * 60_000);
+    prs = [...prs, pr(3, 'personal', Date.now())];
+    await watcher.poll();
+    assert.deepEqual(scheduled, ['s1', 's3'], 'its new PRs are reviewed');
+  } finally { t.mock.timers.reset(); db.close(); }
+});
+
+test('a push is reviewed by the hook when gh is signed out or reviews aren\'t PR-only, and the poller doesn\'t review it again', async () => {
+  const db = openDb(); ensureDefaults(db);
+  const mgr = new RunManager(db, new ClaudeRunner(db));
+  const scheduled: RunRequest[] = [];
+  mgr.schedulePostPush = (req: RunRequest) => { scheduled.push(req); };
+  const { root, a } = projectsFolder();
+  sh(a, 'remote', 'add', 'origin', 'https://github.com/work-org/app-f.git');
+  db.setSettings({ ...db.getSettings(), projectFolders: [root], postPushPrsOnly: true });
+  let authed = false, pushed = '';
+  let prs: OpenPr[] = [];
+  const watcher = new PostPushWatcher(db, mgr, {
+    fetchPrs: async () => ({ prs, answered: ['me'] }), lsRemote: async () => pushed, ghAuthed: async () => authed, prForBranch: async () => null,
+  });
+  await watcher.poll();
+  pushed = 'h1';
+  await watcher.pushIntent({ repoPath: a, branch: 'feat', sha: 'h1' });
+  await watcher.settled();
+  assert.deepEqual(scheduled.map((r) => [r.head, r.pr]), [['h1', null]], 'no gh: reviewed against the default branch, no PR');
+
+  authed = true;
+  db.setSettings({ ...db.getSettings(), postPushPrsOnly: false });
+  pushed = 'h2';
+  await watcher.pushIntent({ repoPath: a, branch: 'feat', sha: 'h2' });
+  await watcher.settled();
+  assert.deepEqual(scheduled.map((r) => r.head), ['h1', 'h2'], 'not PR-only: reviewed without a PR');
+  prs = [{ repo: 'work-org/app-f', number: 4, headRefOid: 'h2', headRefName: 'feat', baseRefName: 'main', title: 't', body: '', url: 'u',
+    isDraft: false, account: 'me', createdAt: new Date().toISOString() }];
+  await watcher.poll();
+  assert.deepEqual(scheduled.map((r) => r.head), ['h1', 'h2'], 'the PR then opened on h2 is not reviewed twice');
+  db.close();
+});

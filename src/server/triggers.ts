@@ -134,7 +134,13 @@ export class PostPushWatcher {
     const { prs } = fetched;
     // PRs opened before their account's last answered poll were there to be seen then (two minutes' slack for
     // GitHub's clock). Per account: one whose query failed (asleep, offline, token expired) keeps its old mark
-    const since = (account: string) => Math.max(this.startedAt, (this.lastFetch.get(account) ?? 0) - 2 * 60_000);
+    // An account answering for the first time after the first poll (just signed in) starts from now: its PRs are
+    // already open, not new
+    const firstPoll = this.lastFetch.size === 0;
+    const since = (account: string) => {
+      const last = this.lastFetch.get(account) ?? (firstPoll ? 0 : Date.now());
+      return Math.max(this.startedAt, last - 2 * 60_000);
+    };
     const marks = new Map(prs.map((pr) => [pr.account, since(pr.account)]));
     for (const a of fetched.answered) this.lastFetch.set(a, Date.now());
     const clones = await this.clonesByRepo();
