@@ -9,7 +9,7 @@ test('number settings typed as text: empty stays empty while typing, and leaving
   assert.equal(parseNumText('6'), 6);
   assert.equal(parseNumText('06'), 6);
   assert.equal(parseNumText('abc'), null);
-  assert.equal(parseNumText('-1'), -1, 'the service decides what range is valid');
+  assert.equal(parseNumText('-1'), -1, 'a number, not a valid setting: the service checks only the port and max sessions (other ranges: a follow-up)');
   assert.equal(settledText('', 4), '4', 'left empty: the last value');
   assert.equal(settledText('abc', 4), '4');
   assert.equal(settledText('6', 4), '6');
