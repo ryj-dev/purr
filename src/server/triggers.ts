@@ -5,7 +5,7 @@
 //     repos git's hooks can't reach. Repos in the project folders are discovered and registered every 10 minutes.
 import { existsSync, realpathSync } from 'node:fs';
 import type { DB } from './db.ts';
-import { lsRemote, remoteUrl } from './git.ts';
+import { isAncestor, lsRemote, remoteUrl } from './git.ts';
 import { addRepo } from './http.ts';
 import { type OpenPr, type PrInfo, ghAuthed, githubRepo, openPrsForAllAccounts, prForBranch } from './gh.ts';
 import { discoverRepos } from './discovery.ts';
@@ -20,6 +20,7 @@ export interface WatcherDeps {
   lsRemote: (cwd: string, remote: string, branch: string) => Promise<string | null>;
   ghAuthed: () => Promise<boolean>;
   prForBranch: (repoPath: string, branch: string) => Promise<PrInfo | null>;
+  isAncestor: (cwd: string, a: string, b: string) => Promise<boolean>;
 }
 
 export class PostPushWatcher {
@@ -42,7 +43,7 @@ export class PostPushWatcher {
 
   constructor(db: DB, mgr: RunManager, deps: Partial<WatcherDeps> = {}) {
     this.db = db; this.mgr = mgr;
-    this.deps = { fetchPrs: openPrsForAllAccounts, lsRemote, ghAuthed, prForBranch, ...deps };
+    this.deps = { fetchPrs: openPrsForAllAccounts, lsRemote, ghAuthed, prForBranch, isAncestor, ...deps };
   }
 
   start() {
@@ -69,10 +70,18 @@ export class PostPushWatcher {
     if (!repo) return { queued: false, reason: 'not a git repository' };
     const remote = body.remote || 'origin';
     const prOnly = this.db.getSettings().postPushPrsOnly;
+    this.db.clearPushOutcome(body.sha);   // pushed again: whatever happened to it last time no longer holds
     const confirm = (async () => {
       const deadline = Date.now() + 90_000;
       while (Date.now() < deadline) {
-        if ((await this.deps.lsRemote(body.repoPath, remote, body.branch)) === body.sha) {
+        const tip = await this.deps.lsRemote(body.repoPath, remote, body.branch);
+        if (tip && tip !== body.sha && await this.deps.isAncestor(body.repoPath, body.sha, tip)) {
+          // a newer push landed on top before this one was seen: its review covers this commit
+          this.db.setPushOutcome({ sha: body.sha, kind: 'superseded', reason: 'a newer push to the branch landed on top of it',
+            repoPath: body.repoPath, branch: body.branch, nextSha: tip });
+          return;
+        }
+        if (tip === body.sha) {
           const gh = await this.deps.ghAuthed();
           const pr = gh ? await this.deps.prForBranch(body.repoPath, body.branch) : null;
           // no open PR (a push to main, or a branch not yet proposed): no review, and nothing marked as handled, so

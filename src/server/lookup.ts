@@ -55,7 +55,7 @@ export class ReviewWatch {
   notes: string[] = [];
   private db: DB;
   private findPr: typeof prForBranch;
-  private prChecked = new Map<string, { at: number; open: boolean }>();
+  private prChecked = new Map<string, { at: number; state: 'open' | 'draft' | 'none' }>();
   constructor(db: DB, q: RunQuery, findPr: typeof prForBranch = prForBranch) { this.db = db; this.q = q; this.findPr = findPr; }
 
   async check(): Promise<ReviewState> {
@@ -69,7 +69,11 @@ export class ReviewWatch {
       if (run) return { run, done: isFinished(run) };
       const out = this.q.sha ? this.db.getPushOutcome(this.q.sha) : null;
       if (out?.nextSha) { this.follow(out.nextSha, `commit ${out.sha.slice(0, 12)} wasn't reviewed on its own: ${out.reason}`); continue; }
-      if (out?.kind === 'no-pr' && out.branch && await this.prOpen(out.repoPath, out.branch)) return { run: null, done: false };
+      if (out?.kind === 'no-pr' && out.branch) {
+        const pr = await this.prState(out.repoPath, out.branch);
+        if (pr === 'open') return { run: null, done: false };
+        if (pr === 'draft') return { run: null, done: true, stop: `commit ${out.sha.slice(0, 12)} won't be reviewed yet: its PR is a draft (PuRR reviews it once it's marked ready)` };
+      }
       if (out) return { run: null, done: true, stop: `commit ${out.sha.slice(0, 12)} won't be reviewed: ${out.reason}` };
       return { run: null, done: false };
     }
@@ -81,13 +85,14 @@ export class ReviewWatch {
     this.q = { ...this.q, sha, branch: null, pr: null };
   }
 
-  /** Whether the branch has an open PR now (the poller then reviews it within a minute), asked of gh at most every 20s. */
-  private async prOpen(repoPath: string, branch: string): Promise<boolean> {
+  /** The branch's PR now: open (the poller then reviews it within a minute), a draft (never reviewed) or none. At most every 20s. */
+  private async prState(repoPath: string, branch: string): Promise<'open' | 'draft' | 'none'> {
     const c = this.prChecked.get(branch);
-    if (c && Date.now() - c.at < 20_000) return c.open;
-    const open = !!(await this.findPr(repoPath, branch).catch(() => null));
-    this.prChecked.set(branch, { at: Date.now(), open });
-    return open;
+    if (c && Date.now() - c.at < 20_000) return c.state;
+    const pr = await this.findPr(repoPath, branch).catch(() => null);
+    const state = !pr ? 'none' : pr.isDraft ? 'draft' : 'open';
+    this.prChecked.set(branch, { at: Date.now(), state });
+    return state;
   }
 }
 

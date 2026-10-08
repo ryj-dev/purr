@@ -1,7 +1,7 @@
 import { tempRepo } from './helpers.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { openDb } from '../src/server/db.ts';
 import { addRepo } from '../src/server/http.ts';
 import type { Finding, Run } from '../src/shared/types.ts';
@@ -57,12 +57,22 @@ test('purr findings: exit codes, usage errors, --json and purr runs', async () =
   assert.equal(code('--sha', '--wait'), 4, 'flag without a value');
   assert.equal(code('--wait', '--timeout', '10m'), 4, 'timeout in seconds only');
   assert.equal(code('--pr', '0'), 4);
+  assert.equal(code('--wait', '--timeout', '9'.repeat(30)), 4, 'too big to be a number of seconds');
   assert.equal(purr(tempRepo(), 'findings').status, 3, 'a repo PuRR has never seen');
 
   const j = purr(repoPath, 'findings', '--sha', 'aaaa000001', '--json');
   const out = JSON.parse(j.stdout);
   assert.deepEqual(Object.keys(out).sort(), ['findings', 'resolved', 'run', 'sessions']);
   assert.equal(out.findings[0].title, 'bug m1');
+
+  // detached HEAD: the review of the commit checked out, not any branch's latest
+  const head = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repoPath, encoding: 'utf8' }).trim();
+  execFileSync('git', ['checkout', '-q', '--detach'], { cwd: repoPath });
+  assert.equal(code(), 3, 'no review of this commit');
+  const db2 = openDb();
+  db2.putRun(run({ repoId: repo.id, repoPath, headSha: head, branch: 'other' }));
+  db2.close();
+  assert.equal(code(), 0, 'found by commit');
 
   const runs = purr(repoPath, 'runs', '--branch', 'feat');
   assert.equal(runs.status, 0);

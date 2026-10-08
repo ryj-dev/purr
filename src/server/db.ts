@@ -236,13 +236,20 @@ export function openDb(file = paths.db) {
     },
 
     // pushes the hook reported that PuRR then decided not to review, so `purr findings --wait` can stop waiting
-    setPushOutcome: (o: Omit<PushOutcome, 'at'>) =>
-      db.prepare('INSERT INTO push_outcomes (sha, data, at) VALUES (?, ?, ?) ON CONFLICT(sha) DO UPDATE SET data = excluded.data, at = excluded.at')
-        .run(o.sha, JSON.stringify(o), now()),
+    /** Best effort: losing the note never costs a review (the callers are mid-way through scheduling one). */
+    setPushOutcome: (o: Omit<PushOutcome, 'at'>) => {
+      try {
+        db.prepare('INSERT INTO push_outcomes (sha, data, at) VALUES (?, ?, ?) ON CONFLICT(sha) DO UPDATE SET data = excluded.data, at = excluded.at')
+          .run(o.sha.toLowerCase(), JSON.stringify(o), now());
+        db.prepare('DELETE FROM push_outcomes WHERE at < ?').run(new Date(Date.now() - 30 * 86_400_000).toISOString());
+      } catch { /* the database is busy: --wait then waits out its timeout instead of stopping early */ }
+    },
+    clearPushOutcome: (sha: string) => { try { db.prepare('DELETE FROM push_outcomes WHERE sha = ?').run(sha.toLowerCase()); } catch { /* as above */ } },
     getPushOutcome: (shaPrefix: string): PushOutcome | null => {
-      const hex = shaPrefix.replace(/[^0-9a-f]/gi, '');
+      const hex = shaPrefix.replace(/[^0-9a-f]/gi, '').toLowerCase();
       if (!hex) return null;
-      const r = db.prepare('SELECT data, at FROM push_outcomes WHERE sha LIKE ? ORDER BY at DESC LIMIT 1').get(`${hex}%`) as
+      // a range on the key rather than LIKE, so the primary key index is used ('g' sorts after every hex digit)
+      const r = db.prepare('SELECT data, at FROM push_outcomes WHERE sha >= ? AND sha < ? ORDER BY at DESC LIMIT 1').get(hex, `${hex}g`) as
         { data: string; at: string } | undefined;
       return r ? { ...JSON.parse(r.data), at: r.at } : null;
     },

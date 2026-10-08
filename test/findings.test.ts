@@ -117,8 +117,10 @@ test('ReviewWatch follows a newer push that took a commit\'s place, and stops wh
   outcome('ffff01', 'no-pr');
   const noPr = await new ReviewWatch(db, { ...q, sha: 'ffff01' }, async () => null).check();
   assert.equal(noPr.done, true);
-  const prNow = await new ReviewWatch(db, { ...q, sha: 'ffff01' }, async () => ({ number: 9 }) as any).check();
+  const prNow = await new ReviewWatch(db, { ...q, sha: 'ffff01' }, async () => ({ number: 9, isDraft: false }) as any).check();
   assert.deepEqual(prNow, { run: null, done: false }, 'a PR opened since: the poller reviews it, keep waiting');
+  const draft = await new ReviewWatch(db, { ...q, sha: 'ffff01' }, async () => ({ number: 9, isDraft: true }) as any).check();
+  assert.match(draft.stop ?? '', /draft/, 'a draft is never reviewed: stop and say so');
   db.close();
 });
 
@@ -159,5 +161,52 @@ test('a finding the next full review no longer raises is resolved by that review
   const third = review('third', [finding('fp1'), finding('fp2')]);   // it came back
   assert.deepEqual(resolvedBy(db, third), []);
   assert.equal(currentFindings(db, third)[0].ledger, 'regression');
+  db.close();
+});
+
+test('pushes that get no review of their own say why: superseded in the debounce, paused, trigger off, no PR, overtaken', async () => {
+  const { ClaudeRunner } = await import('../src/server/claude.ts');
+  const { RunManager } = await import('../src/server/manager.ts');
+  const { PostPushWatcher } = await import('../src/server/triggers.ts');
+  const { ensureDefaults } = await import('../src/server/flows/store.ts');
+  const db = openDb(join(mkdtempSync(join(process.env.TMPDIR!, 'purr-db-')), 'purr.db'));
+  ensureDefaults(db);
+  const repoPath = tempRepo();
+  const repo = await addRepo(db, repoPath);
+  const mgr = new RunManager(db, new ClaudeRunner(db));
+  const req = (head: string) => ({ trigger: 'post-push' as const, repoPath, mode: 'range' as const, head, branch: 'feat' });
+  const kind = (sha: string) => { const o = db.getPushOutcome(sha); return o && [o.kind, o.nextSha ?? null]; };
+
+  db.setSettings({ ...db.getSettings(), debounceSec: 3600 });
+  mgr.schedulePostPush(req('aaa1'));
+  mgr.schedulePostPush(req('aaa2'));                 // a second push inside the debounce
+  assert.deepEqual(kind('aaa1'), ['superseded', 'aaa2']);
+  assert.equal(db.getPushOutcome('aaa2'), null, 'the newer one is still on its way');
+
+  db.setSettings({ ...db.getSettings(), reviewsPaused: true });
+  mgr.schedulePostPush(req('bbb1'));
+  assert.deepEqual(kind('bbb1'), ['skipped', null]);
+  assert.match(db.getPushOutcome('bbb1')!.reason, /paused/);
+
+  db.setSettings({ ...db.getSettings(), reviewsPaused: false, debounceSec: 0 });
+  db.setTrigger({ trigger: 'post-push', repoId: repo.id, flowId: null });
+  mgr.schedulePostPush(req('ccc1'));
+  await new Promise((r) => setTimeout(r, 20));
+  assert.match(db.getPushOutcome('ccc1')!.reason, /trigger is off/);
+  db.deleteTrigger('post-push', repo.id);
+
+  let tip = 'ddd1', pr: any = null;
+  const watcher = new PostPushWatcher(db, mgr, {
+    lsRemote: async () => tip, ghAuthed: async () => true, prForBranch: async () => pr, isAncestor: async (_c, a, b) => a === 'ddd1' && b === 'ddd2',
+  });
+  db.setSettings({ ...db.getSettings(), postPushPrsOnly: true });
+  await watcher.pushIntent({ repoPath, branch: 'feat', sha: 'ddd1' });
+  await watcher.settled();
+  assert.equal(db.getPushOutcome('ddd1')?.kind, 'no-pr');
+  tip = 'ddd2';                                      // pushed again, and a newer push landed on top first
+  await watcher.pushIntent({ repoPath, branch: 'feat', sha: 'ddd1' });
+  assert.equal(db.getPushOutcome('ddd1'), null, 'a new push of the commit clears what happened last time');
+  await watcher.settled();
+  assert.deepEqual(kind('ddd1'), ['superseded', 'ddd2']);
   db.close();
 });

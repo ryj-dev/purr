@@ -230,7 +230,7 @@ function value(name: string): string | undefined {
 function positiveInt(name: string): number | undefined {
   const v = value(name);
   if (v == null) return undefined;
-  if (!/^\d+$/.test(v) || Number(v) < 1) throw new UsageError(`--${name} takes a whole number above 0, not "${v}"`);
+  if (!/^\d+$/.test(v) || Number(v) < 1 || !Number.isSafeInteger(Number(v))) throw new UsageError(`--${name} takes a whole number above 0, not "${v}"`);
   return Number(v);
 }
 
@@ -252,7 +252,12 @@ async function runQuery(db: DB, currentBranchByDefault: boolean): Promise<RunQue
     repoIds, pr, branch: value('branch') ?? null, sha,
     triggers: trigger === 'all' ? undefined : trigger ? [trigger as TriggerKind] : ['post-push', 'manual'],
   };
-  if (currentBranchByDefault && pr == null && !q.branch && !q.sha) q.branch = await currentBranch(cwd);
+  if (currentBranchByDefault && pr == null && !q.branch && !q.sha) {
+    q.branch = await currentBranch(cwd);
+    // detached (a review worktree, CI): the commit checked out, not every branch's latest review
+    if (!q.branch) q.sha = await headSha(cwd);
+    if (!q.branch && !q.sha) throw new UsageError('nothing is checked out here: pass --pr, --branch or --sha');
+  }
   return q;
 }
 
