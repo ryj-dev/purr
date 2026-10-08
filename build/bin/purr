@@ -1,0 +1,7 @@
+#!/bin/sh
+# The `purr` command inside PuRR.app: runs the bundled service/CLI with the app's own runtime, so no separate Node is needed.
+# git hooks call this file; PuRR.app's "Install command line tool" links ~/.local/bin/purr here.
+SELF="$(realpath "$0")"
+RES="$(cd "$(dirname "$SELF")/.." && pwd -P)"     # PuRR.app/Contents/Resources
+export ELECTRON_RUN_AS_NODE=1 PURR_APP_BUNDLE=1 PURR_SHIM="$RES/bin/purr" PURR_WEB_DIR="$RES/web"
+exec "$RES/../MacOS/PuRR" --no-warnings "$RES/server/cli.mjs" "$@"

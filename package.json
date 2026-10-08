@@ -1,0 +1,108 @@
+{
+  "name": "purr",
+  "version": "0.2.0",
+  "description": "Personal PR reviewer: local flows of code scanners and headless Claude Code sessions, triggered by git hooks and pushes",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "purr": "./bin/purr"
+  },
+  "engines": {
+    "node": ">=23.6"
+  },
+  "scripts": {
+    "daemon": "node src/server/cli.ts daemon",
+    "dev:web": "vite",
+    "build:web": "vite build",
+    "build:app": "node scripts/build.mjs",
+    "build": "npm run build:web && npm run build:app",
+    "app": "npm run build && electron .",
+    "icons": "electron scripts/render-icons.cjs",
+    "dist": "npm run build && electron-builder --mac --arm64",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p web/tsconfig.json --noEmit",
+    "test": "node --test --experimental-test-isolation=none 'test/**/*.test.ts'"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.4",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.1.2",
+    "@xyflow/react": "^12.12.0",
+    "electron": "^44.7.0",
+    "electron-builder": "^26.15.3",
+    "esbuild": "^0.28.2",
+    "lucide-react": "^1.52.0",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.3"
+  },
+  "main": "dist/desktop/main.cjs",
+  "author": "Ry Jenkins",
+  "build": {
+    "appId": "com.ryjenkins.purr",
+    "productName": "PuRR",
+    "copyright": "Ry Jenkins",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "dist/desktop/**",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "dist/server",
+        "to": "server"
+      },
+      {
+        "from": "dist/web",
+        "to": "web"
+      },
+      {
+        "from": "build/bin",
+        "to": "bin"
+      },
+      {
+        "from": "build/tray",
+        "to": "tray"
+      }
+    ],
+    "asar": true,
+    "mac": {
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "arm64"
+          ]
+        }
+      ],
+      "category": "public.app-category.developer-tools",
+      "icon": "build/icon.icns",
+      "identity": "-",
+      "hardenedRuntime": false,
+      "extendInfo": {
+        "NSUserNotificationAlertStyle": "banner"
+      }
+    },
+    "dmg": {
+      "title": "PuRR ${version}"
+    },
+    "electronLanguages": [
+      "en",
+      "en_GB"
+    ]
+  },
+  "dependencies": {
+    "@fontsource-variable/overpass": "^5.3.0",
+    "@fontsource/overpass-mono": "^5.3.0"
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "detector": {
+    "ignoreRules": [],
+    "ignoreFiles": [],
+    "ignoreValues": [
+      {
+        "rule": "design-system-font",
+        "value": "purr-dot",
+        "createdAt": "2026-10-08T00:27:48.120Z",
+        "reason": "agent decision: purr-dot is a local @font-face that only remaps U+00B7 to the system dot because Overpass draws it off-centre; DESIGN.md records it as the Borrowed Dot rule"
+      }
+    ]
+  }
+}

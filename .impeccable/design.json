@@ -1,0 +1,647 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-10-08T00:26:42.950Z",
+  "title": "Design System: purr",
+  "extensions": {
+    "colorMeta": {
+      "ink": {
+        "role": "primary",
+        "displayName": "Graphite Ink",
+        "canonical": "oklch(19.8% 0.012 254)",
+        "tonalRamp": [
+          "oklch(15% 0.012 254)",
+          "oklch(26% 0.012 254)",
+          "oklch(37% 0.012 254)",
+          "oklch(48% 0.012 254)",
+          "oklch(59% 0.012 254)",
+          "oklch(70% 0.012 254)",
+          "oklch(82% 0.012 254)",
+          "oklch(95% 0.012 254)"
+        ]
+      },
+      "ink-hover": {
+        "role": "primary",
+        "displayName": "Graphite Ink, lifted",
+        "canonical": "oklch(31.1% 0.018 258)",
+        "tonalRamp": [
+          "oklch(15% 0.018 258)",
+          "oklch(26% 0.018 258)",
+          "oklch(37% 0.018 258)",
+          "oklch(48% 0.018 258)",
+          "oklch(59% 0.018 258)",
+          "oklch(70% 0.018 258)",
+          "oklch(82% 0.018 258)",
+          "oklch(95% 0.018 258)"
+        ]
+      },
+      "ground": {
+        "role": "neutral",
+        "displayName": "Paper Ground",
+        "canonical": "oklch(98.5% 0.001 286)",
+        "tonalRamp": [
+          "oklch(15% 0.001 286)",
+          "oklch(26% 0.001 286)",
+          "oklch(37% 0.001 286)",
+          "oklch(48% 0.001 286)",
+          "oklch(59% 0.001 286)",
+          "oklch(70% 0.001 286)",
+          "oklch(82% 0.001 286)",
+          "oklch(95% 0.001 286)"
+        ]
+      },
+      "sidebar": {
+        "role": "neutral",
+        "displayName": "Sidebar Grey",
+        "canonical": "oklch(95.9% 0.003 286)",
+        "tonalRamp": [
+          "oklch(15% 0.003 286)",
+          "oklch(26% 0.003 286)",
+          "oklch(37% 0.003 286)",
+          "oklch(48% 0.003 286)",
+          "oklch(59% 0.003 286)",
+          "oklch(70% 0.003 286)",
+          "oklch(82% 0.003 286)",
+          "oklch(95% 0.003 286)"
+        ]
+      },
+      "sunken": {
+        "role": "neutral",
+        "displayName": "Sunken Grey",
+        "canonical": "oklch(96.5% 0.003 286)",
+        "tonalRamp": [
+          "oklch(15% 0.003 286)",
+          "oklch(26% 0.003 286)",
+          "oklch(37% 0.003 286)",
+          "oklch(48% 0.003 286)",
+          "oklch(59% 0.003 286)",
+          "oklch(70% 0.003 286)",
+          "oklch(82% 0.003 286)",
+          "oklch(95% 0.003 286)"
+        ]
+      },
+      "surface": {
+        "role": "neutral",
+        "displayName": "Surface White",
+        "canonical": "oklch(100.0% 0.000 90)",
+        "tonalRamp": [
+          "oklch(15% 0.000 90)",
+          "oklch(26% 0.000 90)",
+          "oklch(37% 0.000 90)",
+          "oklch(48% 0.000 90)",
+          "oklch(59% 0.000 90)",
+          "oklch(70% 0.000 90)",
+          "oklch(82% 0.000 90)",
+          "oklch(95% 0.000 90)"
+        ]
+      },
+      "surface-2": {
+        "role": "neutral",
+        "displayName": "Surface 2",
+        "canonical": "oklch(97.1% 0.003 286)",
+        "tonalRamp": [
+          "oklch(15% 0.003 286)",
+          "oklch(26% 0.003 286)",
+          "oklch(37% 0.003 286)",
+          "oklch(48% 0.003 286)",
+          "oklch(59% 0.003 286)",
+          "oklch(70% 0.003 286)",
+          "oklch(82% 0.003 286)",
+          "oklch(95% 0.003 286)"
+        ]
+      },
+      "surface-3": {
+        "role": "neutral",
+        "displayName": "Surface 3",
+        "canonical": "oklch(94.1% 0.004 286)",
+        "tonalRamp": [
+          "oklch(15% 0.004 286)",
+          "oklch(26% 0.004 286)",
+          "oklch(37% 0.004 286)",
+          "oklch(48% 0.004 286)",
+          "oklch(59% 0.004 286)",
+          "oklch(70% 0.004 286)",
+          "oklch(82% 0.004 286)",
+          "oklch(95% 0.004 286)"
+        ]
+      },
+      "text-2": {
+        "role": "neutral",
+        "displayName": "Secondary Text",
+        "canonical": "oklch(41.8% 0.019 257)",
+        "tonalRamp": [
+          "oklch(15% 0.019 257)",
+          "oklch(26% 0.019 257)",
+          "oklch(37% 0.019 257)",
+          "oklch(48% 0.019 257)",
+          "oklch(59% 0.019 257)",
+          "oklch(70% 0.019 257)",
+          "oklch(82% 0.019 257)",
+          "oklch(95% 0.019 257)"
+        ]
+      },
+      "text-3": {
+        "role": "neutral",
+        "displayName": "Tertiary Text",
+        "canonical": "oklch(54.6% 0.020 256)",
+        "tonalRamp": [
+          "oklch(15% 0.020 256)",
+          "oklch(26% 0.020 256)",
+          "oklch(37% 0.020 256)",
+          "oklch(48% 0.020 256)",
+          "oklch(59% 0.020 256)",
+          "oklch(70% 0.020 256)",
+          "oklch(82% 0.020 256)",
+          "oklch(95% 0.020 256)"
+        ]
+      },
+      "text-4": {
+        "role": "neutral",
+        "displayName": "Disabled Text",
+        "canonical": "oklch(72.9% 0.013 256)",
+        "tonalRamp": [
+          "oklch(15% 0.013 256)",
+          "oklch(26% 0.013 256)",
+          "oklch(37% 0.013 256)",
+          "oklch(48% 0.013 256)",
+          "oklch(59% 0.013 256)",
+          "oklch(70% 0.013 256)",
+          "oklch(82% 0.013 256)",
+          "oklch(95% 0.013 256)"
+        ]
+      },
+      "ok": {
+        "role": "state",
+        "displayName": "Pass Green",
+        "canonical": "oklch(51.0% 0.125 154)",
+        "tonalRamp": [
+          "oklch(15% 0.062 154)",
+          "oklch(26% 0.085 154)",
+          "oklch(37% 0.108 154)",
+          "oklch(48% 0.125 154)",
+          "oklch(59% 0.125 154)",
+          "oklch(70% 0.114 154)",
+          "oklch(82% 0.089 154)",
+          "oklch(95% 0.062 154)"
+        ]
+      },
+      "warn": {
+        "role": "state",
+        "displayName": "Block Amber",
+        "canonical": "oklch(58.7% 0.133 64)",
+        "tonalRamp": [
+          "oklch(15% 0.064 64)",
+          "oklch(26% 0.089 64)",
+          "oklch(37% 0.113 64)",
+          "oklch(48% 0.133 64)",
+          "oklch(59% 0.133 64)",
+          "oklch(70% 0.120 64)",
+          "oklch(82% 0.093 64)",
+          "oklch(95% 0.064 64)"
+        ]
+      },
+      "danger": {
+        "role": "state",
+        "displayName": "Fail Red",
+        "canonical": "oklch(55.0% 0.199 29)",
+        "tonalRamp": [
+          "oklch(15% 0.086 29)",
+          "oklch(26% 0.123 29)",
+          "oklch(37% 0.159 29)",
+          "oklch(48% 0.196 29)",
+          "oklch(59% 0.199 29)",
+          "oklch(70% 0.169 29)",
+          "oklch(82% 0.129 29)",
+          "oklch(95% 0.086 29)"
+        ]
+      },
+      "info": {
+        "role": "state",
+        "displayName": "Running Blue",
+        "canonical": "oklch(52.0% 0.194 261)",
+        "tonalRamp": [
+          "oklch(15% 0.085 261)",
+          "oklch(26% 0.120 261)",
+          "oklch(37% 0.156 261)",
+          "oklch(48% 0.192 261)",
+          "oklch(59% 0.194 261)",
+          "oklch(70% 0.166 261)",
+          "oklch(82% 0.127 261)",
+          "oklch(95% 0.085 261)"
+        ]
+      },
+      "block-scanner": {
+        "role": "block-type",
+        "displayName": "Scanner Line",
+        "canonical": "oklch(64.5% 0.178 44)",
+        "tonalRamp": [
+          "oklch(15% 0.079 44)",
+          "oklch(26% 0.112 44)",
+          "oklch(37% 0.145 44)",
+          "oklch(48% 0.177 44)",
+          "oklch(59% 0.178 44)",
+          "oklch(70% 0.154 44)",
+          "oklch(82% 0.118 44)",
+          "oklch(95% 0.079 44)"
+        ]
+      },
+      "block-command": {
+        "role": "block-type",
+        "displayName": "Command Line",
+        "canonical": "oklch(51.1% 0.087 61)",
+        "tonalRamp": [
+          "oklch(15% 0.049 61)",
+          "oklch(26% 0.065 61)",
+          "oklch(37% 0.081 61)",
+          "oklch(48% 0.087 61)",
+          "oklch(59% 0.087 61)",
+          "oklch(70% 0.085 61)",
+          "oklch(82% 0.068 61)",
+          "oklch(95% 0.049 61)"
+        ]
+      },
+      "block-context": {
+        "role": "block-type",
+        "displayName": "Context Line",
+        "canonical": "oklch(40.1% 0.153 264)",
+        "tonalRamp": [
+          "oklch(15% 0.071 264)",
+          "oklch(26% 0.099 264)",
+          "oklch(37% 0.127 264)",
+          "oklch(48% 0.153 264)",
+          "oklch(59% 0.153 264)",
+          "oklch(70% 0.135 264)",
+          "oklch(82% 0.104 264)",
+          "oklch(95% 0.071 264)"
+        ]
+      },
+      "block-branch": {
+        "role": "block-type",
+        "displayName": "Branch Line",
+        "canonical": "oklch(62.0% 0.130 235)",
+        "tonalRamp": [
+          "oklch(15% 0.063 235)",
+          "oklch(26% 0.087 235)",
+          "oklch(37% 0.111 235)",
+          "oklch(48% 0.130 235)",
+          "oklch(59% 0.130 235)",
+          "oklch(70% 0.118 235)",
+          "oklch(82% 0.092 235)",
+          "oklch(95% 0.063 235)"
+        ]
+      },
+      "block-prompt": {
+        "role": "block-type",
+        "displayName": "Prompt Line",
+        "canonical": "oklch(50.2% 0.197 354)",
+        "tonalRamp": [
+          "oklch(15% 0.086 354)",
+          "oklch(26% 0.122 354)",
+          "oklch(37% 0.158 354)",
+          "oklch(48% 0.194 354)",
+          "oklch(59% 0.197 354)",
+          "oklch(70% 0.168 354)",
+          "oklch(82% 0.128 354)",
+          "oklch(95% 0.086 354)"
+        ]
+      },
+      "block-merge": {
+        "role": "block-type",
+        "displayName": "Merge Line",
+        "canonical": "oklch(63.2% 0.161 128)",
+        "tonalRamp": [
+          "oklch(15% 0.074 128)",
+          "oklch(26% 0.103 128)",
+          "oklch(37% 0.133 128)",
+          "oklch(48% 0.161 128)",
+          "oklch(59% 0.161 128)",
+          "oklch(70% 0.141 128)",
+          "oklch(82% 0.108 128)",
+          "oklch(95% 0.074 128)"
+        ]
+      },
+      "block-verify": {
+        "role": "block-type",
+        "displayName": "Verify Line",
+        "canonical": "oklch(58.5% 0.103 185)",
+        "tonalRamp": [
+          "oklch(15% 0.054 185)",
+          "oklch(26% 0.073 185)",
+          "oklch(37% 0.092 185)",
+          "oklch(48% 0.103 185)",
+          "oklch(59% 0.103 185)",
+          "oklch(70% 0.097 185)",
+          "oklch(82% 0.077 185)",
+          "oklch(95% 0.054 185)"
+        ]
+      },
+      "block-gate": {
+        "role": "block-type",
+        "displayName": "Gate Line",
+        "canonical": "oklch(77.7% 0.159 87)",
+        "tonalRamp": [
+          "oklch(15% 0.073 87)",
+          "oklch(26% 0.102 87)",
+          "oklch(37% 0.131 87)",
+          "oklch(48% 0.159 87)",
+          "oklch(59% 0.159 87)",
+          "oklch(70% 0.139 87)",
+          "oklch(82% 0.107 87)",
+          "oklch(95% 0.073 87)"
+        ]
+      },
+      "block-output": {
+        "role": "block-type",
+        "displayName": "Output Line",
+        "canonical": "oklch(63.6% 0.016 251)",
+        "tonalRamp": [
+          "oklch(15% 0.016 251)",
+          "oklch(26% 0.016 251)",
+          "oklch(37% 0.016 251)",
+          "oklch(48% 0.016 251)",
+          "oklch(59% 0.016 251)",
+          "oklch(70% 0.016 251)",
+          "oklch(82% 0.016 251)",
+          "oklch(95% 0.016 251)"
+        ]
+      }
+    },
+    "darkTheme": {
+      "note": "Dark tokens live under @media (prefers-color-scheme: dark) in web/src/styles.css; same names, values below.",
+      "values": {
+        "--bg-sidebar": "#0d0e10",
+        "--bg": "#131417",
+        "--bg-sunken": "#0f1012",
+        "--surface": "#18191d",
+        "--surface-2": "#1f2025",
+        "--surface-3": "#28292f",
+        "--text": "#eceef1",
+        "--text-2": "#aab1ba",
+        "--text-3": "#838b95",
+        "--text-4": "#555c66",
+        "--ink": "#eceef1",
+        "--ink-hover": "#ffffff",
+        "--ink-fg": "#121417",
+        "--ok": "#3cc47c",
+        "--danger": "#ff6152",
+        "--warn": "#f2a634",
+        "--info": "#6aa1ff",
+        "--on-status": "#101317",
+        "--c-scanner": "#ff8542",
+        "--c-command": "#c4925e",
+        "--c-context": "#6e8ff4",
+        "--c-branch": "#36b9ef",
+        "--c-prompt": "#f0579f",
+        "--c-merge": "#9dcc3d",
+        "--c-verify": "#2fc3b3",
+        "--c-gate": "#ffd23f",
+        "--c-output": "#98a0aa"
+      }
+    },
+    "typographyMeta": {
+      "display": {
+        "displayName": "Display",
+        "purpose": "Page titles (h1)."
+      },
+      "headline": {
+        "displayName": "Headline",
+        "purpose": "Section heads such as Findings."
+      },
+      "title": {
+        "displayName": "Title",
+        "purpose": "Card, panel and finding titles."
+      },
+      "body": {
+        "displayName": "Body",
+        "purpose": "All running UI text, tabular numerals."
+      },
+      "label": {
+        "displayName": "Label",
+        "purpose": "Field labels, chips, table heads, nav groups; sentence case."
+      },
+      "mono": {
+        "displayName": "Mono",
+        "purpose": "Code, SHAs, paths, block summaries, output blocks."
+      }
+    },
+    "shadows": [
+      {
+        "name": "shadow-sm",
+        "value": "0 1px 2px rgba(16, 22, 30, .06)",
+        "purpose": "Resting graph block nodes only."
+      },
+      {
+        "name": "shadow-md",
+        "value": "0 4px 12px rgba(16, 22, 30, .08), 0 1px 3px rgba(16, 22, 30, .06)",
+        "purpose": "Flow-card hover lift and selected nodes."
+      },
+      {
+        "name": "shadow-lg",
+        "value": "0 18px 48px rgba(16, 22, 30, .18), 0 2px 8px rgba(16, 22, 30, .08)",
+        "purpose": "Modals and toasts."
+      },
+      {
+        "name": "state-ring",
+        "value": "0 0 0 3px color-mix(in srgb, <state> 16-20%, transparent)",
+        "purpose": "Selected (ink), running (info), error (danger) nodes."
+      },
+      {
+        "name": "focus-ring-input",
+        "value": "0 0 0 3px color-mix(in srgb, var(--text) 10%, transparent)",
+        "purpose": "Focused inputs."
+      },
+      {
+        "name": "focus-outline",
+        "value": "outline: 2px solid var(--focus); outline-offset: 2px",
+        "purpose": "Keyboard focus on buttons, links, summaries, switches."
+      }
+    ],
+    "motion": [
+      {
+        "name": "ease",
+        "value": "cubic-bezier(.16, 1, .3, 1)",
+        "purpose": "Default easing for page-in, modal-in, toast-in, switches, meters."
+      },
+      {
+        "name": "hover",
+        "value": ".12s-.15s",
+        "purpose": "Background, border and colour transitions on controls and rows."
+      },
+      {
+        "name": "st-pulse",
+        "value": "1.6s var(--ease) infinite, scale 1 to 1.9, fade out",
+        "purpose": "Running station marker."
+      },
+      {
+        "name": "track-live",
+        "value": ".6s linear infinite, dash 5 4",
+        "purpose": "Live edge on a running flow graph."
+      },
+      {
+        "name": "reduced-motion",
+        "value": "animation/transition durations .001ms; pulse, spinner and live edge stopped",
+        "purpose": "prefers-reduced-motion: reduce."
+      }
+    ],
+    "breakpoints": [
+      {
+        "name": "compact-zoom",
+        "value": "zoom < 0.62",
+        "purpose": "Block nodes switch to compact mode."
+      },
+      {
+        "name": "medium",
+        "value": "1100px",
+        "purpose": "Run layout stacks; editor columns narrow to 204 / 330px."
+      },
+      {
+        "name": "narrow",
+        "value": "760px",
+        "purpose": "Sidebar folds to a 56px icon rail; single-column grids."
+      }
+    ],
+    "desktop": {
+      "selector": ".desktop",
+      "rules": [
+        "Brand row pads 84px left for traffic lights and hides the version.",
+        "Brand row, header and editor bar are -webkit-app-region: drag; controls inside are no-drag.",
+        "At ≤760px the brand row gains 28px top clearance instead."
+      ]
+    }
+  },
+  "components": [
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "The one ink action per view (Run now, Save).",
+      "html": "<button class=\"ds-btn ds-btn-primary\">Run now</button>",
+      "css": ".ds-btn{font:650 13px/1 'Overpass Variable',Overpass,system-ui,sans-serif;height:30px;padding:1px 12px 0;border-radius:var(--r,6px);border:1px solid var(--border-2,rgba(16,22,30,.16));background:var(--surface,#fff);color:var(--text,#12161b);cursor:pointer;transition:background .15s,border-color .15s}.ds-btn-primary{background:var(--ink,#12161b);border-color:var(--ink,#12161b);color:var(--ink-fg,#fff)}.ds-btn-primary:hover{background:var(--ink-hover,#2b313a);border-color:var(--ink-hover,#2b313a)}.ds-btn:focus-visible{outline:2px solid var(--focus,rgba(18,22,27,.5));outline-offset:2px}"
+    },
+    {
+      "name": "Secondary Button",
+      "kind": "button",
+      "refersTo": "button-secondary",
+      "description": "Default surface button with a hairline.",
+      "html": "<button class=\"ds-btn2\">Duplicate</button>",
+      "css": ".ds-btn2{font:650 13px/1 'Overpass Variable',Overpass,system-ui,sans-serif;height:30px;padding:1px 12px 0;border-radius:var(--r,6px);border:1px solid var(--border-2,rgba(16,22,30,.16));background:var(--surface,#fff);color:var(--text,#12161b);cursor:pointer;transition:background .15s,border-color .15s}.ds-btn2:hover{background:var(--surface-2,#f5f5f7);border-color:var(--border-3,rgba(16,22,30,.3))}.ds-btn2:active{background:var(--surface-3,#ebebee)}.ds-btn2:focus-visible{outline:2px solid var(--focus,rgba(18,22,27,.5));outline-offset:2px}"
+    },
+    {
+      "name": "Ghost Button",
+      "kind": "button",
+      "refersTo": "button-ghost",
+      "description": "Transparent secondary actions in toolbars and rows.",
+      "html": "<button class=\"ds-ghost\">Dismiss</button>",
+      "css": ".ds-ghost{font:650 13px/1 'Overpass Variable',Overpass,system-ui,sans-serif;height:30px;padding:1px 12px 0;border-radius:var(--r,6px);border:1px solid transparent;background:transparent;color:var(--text-2,#464d57);cursor:pointer;transition:background .15s,color .15s}.ds-ghost:hover{background:var(--hover,rgba(16,22,30,.045));color:var(--text,#12161b)}.ds-ghost:focus-visible{outline:2px solid var(--focus,rgba(18,22,27,.5));outline-offset:2px}"
+    },
+    {
+      "name": "Text Input",
+      "kind": "input",
+      "refersTo": "input-text",
+      "description": "Hairline field with a neutral focus ring.",
+      "html": "<input class=\"ds-input\" placeholder=\"owner/repo\">",
+      "css": ".ds-input{font:400 13px 'Overpass Variable',Overpass,system-ui,sans-serif;height:32px;padding:1px 10px 0;width:240px;border-radius:var(--r,6px);border:1px solid var(--border-2,rgba(16,22,30,.16));background:var(--surface,#fff);color:var(--text,#12161b);transition:border-color .15s,box-shadow .15s}.ds-input:hover{border-color:var(--border-3,rgba(16,22,30,.3))}.ds-input:focus{outline:none;border-color:var(--border-3,rgba(16,22,30,.3));box-shadow:0 0 0 3px rgba(18,22,27,.1)}.ds-input::placeholder{color:var(--text-3,#69717c)}"
+    },
+    {
+      "name": "Sidebar Nav",
+      "kind": "nav",
+      "refersTo": "nav-item",
+      "description": "Sidebar items on the one-step-darker sidebar; active is a neutral wash.",
+      "html": "<nav class=\"ds-nav\"><div class=\"ds-nl\">Review</div><a class=\"ds-ni on\" href=\"#\"><svg width=\"16\" height=\"16\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M22 12h-4l-3 9L9 3l-3 9H2\"/></svg>Runs</a><a class=\"ds-ni\" href=\"#\"><svg width=\"16\" height=\"16\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z\"/><path d=\"M4 22v-7\"/></svg>Findings</a></nav>",
+      "css": ".ds-nav{width:216px;padding:4px 8px 8px;background:var(--bg-sidebar,#f1f1f3);display:flex;flex-direction:column;gap:1px;font-family:'Overpass Variable',Overpass,system-ui,sans-serif}.ds-nl{font-size:11.5px;font-weight:650;color:var(--text-3,#69717c);padding:14px 10px 5px}.ds-ni{height:30px;padding:1px 10px 0;border-radius:var(--r,6px);display:flex;align-items:center;gap:10px;font-weight:600;font-size:13.5px;color:var(--text-2,#464d57);text-decoration:none;transition:background .12s,color .12s}.ds-ni svg{color:var(--text-3,#69717c)}.ds-ni:hover{background:var(--hover,rgba(16,22,30,.045));color:var(--text,#12161b)}.ds-ni.on{background:var(--active,rgba(16,22,30,.08));color:var(--text,#12161b)}.ds-ni.on svg{color:var(--text,#12161b)}.ds-ni:focus-visible{outline:2px solid var(--focus,rgba(18,22,27,.5));outline-offset:-2px}"
+    },
+    {
+      "name": "Filter Tabs",
+      "kind": "chip",
+      "refersTo": "tab-active",
+      "description": "Segmented filter; the selected tab is a solid ink panel.",
+      "html": "<div class=\"ds-seg\"><button class=\"on\">All <span>24</span></button><button>Passed <span>18</span></button><button>Blocked <span>3</span></button></div>",
+      "css": ".ds-seg{display:inline-flex;gap:2px;border:1px solid var(--border-2,rgba(16,22,30,.16));border-radius:var(--r,6px);padding:2px;background:var(--surface,#fff)}.ds-seg button{font:650 12.5px 'Overpass Variable',Overpass,system-ui,sans-serif;height:26px;padding:1px 11px 0;border:none;border-radius:var(--r-sm,5px);background:transparent;color:var(--text-2,#464d57);cursor:pointer;display:inline-flex;align-items:center;gap:7px}.ds-seg button span{color:var(--text-3,#69717c);font-size:11.5px}.ds-seg button:hover{background:var(--hover,rgba(16,22,30,.045));color:var(--text,#12161b)}.ds-seg button.on{background:var(--ink,#12161b);color:var(--ink-fg,#fff)}.ds-seg button.on span{color:rgba(255,255,255,.65)}"
+    },
+    {
+      "name": "Status and Severity",
+      "kind": "chip",
+      "refersTo": "sev-must-fix",
+      "description": "Station-marker status plus severity badges; shape first, colour second.",
+      "html": "<div class=\"ds-row\"><span class=\"ds-status\"><svg width=\"14\" height=\"14\" viewBox=\"0 0 16 16\"><circle cx=\"8\" cy=\"8\" r=\"7\" fill=\"var(--ok,#0b7a43)\"/><path d=\"M4.9 8.2 7 10.2 11.1 5.9\" fill=\"none\" stroke=\"#fff\" stroke-width=\"1.9\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/></svg><span>Passed</span></span><span class=\"ds-sev must\">Must fix</span><span class=\"ds-sev con\">Consider</span><span class=\"ds-sev min\">Minor</span></div>",
+      "css": ".ds-row{display:flex;gap:10px;align-items:center;font-family:'Overpass Variable',Overpass,system-ui,sans-serif}.ds-status{display:inline-flex;align-items:center;gap:7px;font-size:12.5px;font-weight:700;color:var(--ok,#0b7a43)}.ds-sev{display:inline-flex;align-items:center;height:22px;padding:1px 7px 0;border-radius:var(--r-sm,5px);font-size:12px;font-weight:750}.ds-sev.must{background:var(--danger,#cc2a1f);color:var(--on-status,#fff)}.ds-sev.con{color:var(--warn,#b26800);background:color-mix(in srgb,var(--warn,#b26800) 15%,transparent)}.ds-sev.min{color:var(--text-2,#464d57);background:var(--surface-2,#f5f5f7);box-shadow:inset 0 0 0 1px var(--border-2,rgba(16,22,30,.16))}"
+    },
+    {
+      "name": "Card",
+      "kind": "card",
+      "refersTo": "card",
+      "description": "Flat hairline surface; lifts only on hover when clickable.",
+      "html": "<div class=\"ds-card\"><div class=\"ds-ct\">Full review</div><p>Context seed forked into six lenses, verified, gated.</p></div>",
+      "css": ".ds-card{width:300px;background:var(--surface,#fff);border:1px solid var(--border,rgba(16,22,30,.1));border-radius:var(--r-lg,9px);padding:18px 20px;font:400 13.5px/1.5 'Overpass Variable',Overpass,system-ui,sans-serif;color:var(--text-2,#464d57);transition:border-color .15s,box-shadow .2s;cursor:pointer}.ds-card:hover{border-color:var(--border-3,rgba(16,22,30,.3));box-shadow:0 4px 12px rgba(16,22,30,.08),0 1px 3px rgba(16,22,30,.06)}.ds-ct{font-weight:750;font-size:15px;color:var(--text,#12161b);margin-bottom:6px}.ds-card p{margin:0}"
+    },
+    {
+      "name": "Block Node",
+      "kind": "custom",
+      "refersTo": "block-node",
+      "description": "Graph node: round type bullet, label, mono summary, station marker, status footer.",
+      "html": "<div class=\"ds-node\"><div class=\"ds-top\"><span class=\"ds-tile\"><svg width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#fff\" stroke-width=\"2.4\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><circle cx=\"11\" cy=\"11\" r=\"7\"/><path d=\"m21 21-4.3-4.3\"/></svg></span><div class=\"ds-tt\"><div class=\"ds-lbl\">Context · gather facts</div><div class=\"ds-sum\">claude · sonnet</div></div><svg width=\"14\" height=\"14\" viewBox=\"0 0 16 16\"><circle cx=\"8\" cy=\"8\" r=\"7\" fill=\"var(--ok,#0b7a43)\"/><path d=\"M4.9 8.2 7 10.2 11.1 5.9\" fill=\"none\" stroke=\"#fff\" stroke-width=\"1.9\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/></svg></div><div class=\"ds-st\"><b>Done</b> 42s</div></div>",
+      "css": ".ds-node{width:232px;background:var(--surface,#fff);border:1.5px solid var(--border-2,rgba(16,22,30,.16));border-radius:var(--r-lg,9px);box-shadow:0 1px 2px rgba(16,22,30,.06);font:12.5px 'Overpass Variable',Overpass,system-ui,sans-serif;transition:border-color .2s}.ds-node:hover{border-color:var(--border-3,rgba(16,22,30,.3))}.ds-top{display:flex;align-items:center;gap:10px;padding:10px 11px 9px}.ds-tile{width:26px;height:26px;border-radius:50%;display:grid;place-items:center;background:var(--c-context,#1b3f99);flex-shrink:0}.ds-tt{flex:1;min-width:0}.ds-lbl{font-weight:750;font-size:13px;color:var(--text,#12161b);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.ds-sum{font:11px 'Overpass Mono',ui-monospace,monospace;color:var(--text-3,#69717c)}.ds-st{font-size:11.5px;padding:6px 11px 5px;border-top:1px solid var(--border,rgba(16,22,30,.1));color:var(--text-3,#69717c)}.ds-st b{color:var(--ok,#0b7a43);font-weight:750}"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Quiet Instrument",
+    "overview": "**Creative North Star: \"The Quiet Instrument\"**\n\nPuRR is one developer's review instrument, set in the category-standard idiom of a Linear-calibre tool shell and played straight. The shell is monochrome: a neutral grey ground, a sidebar one step darker, white (or graphite) surfaces, hairline borders and solid-ink primary actions. Nothing in the chrome is coloured. When colour appears, it carries meaning, either a state (passed, blocked, failed, running, plus the must-fix / consider / minor severities) or one of the nine flow block types.\n\nDensity is compact and desktop-first: 13.5px body, 30px controls and tight 6–9px corners, so a run's status reads at a glance beside a terminal and an editor. The signature is the flow drawn as a route. Block types are solid round bullets in fixed line colours, graph edges are curves in the source block's colour, and every flow card carries a small route diagram. Motion only ever reports state, like a running pulse or an animated live edge.\n\nThis world was the user's own choice, made after they rejected two directions. One was the first pass's purple→teal gradient accent (\"very common for AI code\"). The other was a transit-map \"signage rail\". Anything that reads as a generic AI SaaS dashboard is wrong.",
+    "keyCharacteristics": [
+      "Monochrome neutral shell. Ink primary buttons, neutral focus rings and neutral selection.",
+      "Colour is reserved for state and for the nine block types.",
+      "Status is coded by shape first (station markers) and by colour second.",
+      "Flat hairline-bordered surfaces. Shadows appear only on floating layers and graph nodes.",
+      "Light tokens at `:root`, with a full dark set under `prefers-color-scheme: dark`.",
+      "Overpass for UI, Overpass Mono for code, with tabular numerals throughout."
+    ],
+    "rules": [
+      {
+        "name": "The Colour-Is-Meaning Rule",
+        "body": "Every hue on screen is either a state or a block type. Chrome, focus, selection, links and primary actions stay neutral ink. A colour that means nothing is a defect.",
+        "section": "colors"
+      },
+      {
+        "name": "The No-Accent Rule",
+        "body": "There is no brand accent colour. Links are ink and are underlined inside running text. They are never tinted.",
+        "section": "colors"
+      },
+      {
+        "name": "The Tint, Not Fill Rule",
+        "body": "State backgrounds are `color-mix` tints of the state colour (7–15%) over the surface. The only solid state fills are the must-fix severity, the failed and passed station-marker discs, and the solid danger button.",
+        "section": "colors"
+      },
+      {
+        "name": "The Tabular Rule",
+        "body": "The body sets `font-variant-numeric: tabular-nums`, so counts, durations and meters never jitter as they update live.",
+        "section": "typography"
+      },
+      {
+        "name": "The Borrowed Dot Rule",
+        "body": "Overpass draws the middle dot off-centre. A `purr-dot` face maps U+00B7 to Helvetica/Arial so names like \"Lens · Security\" sit level. Keep it at the head of the sans stack.",
+        "section": "typography"
+      },
+      {
+        "name": "The Flat-At-Rest Rule",
+        "body": "Cards, tables and panels never carry a shadow at rest. A shadow means the thing floats, is being hovered, or is selected.",
+        "section": "elevation"
+      }
+    ],
+    "dos": [
+      "**Do** keep every colour tied to a state or a block type; primary actions use ink (`ink`).",
+      "**Do** code status by shape first with station markers, then by colour.",
+      "**Do** draw graph edges as curves in the source block's colour, and show a block type only as its round bullet.",
+      "**Do** keep surfaces flat with hairline borders; reserve shadows for nodes, hover lift, modals and toasts.",
+      "**Do** ship every new token in both the `:root` light set and the `prefers-color-scheme: dark` set.",
+      "**Do** honour `prefers-reduced-motion`: animations and transitions collapse, and the running pulse, spinner and live edge stop.",
+      "**Do** keep `.desktop` traffic-light clearance and drag regions on any new header-level bar, with `no-drag` on its controls.",
+      "**Do** keep loudness for real blocks and must-fixes; everything else stays calm grey."
+    ],
+    "donts": [
+      "**Don't** introduce a brand accent colour, a purple→teal gradient, or anything that reads as a generic AI SaaS dashboard.",
+      "**Don't** bring back the transit-map \"signage rail\" direction the user rejected.",
+      "**Don't** colour focus rings, selection, links or nav state.",
+      "**Don't** use solid state fills where a 7–15% tint will do; must-fix is the one loud badge.",
+      "**Don't** use motion as decoration. It reports running, live or arriving state only.",
+      "**Don't** set uppercase letter-spaced labels or eyebrow text above titles."
+    ]
+  }
+}

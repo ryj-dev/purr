@@ -1,0 +1,15 @@
+node_modules/
+dist/
+*.log
+.DS_Store
+release/
+.claude/settings.local.json
+
+# impeccable design skill: third-party, installed per machine (https://github.com/pbakaus/impeccable)
+.claude/skills/impeccable/
+.claude/agents/impeccable-*.md
+# impeccable's machine-local caches and working files (PRODUCT.md, DESIGN.md, .impeccable/design.json and surfaces/ are kept)
+.impeccable/hook.cache.json
+.impeccable/questions/
+.impeccable/review/
+.impeccable/config.local.json

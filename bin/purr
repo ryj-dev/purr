@@ -1,0 +1,4 @@
+#!/bin/sh
+# purr launcher: Node 23.6+ runs the TypeScript sources directly (type stripping), so there is no build step for the daemon.
+DIR="$(cd "$(dirname "$(realpath "$0")")/.." && pwd -P)"
+exec node --no-warnings "$DIR/src/server/cli.ts" "$@"

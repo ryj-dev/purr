@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <!-- PuRR's mark, the single source for the app icon, the menu-bar icon and the in-app logo (scripts/render-icons.cjs,
+       web/src/components/ui.tsx). A cat's head whose whiskers are the code brackets turned inside out: >/<.
+       Keep the ids: the renderers recolour #cat and #whiskers. -->
+  <path id="cat" d="M50 34
+    C45.5 34 42 34.6 39.4 35.5
+    C35.5 31.5 30.5 26.5 25.5 23.2
+    C23.2 21.6 20.6 21.3 19.8 23
+    C19.1 24.6 19 28 19.2 31.5
+    C19.4 37 19.9 42.5 20.8 47.5
+    C17.9 52.5 16.6 57.6 16.7 62.5
+    C17.2 76.5 31 85.5 50 85.5
+    C69 85.5 82.8 76.5 83.3 62.5
+    C83.4 57.6 82.1 52.5 79.2 47.5
+    C80.1 42.5 80.6 37 80.8 31.5
+    C81 28 80.9 24.6 80.2 23
+    C79.4 21.3 76.8 21.6 74.5 23.2
+    C69.5 26.5 64.5 31.5 60.6 35.5
+    C58 34.6 54.5 34 50 34 Z"/>
+  <path id="whiskers" fill="none" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"
+    d="M31 53 L41.2 59.5 L31 66 M53 49 L46.3 70 M69 53 L58.8 59.5 L69 66"/>
+</svg>
