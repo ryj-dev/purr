@@ -337,7 +337,9 @@ function updateTray() {
       click: (item) => { setLoginItem(item.checked); updateTray(); },
     },
     { type: 'separator' },
-    { label: 'Install command line tool…', click: async () => { const r = installCli(); dialog.showMessageBox({ message: r.ok ? 'The purr command line tool is installed' : 'Couldn\'t install the command line tool', detail: r.message }); } },
+    cliStatus().state === 'installed'
+      ? { label: 'Command line tool installed', enabled: false }
+      : { label: 'Install command line tool…', click: async () => { const r = installCli(); updateTray(); dialog.showMessageBox({ message: r.ok ? 'The purr command line tool is installed' : 'Couldn\'t install the command line tool', detail: r.message }); } },
     { label: mode === 'external' ? 'Service: started outside the app' : 'Restart service', enabled: mode !== 'external', click: () => restartService() },
     { label: 'Open service log', click: () => shell.openPath(LOG) },
     { type: 'separator' },
@@ -358,9 +360,22 @@ function setLoginItem(enabled: boolean): boolean {
   return loginItemEnabled();
 }
 
+const CLI_DIR = join(homedir(), '.local', 'bin');
+const CLI_LINK = join(CLI_DIR, 'purr');
+
+/** Whether ~/.local/bin/purr is this app's: installed, missing, a link to somewhere else (another copy), or a file. */
+function cliStatus(): { state: 'installed' | 'missing' | 'other' | 'blocked'; link: string; target: string | null; onPath: boolean } {
+  const onPath = (userPath || '').split(':').includes(CLI_DIR);
+  let st;
+  try { st = lstatSync(CLI_LINK); } catch { return { state: 'missing', link: CLI_LINK, target: null, onPath }; }
+  if (!st.isSymbolicLink()) return { state: 'blocked', link: CLI_LINK, target: null, onPath };
+  const target = readlinkSync(CLI_LINK);
+  return { state: target === SHIM ? 'installed' : 'other', link: CLI_LINK, target, onPath };
+}
+
 function installCli(): { ok: boolean; message: string } {
-  const dir = join(homedir(), '.local', 'bin');
-  const link = join(dir, 'purr');
+  const dir = CLI_DIR;
+  const link = CLI_LINK;
   try {
     mkdirSync(dir, { recursive: true });
     if (existsSync(link) || (() => { try { lstatSync(link); return true; } catch { return false; } })()) {
@@ -379,7 +394,8 @@ function installCli(): { ok: boolean; message: string } {
 
 ipcMain.handle('purr:get-login-item', () => loginItemEnabled());
 ipcMain.handle('purr:set-login-item', (_e, on: boolean) => { const r = setLoginItem(!!on); updateTray(); return r; });
-ipcMain.handle('purr:install-cli', () => installCli());
+ipcMain.handle('purr:install-cli', () => { const r = installCli(); updateTray(); return r; });
+ipcMain.handle('purr:cli-status', () => cliStatus());
 ipcMain.on('purr:version', (e) => { e.returnValue = app.getVersion(); });
 
 // ---------------------------------------------------------------------------------------------------------------------

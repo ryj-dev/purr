@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import type { Settings } from '../../../src/shared/types.ts';
 import { api, errMsg } from '../api.ts';
 import { useApp } from '../state.tsx';
@@ -6,7 +6,7 @@ import { useToast } from '../components/Toast.tsx';
 import { UsageMeter } from '../components/UsageMeter.tsx';
 import { fmtTime } from '../util.ts';
 import { PageHeader } from '../components/ui.tsx';
-import { Save, SquareTerminal } from 'lucide-react';
+import { Check, Save, SquareTerminal } from 'lucide-react';
 
 function DesktopCard() {
   const toast = useToast();
@@ -16,9 +16,13 @@ function DesktopCard() {
   const toggle = async (on: boolean) => {
     try { setLogin(await bridge.setLoginItem(on)); } catch (e) { toast(errMsg(e), 'error'); }
   };
+  const [cliState, setCliState] = useState<Awaited<ReturnType<PurrDesktop['cliStatus']>> | null>(null);
+  const loadCli = useCallback(() => { bridge.cliStatus?.().then(setCliState, () => setCliState(null)); }, [bridge]);
+  useEffect(loadCli, [loadCli]);
   const cli = async () => {
     const r = await bridge.installCli();
     toast(r.message, r.ok ? 'ok' : 'error');
+    loadCli();
   };
   return (
     <div className="card">
@@ -35,11 +39,43 @@ function DesktopCard() {
       <div className="set-row">
         <div>
           <div className="t">Command line tool</div>
-          <div className="d">Links <code>~/.local/bin/purr</code> to this app, so you can use <code>purr run</code> and <code>purr hooks</code> from a terminal.</div>
+          <div className="d">Links <code>~/.local/bin/purr</code> to this app, so you can use <code>purr run</code> and <code>purr hooks</code> from a terminal.
+            {cliState?.state === 'other' && <> It points at another copy of PuRR now.</>}
+            {cliState?.state === 'installed' && !cliState.onPath && <> Add <code>~/.local/bin</code> to your PATH to use it.</>}</div>
         </div>
-        <button onClick={cli}><SquareTerminal size={13} />Install <code>purr</code></button>
+        {cliState?.state === 'installed' ? (
+          <span className="chip ok" title={`${cliState.link} → ${cliState.target}`}><Check size={12} />Installed</span>
+        ) : cliState?.state === 'blocked' ? (
+          <span className="chip warn" title={`${cliState.link} is a file, not a link: remove it to install`}>Blocked by a file</span>
+        ) : (
+          <button onClick={cli} title={cliState?.state === 'other' ? `${cliState.link} points at ${cliState.target}` : undefined}>
+            <SquareTerminal size={13} />{cliState?.state === 'other' ? <>Point <code>purr</code> at this app</> : <>Install <code>purr</code></>}
+          </button>
+        )}
       </div>
     </div>
+  );
+}
+
+/**
+ * A number setting edited as text: clearing the box to type a new value leaves it empty (no 0 filled in, so 4 -> 6
+ * doesn't become 06). Leaving it empty, or not a number, puts the last value back when you leave the box.
+ */
+function NumField({ label, hint, value, onChange }: { label: string; hint?: string; value: number; onChange: (v: number) => void }) {
+  const [text, setText] = useState(String(value));
+  useEffect(() => { setText(String(value)); }, [value]);   // loaded, saved or reset from outside
+  return (
+    <label className="field">
+      <span>{label}</span>
+      <input type="number" min={0} value={text}
+        onChange={(e) => {
+          setText(e.target.value);
+          const v = e.target.value.trim();
+          if (v !== '' && Number.isFinite(Number(v))) onChange(Number(v));
+        }}
+        onBlur={() => { if (text.trim() === '' || !Number.isFinite(Number(text))) setText(String(value)); }} />
+      {hint && <span className="hint">{hint}</span>}
+    </label>
   );
 }
 
@@ -66,11 +102,7 @@ export function SettingsPage() {
   const u = state.usage;
   const upd = (p: Partial<Settings>) => { setS({ ...s, ...p }); setDirty(true); };
   const num = (k: keyof Settings, label: string, hint?: string) => (
-    <label className="field">
-      <span>{label}</span>
-      <input type="number" value={s[k] as number} min={0} onChange={(e) => upd({ [k]: Number(e.target.value) } as Partial<Settings>)} />
-      {hint && <span className="hint">{hint}</span>}
-    </label>
+    <NumField label={label} hint={hint} value={s[k] as number} onChange={(v) => upd({ [k]: v } as Partial<Settings>)} />
   );
   const save = async () => {
     try {
