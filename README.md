@@ -170,7 +170,7 @@ From a terminal: `purr flow export <id>` prints the text (`--json` for the JSON)
 
 ## Quota guardrails
 
-- **Max concurrent Claude sessions:** 4 by default.
+- **Max concurrent Claude sessions:** 6 by default, so the default full review's six specialist lenses all run at once. The limit is shared by every review the service runs, so two reviews at once share the six.
 - **Daily session cap:** 300 by default.
 - **Usage meters:** the 5-hour and 7-day meters come from the `rate_limit_event` Claude Code prints after each session.
 - **Rate limits:** when a limit is hit, Claude work pauses until the reset time and queued runs wait. Scanner-only flows keep running.

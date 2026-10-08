@@ -8,7 +8,7 @@ export const DEFAULT_SETTINGS: Settings = {
   claudeBin: 'claude',
   // Keep the user's own hooks and plugins out of review sessions; auth is unaffected.
   claudeExtraArgs: ['--strict-mcp-config'],
-  maxConcurrentClaude: 4,
+  maxConcurrentClaude: 6,   // the default full review's six lenses run at once
   dailySessionCap: 300,
   pollIntervalSec: 60,
   debounceSec: 60,
