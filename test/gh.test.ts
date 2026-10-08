@@ -278,3 +278,30 @@ test("PuRR adds the folders where Claude Code's installer and Homebrew put tools
   assert.equal(withToolDirs('', '/h'), `/usr/bin:/bin:/usr/sbin:/sbin:${extra}`, 'empty: the system folders, then those');
   assert.equal(withToolDirs(withToolDirs('/usr/bin', '/h'), '/h'), withToolDirs('/usr/bin', '/h'), 'running it again changes nothing');
 });
+
+test("the post uses the token read for the finding account: a later keychain read can't drop the comment", async () => {
+  const gh = fakeGh(TWO, {});
+  try {
+    // reads: the check (fails), its retry (works), and after that every read fails; no third read must be needed
+    writeFileSync(join(gh.dir, 'blip-work-me'), '');
+    const { chmodSync } = await import('node:fs');
+    writeFileSync(join(gh.dir, 'gh'), readFileSync(join(gh.dir, 'gh'), 'utf8').replace(
+      '"auth token") [ "$6" = "no-token" ] && exit 1;',
+      '"auth token") [ "$6" = "no-token" ] && exit 1; [ -e "$D/read-$6" ] && exit 1; [ -e "$D/blip-$6" ] || touch "$D/read-$6";'));
+    chmodSync(join(gh.dir, 'gh'), 0o755);
+    assert.equal(await commentOnPr(process.cwd(), 7, 'b', 'work-me'), true);
+    assert.deepEqual(gh.comments(), ['tok-work-me 7']);
+  } finally { gh.restore(); }
+});
+
+test('a sign-in from the Toolchain popup is done when the tool is signed in, or gh lists another account', async () => {
+  const { signInDone } = await import('../web/src/signIn.ts');
+  const auth = (signedIn: boolean, accounts: string[] = []) => ({ signedIn, accounts });
+  assert.equal(signInDone(auth(false), auth(false)), false, 'nothing changed');
+  assert.equal(signInDone(auth(false), auth(true)), true, 'claude with an API key: signed in, no account name');
+  assert.equal(signInDone(auth(false), auth(true, ['me'])), true);
+  assert.equal(signInDone(auth(true, ['me']), auth(true, ['me', 'work'])), true, 'Add account on gh');
+  assert.equal(signInDone(auth(true, ['me', 'work']), auth(true, ['work', 'me'])), false, 'signed in again as a listed account');
+  assert.equal(signInDone(auth(true, ['me']), null), false);
+  assert.equal(signInDone(null, auth(true)), true, 'gh just installed, then signed in');
+});
