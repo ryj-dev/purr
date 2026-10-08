@@ -81,3 +81,8 @@ test('an older gh (one login, no --user) is used as it is, without a token per a
   const out = fakeGh('You are not logged into any GitHub hosts.\n', {}, 1);
   try { assert.deepEqual(await ghAccounts(), []); } finally { out.restore(); }
 });
+
+test('a run keeps the account that found its PR, from the poller and from a manual review alike', async () => {
+  const { runPr } = await import('../src/server/manager.ts');
+  assert.deepEqual(runPr({ ...pr('OPEN'), account: 'work-me' } as any), { number: 7, title: 't', body: '', url: 'u', account: 'work-me' });
+});

@@ -35,6 +35,9 @@ export interface RunRequest {
 const TERMINAL = new Set(['passed', 'blocked', 'failed', 'cancelled', 'superseded']);
 const SESSION_BLOCKS = new Set(['context', 'prompt', 'verify', 'command']);
 
+/** What a run keeps of its PR, including the account that found it: the one PuRR comments as. */
+export const runPr = (pr: PrInfo): NonNullable<Run['pr']> => ({ number: pr.number, title: pr.title, body: pr.body, url: pr.url, account: pr.account });
+
 export class RunManager {
   db: DB;
   claude: ClaudeRunner;
@@ -74,7 +77,7 @@ export class RunManager {
     const run: Run = {
       id: newId('run-'), flowId: flow.id, flowName: flow.name, flow: structuredClone(flow), trigger: req.trigger,
       repoId: repo?.id ?? null, repoPath: req.repoPath, branch: req.branch ?? null, baseSha: req.base ?? null, headSha: req.head ?? null,
-      mode: req.mode, pr: req.pr ? { number: req.pr.number, title: req.pr.title, body: req.pr.body, url: req.pr.url, account: req.pr.account } : null,
+      mode: req.mode, pr: req.pr ? runPr(req.pr) : null,
       workdir: null, status: 'queued', queuedAt: now(), startedAt: null, finishedAt: null, counts: { must_fix: 0, consider: 0, minor: 0 },
       error: errors.length ? `Flow "${flow.name}" is invalid: ${errors.map((e) => e.message).join('; ')}` : null,
     };
@@ -239,7 +242,7 @@ export class RunManager {
     if (!run.pr && run.branch && (run.trigger === 'post-push' || run.trigger === 'manual') && await ghAuthed()) {
       const pr = await prForBranch(repo, run.branch);
       if (pr && pr.headRefOid === head) {
-        run.pr = { number: pr.number, title: pr.title, body: pr.body, url: pr.url };
+        run.pr = runPr(pr);
         if (!req.base) req.base = pr.baseRefName;
       }
     }
