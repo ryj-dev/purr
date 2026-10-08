@@ -1,7 +1,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { basename, extname, join, normalize, resolve, sep } from 'node:path';
-import type { AppState, Repo, ServerEvent, Settings, TriggerAssignment, TriggerKind } from '../shared/types.ts';
+import type { AppState, Repo, ServerEvent, Settings, ToolName, TriggerAssignment, TriggerKind } from '../shared/types.ts';
 import { TRIGGERS } from '../shared/types.ts';
 import type { DB } from './db.ts';
 import { BLOCK_TYPES } from './flows/blockTypes.ts';
@@ -10,10 +10,10 @@ import { validateFlow } from './flows/validate.ts';
 import { exportFlow, importFlow, previewImport } from './flows/share.ts';
 import { uniqueFolders } from './db.ts';
 import { remoteUrl, repoRoot } from './git.ts';
-import { ghAuthed } from './gh.ts';
+import { TOOL_NAMES, installMissing, installTool, onToolchainChange, openHomebrewInstall, openSignIn, refreshToolchain, toolchainStatus, toolsSummary } from './toolchain.ts';
 import type { RunManager } from './manager.ts';
 import type { PostPushWatcher } from './triggers.ts';
-import { newId, now, which } from './util.ts';
+import { newId, now } from './util.ts';
 import { VERSION, WEB_DIR as WEB } from './runtime.ts';
 import { GLOBAL_HOOKS_DIR, currentGlobalHooksPath } from './globalHooks.ts';
 
@@ -21,15 +21,6 @@ const MIME: Record<string, string> = {
   '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml',
   '.json': 'application/json', '.png': 'image/png', '.ico': 'image/x-icon', '.woff2': 'font/woff2',
 };
-
-let toolCache: { at: number; tools: AppState['tools'] } | null = null;
-async function tools(): Promise<AppState['tools']> {
-  if (toolCache && Date.now() - toolCache.at < 60_000) return toolCache.tools;
-  const [gh, gitleaks, zizmor, osv, claude] = await Promise.all(['gh', 'gitleaks', 'zizmor', 'osv-scanner', 'claude'].map(which));
-  const t = { gh, ghAuthed: gh ? await ghAuthed() : false, gitleaks, zizmor, osv, claude };
-  toolCache = { at: Date.now(), tools: t };
-  return t;
-}
 
 let hooksCache: { at: number; v: AppState['globalHooks'] } | null = null;
 async function globalHooksState(): Promise<AppState['globalHooks']> {
@@ -76,6 +67,10 @@ export function startHttp(db: DB, mgr: RunManager, watcher: PostPushWatcher, por
     for (const c of clients) c.write(line);
   });
   const broadcastState = () => mgr.emit({ type: 'state' });
+  onToolchainChange((settled) => {
+    mgr.emit({ type: 'tools' });
+    if (settled) broadcastState();   // the sidebar's summary
+  });
 
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://localhost');
@@ -110,10 +105,27 @@ export function startHttp(db: DB, mgr: RunManager, watcher: PostPushWatcher, por
       if (a === 'state' && m === 'GET') {
         const state: AppState = {
           settings: db.getSettings(), usage: db.getUsage(), repos: db.listRepos(), flows: db.listFlows(),
-          triggers: db.listTriggers(), tools: await tools(), version: VERSION,
+          triggers: db.listTriggers(), tools: await toolsSummary(), version: VERSION,
           globalHooks: await globalHooksState(),
         };
         return send(200, state);
+      }
+      if (a === 'tools') {
+        if (!id && m === 'GET') {
+          if (url.searchParams.has('fresh')) refreshToolchain();
+          return send(200, await toolchainStatus());
+        }
+        if (id === 'install-missing' && m === 'POST') return send(202, { installing: await installMissing() });
+        if (id === 'homebrew' && sub === 'install' && m === 'POST') {
+          try { await openHomebrewInstall(); } catch (e: any) { throw new HttpError(400, String(e?.message ?? e)); }
+          return send(200, { ok: true });
+        }
+        if (id && !TOOL_NAMES.includes(id as ToolName)) throw new HttpError(404, `Unknown tool ${id}`);
+        if (id && sub === 'install' && m === 'POST') { installTool(id as ToolName); return send(202, { ok: true }); }
+        if (id && sub === 'signin' && m === 'POST') {
+          try { await openSignIn(id as ToolName); } catch (e: any) { throw new HttpError(400, String(e?.message ?? e)); }
+          return send(200, { ok: true });
+        }
       }
       if (a === 'usage' && m === 'GET') return send(200, db.getUsage());
       if (a === 'settings' && m === 'PUT') {

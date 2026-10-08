@@ -87,3 +87,34 @@ test('the poller: reviews new PRs and new pushes, across accounts, never the bac
   assert.deepEqual(scheduled.slice(2).map((r) => r.head), ['aaa9']);
   db.close();
 });
+
+test('the poller: a push without a PR still gets reviewed when the PR opens; one review per push across clones', async () => {
+  const db = openDb(); ensureDefaults(db);
+  const mgr = new RunManager(db, new ClaudeRunner(db));
+  const scheduled: RunRequest[] = [];
+  mgr.schedulePostPush = (req: RunRequest) => { scheduled.push(req); };
+  const { root, a } = projectsFolder();
+  sh(a, 'remote', 'add', 'origin', 'https://github.com/work-org/app-c.git');
+  db.setSettings({ ...db.getSettings(), projectFolders: [root] });
+  // a second clone of the same GitHub repo, as a separate registered repo (a worktree a commit came from)
+  const wt = join(root, 'app-a-wt');
+  const { addRepo } = await import('../src/server/http.ts');
+  const wtRepo = await addRepo(db, wt);
+  let prs: OpenPr[] = [];
+  const watcher = new PostPushWatcher(db, mgr, async () => prs);
+  await watcher.poll();   // discover + prime
+
+  // pushed before the PR existed (the hook skipped it), then the PR is opened: the poller reviews it
+  prs = [{ repo: 'work-org/app-c', number: 5, headRefOid: 'c1', headRefName: 'feat', baseRefName: 'main', title: 't', body: '',
+    url: 'u', isDraft: false, account: 'work', createdAt: new Date().toISOString() }];
+  await watcher.poll();
+  assert.deepEqual(scheduled.map((r) => r.head), ['c1']);
+
+  // the next push comes through the hook from the worktree clone; the poller then sees the same sha via the main
+  // checkout and must not review it a second time
+  watcher.markHandled(wtRepo, 'feat', 'c2');
+  prs = [{ ...prs[0], headRefOid: 'c2' }];
+  await watcher.poll();
+  assert.deepEqual(scheduled.map((r) => r.head), ['c1'], 'no duplicate review');
+  db.close();
+});

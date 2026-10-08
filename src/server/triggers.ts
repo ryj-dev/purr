@@ -17,13 +17,17 @@ import type { RunManager } from './manager.ts';
 export class PostPushWatcher {
   db: DB;
   mgr: RunManager;
-  private lastSeen = new Map<string, string>();   // repoId:branch -> head sha already handled (push hook or poller)
+  /** "owner/name:branch" (or the clone's path when it has no GitHub remote) -> head sha already scheduled for review,
+   *  shared by the push hook and the poller, and by every clone or worktree of the same repo. */
+  private lastSeen = new Map<string, string>();
   private seenPr = new Map<string, string>();     // owner/name#number -> head sha the poller last saw
   private timer: NodeJS.Timeout | null = null;
   private polling = false;
   private lastDiscovery = 0;
   private startedAt = Date.now();
   private fetchPrs: () => Promise<OpenPr[] | null>;
+
+  private handledKey(repo: Repo, branch: string) { return `${githubRepo(repo.remoteUrl) ?? repo.path}:${branch}`; }
 
   constructor(db: DB, mgr: RunManager, fetchPrs: () => Promise<OpenPr[] | null> = openPrsForAllAccounts) {
     this.db = db; this.mgr = mgr; this.fetchPrs = fetchPrs;
@@ -42,6 +46,9 @@ export class PostPushWatcher {
   }
   stop() { if (this.timer) clearTimeout(this.timer); }
 
+  /** Test seam: what the push hook records once it has scheduled a review. */
+  markHandled(repo: Repo, branch: string, sha: string) { this.lastSeen.set(this.handledKey(repo, branch), sha); }
+
   /** From the pre-push hook. Confirms the push landed (up to 90s), then schedules the post-push flow. */
   async pushIntent(body: { repoPath: string; branch: string; sha: string; remote?: string }) {
     if (body.repoPath && existsSync(body.repoPath)) body.repoPath = realpathSync(body.repoPath);
@@ -54,11 +61,14 @@ export class PostPushWatcher {
       const deadline = Date.now() + 90_000;
       while (Date.now() < deadline) {
         if ((await lsRemote(body.repoPath, remote, body.branch)) === body.sha) {
-          this.lastSeen.set(`${repo.id}:${body.branch}`, body.sha);
           const gh = await ghAuthed();
           const pr = gh ? await prForBranch(body.repoPath, body.branch) : null;
-          // no open PR (a push to main, or a branch not yet proposed): no review; the poller reviews it once a PR opens
+          // no open PR (a push to main, or a branch not yet proposed): no review, and nothing marked as handled, so
+          // the poller reviews this commit when its PR is opened
           if (prOnly && gh && !pr) return;
+          const key = this.handledKey(repo, body.branch);
+          if (this.lastSeen.get(key) === body.sha) return;   // already scheduled from another clone
+          this.lastSeen.set(key, body.sha);
           this.mgr.schedulePostPush({
             trigger: 'post-push', repoPath: body.repoPath, mode: 'range', head: body.sha, branch: body.branch, pr,
             base: pr ? pr.baseRefName : null,
@@ -110,12 +120,13 @@ export class PostPushWatcher {
       const seen = this.seenPr.get(key);
       this.seenPr.set(key, pr.headRefOid);
       if (seen === pr.headRefOid || pr.isDraft) continue;
-      if (this.lastSeen.get(`${repo.id}:${pr.headRefName}`) === pr.headRefOid) continue;   // the push hook has it
+      const handled = this.handledKey(repo, pr.headRefName);
+      if (this.lastSeen.get(handled) === pr.headRefOid) continue;   // the push hook (from any clone) has it
       if (seen === undefined) {
         const opened = pr.createdAt ? Date.parse(pr.createdAt) : 0;
         if (!(opened >= this.startedAt && Date.now() - opened < 10 * 60_000)) continue;
       }
-      this.lastSeen.set(`${repo.id}:${pr.headRefName}`, pr.headRefOid);
+      this.lastSeen.set(handled, pr.headRefOid);
       this.mgr.schedulePostPush({
         trigger: 'post-push', repoPath: repo.path, mode: 'range', head: pr.headRefOid, branch: pr.headRefName, pr,
         base: pr.baseRefName,

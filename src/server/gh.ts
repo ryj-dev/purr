@@ -50,6 +50,9 @@ export async function ghAccounts(): Promise<string[]> {
   return list;
 }
 
+/** Forget the cached account list (after a sign-in, or gh was just installed). */
+export function forgetGhAccounts() { accountsCache = null; }
+
 export async function ghAuthed(): Promise<boolean> {
   return (await ghAccounts()).length > 0;
 }
