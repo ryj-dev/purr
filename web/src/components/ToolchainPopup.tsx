@@ -43,10 +43,12 @@ export function ToolchainPopup({ onClose }: { onClose: () => void }) {
     } catch (e) { toast(errMsg(e), 'error'); }
   };
   const signIn = (t: ToolStatus) => {
-    const before = t.auth?.accounts.length ?? 0;
+    // done once signed in and the account list changed; signing in again as a listed gh account changes nothing,
+    // so that wait can be dismissed (or ends by itself after five minutes)
+    const before = [...(t.auth?.accounts ?? [])].sort().join('\n');
     inTerminal(`signing in to ${t.name}`, () => api.signIn(t.name as 'claude' | 'gh'), (d) => {
       const now = d.tools.find((x) => x.name === t.name)?.auth;
-      return !!now?.signedIn && (t.name !== 'gh' || now.accounts.length > before);
+      return !!now?.signedIn && [...now.accounts].sort().join('\n') !== before;
     });
   };
   const install = async (t: ToolStatus) => {
@@ -55,14 +57,16 @@ export function ToolchainPopup({ onClose }: { onClose: () => void }) {
 
   const brew = data?.homebrew.installed ?? true;
   const installable = data?.tools.filter((t) => !t.installed && t.job?.state !== 'running' && brew) ?? [];
+  const [queueing, setQueueing] = useState(false);
   const installMissing = async () => {
-    try { await api.installMissingTools(); load(); } catch (e) { toast(errMsg(e), 'error'); }
+    setQueueing(true);
+    try { await api.installMissingTools(); await load(); } catch (e) { toast(errMsg(e), 'error'); } finally { setQueueing(false); }
   };
 
   return (
     <Modal wide title="Toolchain" onClose={onClose} actions={<>
       <button onClick={onClose}>Close</button>
-      <button className="primary" disabled={!installable.length} onClick={installMissing}>
+      <button className="primary" disabled={!installable.length || queueing} onClick={installMissing}>
         <Download size={14} />{installable.length ? `Install missing (${installable.length})` : 'All installed'}
       </button>
     </>}>
@@ -83,7 +87,12 @@ export function ToolchainPopup({ onClose }: { onClose: () => void }) {
             onSignIn={() => signIn(t)} />)}
         </ul>
       )}
-      {waiting && <div className="hint tc-waiting"><LoaderCircle size={12} className="spin" />Waiting for {waiting.what} in Terminal…</div>}
+      {waiting && (
+        <div className="hint tc-waiting">
+          <LoaderCircle size={12} className="spin" />Waiting for {waiting.what} in Terminal…
+          <button className="sm ghost" onClick={() => setWaiting(null)}>Done</button>
+        </div>
+      )}
     </Modal>
   );
 }
@@ -95,7 +104,7 @@ function ToolRow({ t, brew, onInstall, onSignIn }: { t: ToolStatus; brew: boolea
   const ok = t.installed && (!t.auth || t.auth.signedIn);
 
   let action;
-  if (running) action = <button className="sm" disabled><LoaderCircle size={13} className="spin" />Installing</button>;
+  if (running) action = <button className="sm" disabled><LoaderCircle size={13} className="spin" />{t.job!.step === 'Queued' ? 'Queued' : 'Installing'}</button>;
   else if (!t.installed) {
     action = (
       <button className="sm" disabled={needsBrew} onClick={onInstall} title={needsBrew ? 'Install Homebrew first' : t.name === 'claude' ? 'brew install --cask claude-code' : `brew install ${t.name}`}>
@@ -123,7 +132,7 @@ function ToolRow({ t, brew, onInstall, onSignIn }: { t: ToolStatus; brew: boolea
             {t.auth.detail && <span className="tc-src">{t.auth.detail}</span>}
           </div>
         )}
-        {running && <div className="tc-step">{t.job!.step}</div>}
+        {running && t.job!.step !== 'Queued' && <div className="tc-step">{t.job!.step}</div>}
         {failed && <div className="tc-step err-text">{t.job!.error}</div>}
         {needsBrew && <div className="tc-step">Needs Homebrew</div>}
       </div>

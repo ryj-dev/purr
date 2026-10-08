@@ -7,12 +7,20 @@ import { existsSync, realpathSync } from 'node:fs';
 import type { DB } from './db.ts';
 import { lsRemote, remoteUrl } from './git.ts';
 import { addRepo } from './http.ts';
-import { type OpenPr, ghAuthed, githubRepo, openPrsForAllAccounts, prForBranch } from './gh.ts';
+import { type OpenPr, type PrInfo, ghAuthed, githubRepo, openPrsForAllAccounts, prForBranch } from './gh.ts';
 import { discoverRepos } from './discovery.ts';
 import { statSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Repo } from '../shared/types.ts';
 import type { RunManager } from './manager.ts';
+
+/** What the watcher asks of git and GitHub; the tests swap these out. */
+export interface WatcherDeps {
+  fetchPrs: () => Promise<OpenPr[] | null>;
+  lsRemote: (cwd: string, remote: string, branch: string) => Promise<string | null>;
+  ghAuthed: () => Promise<boolean>;
+  prForBranch: (repoPath: string, branch: string) => Promise<PrInfo | null>;
+}
 
 export class PostPushWatcher {
   db: DB;
@@ -25,12 +33,15 @@ export class PostPushWatcher {
   private polling = false;
   private lastDiscovery = 0;
   private startedAt = Date.now();
-  private fetchPrs: () => Promise<OpenPr[] | null>;
+  private deps: WatcherDeps;
+  /** push confirmations still waiting for the remote */
+  private confirming = new Set<Promise<void>>();
 
   private handledKey(repo: Repo, branch: string) { return `${githubRepo(repo.remoteUrl) ?? repo.path}:${branch}`; }
 
-  constructor(db: DB, mgr: RunManager, fetchPrs: () => Promise<OpenPr[] | null> = openPrsForAllAccounts) {
-    this.db = db; this.mgr = mgr; this.fetchPrs = fetchPrs;
+  constructor(db: DB, mgr: RunManager, deps: Partial<WatcherDeps> = {}) {
+    this.db = db; this.mgr = mgr;
+    this.deps = { fetchPrs: openPrsForAllAccounts, lsRemote, ghAuthed, prForBranch, ...deps };
   }
 
   start() {
@@ -46,8 +57,8 @@ export class PostPushWatcher {
   }
   stop() { if (this.timer) clearTimeout(this.timer); }
 
-  /** Test seam: what the push hook records once it has scheduled a review. */
-  markHandled(repo: Repo, branch: string, sha: string) { this.lastSeen.set(this.handledKey(repo, branch), sha); }
+  /** Test seam: resolves once every push the hook reported has been confirmed (or given up on). */
+  async settled() { while (this.confirming.size) await Promise.all([...this.confirming]); }
 
   /** From the pre-push hook. Confirms the push landed (up to 90s), then schedules the post-push flow. */
   async pushIntent(body: { repoPath: string; branch: string; sha: string; remote?: string }) {
@@ -57,12 +68,12 @@ export class PostPushWatcher {
     if (!repo) return { queued: false, reason: 'not a git repository' };
     const remote = body.remote || 'origin';
     const prOnly = this.db.getSettings().postPushPrsOnly;
-    void (async () => {
+    const confirm = (async () => {
       const deadline = Date.now() + 90_000;
       while (Date.now() < deadline) {
-        if ((await lsRemote(body.repoPath, remote, body.branch)) === body.sha) {
-          const gh = await ghAuthed();
-          const pr = gh ? await prForBranch(body.repoPath, body.branch) : null;
+        if ((await this.deps.lsRemote(body.repoPath, remote, body.branch)) === body.sha) {
+          const gh = await this.deps.ghAuthed();
+          const pr = gh ? await this.deps.prForBranch(body.repoPath, body.branch) : null;
           // no open PR (a push to main, or a branch not yet proposed): no review, and nothing marked as handled, so
           // the poller reviews this commit when its PR is opened
           if (prOnly && gh && !pr) return;
@@ -77,7 +88,9 @@ export class PostPushWatcher {
         }
         await new Promise((r) => setTimeout(r, 3000));
       }
-    })();
+    })().catch(() => {});
+    this.confirming.add(confirm);
+    void confirm.finally(() => this.confirming.delete(confirm));
     return { queued: true, prOnly };
   }
 
@@ -110,7 +123,7 @@ export class PostPushWatcher {
       this.lastDiscovery = Date.now();
       await discoverRepos(this.db).catch(() => 0);
     }
-    const prs = await this.fetchPrs();
+    const prs = await this.deps.fetchPrs();
     if (!prs) return;
     const clones = await this.clonesByRepo();
     for (const pr of prs) {

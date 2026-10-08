@@ -5,7 +5,7 @@
 // Signing in also opens Terminal, on the tool's own login command: PuRR never sees a password or token.
 import { existsSync, realpathSync } from 'node:fs';
 import type { AppState, ToolName, ToolStatus, Toolchain } from '../shared/types.ts';
-import { forgetGhAccounts, ghAccounts } from './gh.ts';
+import { expectGhSignIn, forgetGhAccounts, ghAccounts } from './gh.ts';
 import { exec } from './util.ts';
 
 export const TOOL_NAMES: ToolName[] = ['gitleaks', 'zizmor', 'osv-scanner', 'claude', 'gh'];
@@ -65,27 +65,32 @@ async function claudeAuth(path: string): Promise<ToolStatus['auth']> {
 
 const jobs = new Map<ToolName, NonNullable<ToolStatus['job']>>();
 let statusCache: { at: number; list: Promise<Toolchain> } | null = null;
+let summaryCache: { at: number; v: Promise<AppState['tools']> } | null = null;
 const listeners = new Set<(settled: boolean) => void>();
 
 /** Called whenever a tool's state changes; `settled` when an install has finished or failed. */
 export function onToolchainChange(fn: (settled: boolean) => void) { listeners.add(fn); return () => listeners.delete(fn); }
 function changed(settled = false) {
   statusCache = null;
+  if (settled) summaryCache = null;
   for (const fn of listeners) fn(settled);
 }
 /** Forget cached state, e.g. after the user signed in from Terminal. */
-export function refreshToolchain() { statusCache = null; forgetGhAccounts(); }
+export function refreshToolchain() { statusCache = null; summaryCache = null; forgetGhAccounts(); }
 
 async function statusOf(name: ToolName): Promise<ToolStatus> {
   const path = await locate(name);
-  let auth: ToolStatus['auth'] = null;
-  if (path && name === 'claude') auth = await claudeAuth(path);
-  if (path && name === 'gh') {
-    const accounts = await ghAccounts();
-    auth = { signedIn: accounts.length > 0, accounts };
-  }
+  const authOf = async (): Promise<ToolStatus['auth']> => {
+    if (path && name === 'claude') return claudeAuth(path);
+    if (path && name === 'gh') {
+      const accounts = await ghAccounts();
+      return { signedIn: accounts.length > 0, accounts };
+    }
+    return null;
+  };
+  const [auth, version] = await Promise.all([authOf(), path ? versionOf(path) : null]);
   return {
-    name, purpose: PURPOSE[name], installed: !!path, path, version: path ? await versionOf(path) : null,
+    name, purpose: PURPOSE[name], installed: !!path, path, version,
     source: path ? sourceOf(path) : null, auth, job: jobs.get(name) ?? null,
   };
 }
@@ -102,13 +107,19 @@ export function toolchainStatus(): Promise<Toolchain> {
   return list;
 }
 
-/** The sidebar's summary (AppState.tools). */
-export async function toolsSummary(): Promise<AppState['tools']> {
-  const by = Object.fromEntries((await toolchainStatus()).tools.map((t) => [t.name, t])) as Record<ToolName, ToolStatus>;
-  return {
-    gh: by.gh.installed, ghAuthed: !!by.gh.auth?.signedIn, gitleaks: by.gitleaks.installed, zizmor: by.zizmor.installed,
-    osv: by['osv-scanner'].installed, claude: by.claude.installed,
-  };
+/**
+ * The sidebar's summary (AppState.tools). Kept cheap, since /api/state is also the app's is-the-service-up probe:
+ * only `which` and the cached gh accounts, for a minute or until an install finishes or a sign-in is looked for.
+ */
+export function toolsSummary(): Promise<AppState['tools']> {
+  if (summaryCache && Date.now() - summaryCache.at < 60_000) return summaryCache.v;
+  const v = (async () => {
+    const [gitleaks, zizmor, osv, claude, gh] = await Promise.all(['gitleaks', 'zizmor', 'osv-scanner', 'claude', 'gh'].map(async (n) => !!(await locate(n))));
+    return { gh, ghAuthed: gh ? (await ghAccounts()).length > 0 : false, gitleaks, zizmor, osv, claude };
+  })();
+  summaryCache = { at: Date.now(), v };
+  v.catch(() => { summaryCache = null; });
+  return v;
 }
 
 // ---- installing ----
@@ -137,38 +148,39 @@ function runJob(name: ToolName, job: NonNullable<ToolStatus['job']>): Promise<vo
     job.step = s;
     if (Date.now() - last > 500) { last = Date.now(); changed(); }   // brew is chatty
   };
+  const mine = () => jobs.get(name) === job;
   return runInstall(name, step).then(
-    () => { jobs.delete(name); refreshToolchain(); changed(true); },
-    (e) => { jobs.set(name, { state: 'failed', step: job.step, error: String(e?.message ?? e) }); changed(true); },
+    () => { if (mine()) jobs.delete(name); refreshToolchain(); changed(true); },
+    (e) => { if (mine()) jobs.set(name, { state: 'failed', step: job.step, error: String(e?.message ?? e) }); changed(true); },
   );
 }
 
-/** Starts installing a tool in the background. Returns at once; progress shows in the tool's `job`. */
+/** Every install, from any button, runs on this one chain: Homebrew doesn't like two installs at once. */
+let installs: Promise<void> = Promise.resolve();
+
+/** Queues a tool for installing. Returns at once; progress shows in the tool's `job` ("Queued" until its turn). */
 export function installTool(name: ToolName): void {
   if (jobs.get(name)?.state === 'running') return;
-  const job: NonNullable<ToolStatus['job']> = { state: 'running', step: 'Starting' };
+  const job: NonNullable<ToolStatus['job']> = { state: 'running', step: 'Queued' };
   jobs.set(name, job);
-  void runJob(name, job);
+  changed();
+  installs = installs.then(() => runJob(name, job));
 }
 
-/** Installs every missing tool, one at a time (Homebrew doesn't like running twice at once); the rest show as queued. */
+/** Queues every missing tool that isn't already queued or installing. */
 export async function installMissing(): Promise<ToolName[]> {
   const { homebrew, tools } = await toolchainStatus();
-  const missing = tools.filter((t) => !t.installed && t.job?.state !== 'running' && homebrew.installed).map((t) => t.name);
-  const queued = missing.map((n) => {
-    const job: NonNullable<ToolStatus['job']> = { state: 'running', step: 'Queued' };
-    jobs.set(n, job);
-    return [n, job] as const;
-  });
-  changed();
-  void (async () => { for (const [n, job] of queued) await runJob(n, job); })();
+  if (!homebrew.installed) return [];
+  // read the jobs now, not from the status snapshot: another request may have queued some while we waited
+  const missing = tools.filter((t) => !t.installed && jobs.get(t.name)?.state !== 'running').map((t) => t.name);
+  for (const n of missing) installTool(n);
   return missing;
 }
 
 // ---- signing in ----
 
 /** AppleScript string literal. */
-const asString = (s: string) => `"${s.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+export const asString = (s: string) => `"${s.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
 /** POSIX shell single-quoted word. */
 const shQuote = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
 
@@ -202,4 +214,7 @@ export async function openSignIn(name: ToolName): Promise<void> {
   if (!path) throw new Error(`Install ${name} first`);
   await inTerminal(signInCommand(name, path));
   refreshToolchain();
+  // the poller and the sidebar read gh's accounts through a five-minute cache: shorten it while the login finishes,
+  // or a new account's PRs would be ignored (and gh shown signed out) until it expired
+  if (name === 'gh') expectGhSignIn();
 }

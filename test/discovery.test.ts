@@ -64,7 +64,7 @@ test('the poller: reviews new PRs and new pushes, across accounts, never the bac
     repo, number, headRefOid: sha, headRefName: `branch-${number}`, baseRefName: 'main', title: `PR ${number}`, body: '',
     url: `https://github.com/${repo}/pull/${number}`, isDraft: false, account: 'work', createdAt: new Date(now - 86_400_000).toISOString(), ...opts,
   });
-  const watcher = new PostPushWatcher(db, mgr, async () => prs);
+  const watcher = new PostPushWatcher(db, mgr, { fetchPrs: async () => prs });
 
   // already open when PuRR starts (or its repo is just discovered): recorded, not reviewed
   prs = [pr('work-org/app-a', 1, 'aaa1'), pr('me/app-b', 7, 'bbb1', { account: 'personal' }), pr('elsewhere/unknown', 3, 'ccc')];
@@ -88,23 +88,35 @@ test('the poller: reviews new PRs and new pushes, across accounts, never the bac
   db.close();
 });
 
-test('the poller: a push without a PR still gets reviewed when the PR opens; one review per push across clones', async () => {
+test('a push made before its PR is opened is reviewed when the PR opens; one review per push across clones', async () => {
   const db = openDb(); ensureDefaults(db);
   const mgr = new RunManager(db, new ClaudeRunner(db));
   const scheduled: RunRequest[] = [];
   mgr.schedulePostPush = (req: RunRequest) => { scheduled.push(req); };
   const { root, a } = projectsFolder();
   sh(a, 'remote', 'add', 'origin', 'https://github.com/work-org/app-c.git');
-  db.setSettings({ ...db.getSettings(), projectFolders: [root] });
+  db.setSettings({ ...db.getSettings(), projectFolders: [root], postPushPrsOnly: true });
   // a second clone of the same GitHub repo, as a separate registered repo (a worktree a commit came from)
   const wt = join(root, 'app-a-wt');
   const { addRepo } = await import('../src/server/http.ts');
-  const wtRepo = await addRepo(db, wt);
+  await addRepo(db, wt);
   let prs: OpenPr[] = [];
-  const watcher = new PostPushWatcher(db, mgr, async () => prs);
+  let openPr: OpenPr | null = null;   // what `gh pr view <branch>` finds
+  const watcher = new PostPushWatcher(db, mgr, {
+    fetchPrs: async () => prs,
+    lsRemote: async () => pushed,    // the push has landed
+    ghAuthed: async () => true,
+    prForBranch: async () => openPr,
+  });
+  let pushed = '';
   await watcher.poll();   // discover + prime
 
-  // pushed before the PR existed (the hook skipped it), then the PR is opened: the poller reviews it
+  // the push hook reports c1 before any PR exists: nothing is reviewed yet...
+  pushed = 'c1';
+  await watcher.pushIntent({ repoPath: a, branch: 'feat', sha: 'c1' });
+  await watcher.settled();
+  assert.equal(scheduled.length, 0, 'no PR, no review');
+  // ...and when the PR is opened, the poller reviews c1, because the hook didn't mark it as handled
   prs = [{ repo: 'work-org/app-c', number: 5, headRefOid: 'c1', headRefName: 'feat', baseRefName: 'main', title: 't', body: '',
     url: 'u', isDraft: false, account: 'work', createdAt: new Date().toISOString() }];
   await watcher.poll();
@@ -112,9 +124,28 @@ test('the poller: a push without a PR still gets reviewed when the PR opens; one
 
   // the next push comes through the hook from the worktree clone; the poller then sees the same sha via the main
   // checkout and must not review it a second time
-  watcher.markHandled(wtRepo, 'feat', 'c2');
+  openPr = prs[0];
+  pushed = 'c2';
+  await watcher.pushIntent({ repoPath: wt, branch: 'feat', sha: 'c2' });
+  await watcher.settled();
+  assert.deepEqual(scheduled.map((r) => r.head), ['c1', 'c2'], 'the hook reviews a push to an open PR');
   prs = [{ ...prs[0], headRefOid: 'c2' }];
   await watcher.poll();
-  assert.deepEqual(scheduled.map((r) => r.head), ['c1'], 'no duplicate review');
+  assert.deepEqual(scheduled.map((r) => r.head), ['c1', 'c2'], 'no duplicate review');
+
+  // the poller sees c3 first (pushed from another machine), then this machine's hook reports the same push
+  prs = [{ ...prs[0], headRefOid: 'c3' }];
+  await watcher.poll();
+  pushed = 'c3';
+  await watcher.pushIntent({ repoPath: a, branch: 'feat', sha: 'c3' });
+  await watcher.settled();
+  assert.deepEqual(scheduled.map((r) => r.head), ['c1', 'c2', 'c3'], 'hook after poller: one review');
+
+  // the same push reported by the hooks of two clones (main checkout, then the worktree)
+  pushed = 'c4';
+  await watcher.pushIntent({ repoPath: a, branch: 'feat', sha: 'c4' });
+  await watcher.pushIntent({ repoPath: wt, branch: 'feat', sha: 'c4' });
+  await watcher.settled();
+  assert.deepEqual(scheduled.map((r) => r.head), ['c1', 'c2', 'c3', 'c4'], 'hook from each clone: one review');
   db.close();
 });

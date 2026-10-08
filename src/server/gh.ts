@@ -36,9 +36,12 @@ async function tokenFor(account: string): Promise<string | null> {
 }
 
 let accountsCache: { at: number; list: string[] } | null = null;
+/** Until then, a sign-in may be finishing in Terminal: look again every few seconds instead of every five minutes. */
+let signInUntil = 0;
 /** github.com accounts signed in to gh, the active one first. */
 export async function ghAccounts(): Promise<string[]> {
-  if (accountsCache && Date.now() - accountsCache.at < 5 * 60_000) return accountsCache.list;
+  const ttl = Date.now() < signInUntil ? 5_000 : 5 * 60_000;
+  if (accountsCache && Date.now() - accountsCache.at < ttl) return accountsCache.list;
   let list: string[] = [];
   try {
     const r = await exec('gh', ['auth', 'status', '--hostname', 'github.com'], { timeoutMs: 15_000 });
@@ -52,6 +55,9 @@ export async function ghAccounts(): Promise<string[]> {
 
 /** Forget the cached account list (after a sign-in, or gh was just installed). */
 export function forgetGhAccounts() { accountsCache = null; }
+
+/** A gh sign-in has just started in Terminal: notice the new account soon after it finishes, not minutes later. */
+export function expectGhSignIn(forMs = 10 * 60_000) { accountsCache = null; signInUntil = Date.now() + forMs; }
 
 export async function ghAuthed(): Promise<boolean> {
   return (await ghAccounts()).length > 0;
