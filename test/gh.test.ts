@@ -87,12 +87,34 @@ test('a run keeps the account that found its PR, from the poller and from a manu
   assert.deepEqual(runPr({ ...pr('OPEN'), account: 'work-me' } as any), { number: 7, title: 't', body: '', url: 'u', account: 'work-me' });
 });
 
-test('a comment falls back to another account only when the finding account is signed out, before anything is sent', async () => {
-  const gh = fakeGh(TWO, {});
+test('a comment falls back, when the finding account has signed out, to an account that can see the PR', async () => {
+  const gh = fakeGh(TWO, { 'tok-work-me': pr('OPEN') });
   try {
     assert.equal(await commentOnPr(process.cwd(), 7, 'b', 'no-token'), true);
-    assert.deepEqual(gh.comments(), ['tok-me 7'], 'no token for it: posted as the active account');
+    assert.deepEqual(gh.comments(), ['tok-work-me 7'], 'me can\'t see the PR, work-me can');
   } finally { gh.restore(); }
+  const none = fakeGh(TWO, {});
+  try {
+    assert.equal(await commentOnPr(process.cwd(), 7, 'b', 'no-token'), false);
+    assert.deepEqual(none.comments(), [], 'no account can see it: nothing posted');
+  } finally { none.restore(); }
+});
+
+test('a review posts its PR comment as the account that found the PR', async () => {
+  const { RunManager } = await import('../src/server/manager.ts');
+  const { ClaudeRunner } = await import('../src/server/claude.ts');
+  const { openDb } = await import('../src/server/db.ts');
+  const db = openDb(join(mkdtempSync(join(process.env.TMPDIR!, 'purr-db-')), 'purr.db'));
+  const mgr = new RunManager(db, new ClaudeRunner(db));
+  const gh = fakeGh(TWO, {});
+  try {
+    const run = { id: 'r', flowName: 'Full review', repoPath: process.cwd(), branch: 'feat', status: 'passed', error: null,
+      flow: { blocks: [{ id: 'out', type: 'output', config: { notify: false, postPrComment: true } }], edges: [] },
+      pr: { number: 7, title: 't', body: '', url: 'u', account: 'work-me' } } as any;
+    const finding = { id: 'f', file: 'a.ts', line: 1, category: 'logic', severity: 'consider', title: 'x', scenario: 's', source: { blockId: 'b', kind: 'model' } };
+    await (mgr as any).sideEffects(run, [finding]);
+    assert.deepEqual(gh.comments(), ['tok-work-me 7'], 'not gh\'s active account (me)');
+  } finally { gh.restore(); db.close(); }
 });
 
 test("a gh status that fails says nothing about which gh this is: comments still go as the account that found the PR", async () => {

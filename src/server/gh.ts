@@ -108,14 +108,15 @@ const OPEN_PRS = `query($n: Int!) { viewer { login pullRequests(first: $n, state
  * Open PRs; the accounts whose query got an answer (one that failed this time may have PRs it didn't list); and every
  * account asked (default: those that answered).
  */
-export interface PrFetch { prs: OpenPr[]; answered: string[]; accounts?: string[] }
+export interface PrFetch { prs: OpenPr[]; answered: string[]; accounts?: string[]; askedAt?: Record<string, number> }
 
 /** Every open PR authored by any signed-in account: one GraphQL call per account. null if gh isn't usable at all. */
 export async function openPrsForAllAccounts(): Promise<PrFetch | null> {
   const accounts = await ghAccounts();
   if (!accounts.length) return null;
-  const prs: OpenPr[] = [], answered: string[] = [];
+  const prs: OpenPr[] = [], answered: string[] = [], askedAt: Record<string, number> = {};
   for (const account of accounts) {
+    askedAt[account] = Date.now();   // what this account's list is current as of, not when the last account answered
     const out = await gh(process.cwd(), ['api', 'graphql', '-F', 'n=100', '-f', `query=${OPEN_PRS}`], { account });
     if (!out) continue;
     try {
@@ -126,7 +127,7 @@ export async function openPrsForAllAccounts(): Promise<PrFetch | null> {
       answered.push(account);
     } catch { /* skip this account this time */ }
   }
-  return { prs, answered, accounts };
+  return { prs, answered, accounts, askedAt };
 }
 
 /**
@@ -135,10 +136,13 @@ export async function openPrsForAllAccounts(): Promise<PrFetch | null> {
  */
 export async function commentOnPr(repoPath: string, number: number, body: string, account?: string | null): Promise<boolean> {
   const accounts = await ghAccounts();
-  // that account first, else the active one; one signed out since (no token, nothing sent yet) gives way to the next
-  for (const as of account ? [account, ...accounts.filter((a) => a !== account)] : accounts) {
-    if (multiAccount && !(await tokenFor(as))) continue;
-    return (await gh(repoPath, ['pr', 'comment', String(number), '--body-file', '-'], { input: body, account: as })) !== null;
+  // as that account; else (signed out since, nothing sent yet) the first other account that can see the PR, which a
+  // read-only `gh pr view` tells without posting anything
+  let as: string | undefined = account ? undefined : accounts[0];   // none known: the active account, as gh would
+  if (account && (!multiAccount || await tokenFor(account))) as = account;
+  for (const a of as ? [] : accounts.filter((x) => x !== account)) {
+    if ((await gh(repoPath, ['pr', 'view', String(number), '--json', 'number'], { account: a })) !== null) { as = a; break; }
   }
-  return false;
+  if (!as) return false;
+  return (await gh(repoPath, ['pr', 'comment', String(number), '--body-file', '-'], { input: body, account: as })) !== null;
 }

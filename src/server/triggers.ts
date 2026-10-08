@@ -70,6 +70,11 @@ export class PostPushWatcher {
     // every repo counts: register it on its first push if no commit has yet
     const repo = this.db.getRepoByPath(body.repoPath) ?? await addRepo(this.db, body.repoPath).catch(() => null);
     if (!repo) return { queued: false, reason: 'not a git repository' };
+    if (!repo.remoteUrl) {
+      // a remote added since the repo was registered: the poller keys pushes by owner/name, so the hook must too
+      const url = await remoteUrl(body.repoPath);
+      if (url) { repo.remoteUrl = url; this.db.putRepo(repo); }
+    }
     const remote = body.remote || 'origin';
     const prOnly = this.db.getSettings().postPushPrsOnly;
     // what became of the push, for `purr findings --wait`: pending until its review exists (createRun clears it) or
@@ -152,8 +157,10 @@ export class PostPushWatcher {
       this.lastDiscovery = Date.now();
       await discoverRepos(this.db).catch(() => 0);
     }
+    const asked = Date.now();
     const fetched = await this.deps.fetchPrs();
-    if (!fetched) return;
+    // gh unusable at the first poll (signed out): an account that turns up later is signed in later
+    if (!fetched) { this.startAccounts ??= new Set(); return; }
     const { prs } = fetched;
     // PRs opened before their account's last answered poll were there to be seen then (two minutes' slack for
     // GitHub's clock). Per account: one whose query failed (asleep, offline, token expired) keeps its old mark
@@ -165,7 +172,7 @@ export class PostPushWatcher {
       return Math.max(this.startedAt, last - 2 * 60_000);
     };
     const marks = new Map(prs.map((pr) => [pr.account, since(pr.account)]));
-    for (const a of fetched.answered) this.lastFetch.set(a, Date.now());
+    for (const a of fetched.answered) this.lastFetch.set(a, fetched.askedAt?.[a] ?? asked);
     const clones = await this.clonesByRepo();
     for (const pr of prs) {
       const local = clones.get(pr.repo);
