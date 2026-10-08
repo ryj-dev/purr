@@ -9,7 +9,7 @@ import { spawnSync } from 'node:child_process';
 const gitGlobal = process.env.GIT_CONFIG_GLOBAL!;
 const userHooks = mkdtempSync(join(process.env.TMPDIR!, 'purr-userhooks-'));
 
-import { installGlobalHooks, uninstallGlobalHooks, GLOBAL_HOOKS_DIR, PID_FILE } from '../src/server/globalHooks.ts';
+import { installGlobalHooks, uninstallGlobalHooks, GLOBAL_HOOKS_DIR, PID_FILE, repoOwnHooksPath } from '../src/server/globalHooks.ts';
 import { openDb } from '../src/server/db.ts';
 
 const git = (cwd: string, ...a: string[]) => spawnSync('git', a, { cwd, encoding: 'utf8', env: process.env });
@@ -66,4 +66,18 @@ test('global hooks: every repo gets purr while it runs, existing hooks keep runn
   rmSync(PID_FILE, { force: true });
   assert.ok(readFileSync(gitGlobal, 'utf8').includes(userHooks));
   writeFileSync(gitGlobal, '');   // leave the shared test config empty for the other tests
+});
+
+test('repos with their own core.hooksPath are spotted; global and PuRR paths are not', async () => {
+  writeFileSync(gitGlobal, `[core]\n\thooksPath = ${GLOBAL_HOOKS_DIR}\n`);
+  const repo = tempRepo();
+  assert.equal(await repoOwnHooksPath(repo), null, 'inherits the global setting');
+  git(repo, 'config', 'core.hooksPath', '.githooks');
+  assert.equal(await repoOwnHooksPath(repo), '.githooks');
+  git(repo, 'config', 'core.hooksPath', `${GLOBAL_HOOKS_DIR}/`);
+  assert.equal(await repoOwnHooksPath(repo), null, "pointing at PuRR's own folder still runs PuRR");
+  git(repo, 'config', '--unset', 'core.hooksPath');
+  assert.equal(await repoOwnHooksPath(repo), null);
+  assert.equal(await repoOwnHooksPath(join(repo, 'missing')), null, 'a repo that is gone is not flagged');
+  writeFileSync(gitGlobal, '');
 });

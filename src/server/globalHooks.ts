@@ -63,6 +63,19 @@ async function gitGlobal(args: string[]) {
   return exec('git', ['config', '--global', ...args], { timeoutMs: 15_000 });
 }
 
+/**
+ * The hooks path a repo sets for itself (husky, a team's .githooks), or null. git prefers it over the global one, so
+ * PuRR's commit and push checks don't run there; only repo and worktree scopes count, and PuRR's own folder doesn't.
+ */
+export async function repoOwnHooksPath(repoPath: string): Promise<string | null> {
+  const r = await exec('git', ['-C', repoPath, 'config', '--show-scope', '--type=path', '--get', 'core.hooksPath'], { timeoutMs: 15_000 });
+  if (r.code !== 0) return null;
+  const [scope, ...rest] = r.stdout.trim().split('\t');
+  const value = rest.join('\t');
+  if (scope !== 'local' && scope !== 'worktree') return null;
+  return value && value.replace(/\/+$/, '') !== GLOBAL_HOOKS_DIR ? value : null;
+}
+
 export async function currentGlobalHooksPath(): Promise<string | null> {
   const r = await gitGlobal(['--get', 'core.hooksPath']);
   return r.code === 0 ? r.stdout.trim() || null : null;

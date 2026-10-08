@@ -14,7 +14,7 @@ import type { RunManager } from './manager.ts';
 import type { PostPushWatcher } from './triggers.ts';
 import { newId, now, which } from './util.ts';
 import { VERSION, WEB_DIR as WEB } from './runtime.ts';
-import { GLOBAL_HOOKS_DIR, currentGlobalHooksPath } from './globalHooks.ts';
+import { GLOBAL_HOOKS_DIR, currentGlobalHooksPath, repoOwnHooksPath } from './globalHooks.ts';
 
 const MIME: Record<string, string> = {
   '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml',
@@ -30,12 +30,17 @@ async function tools(): Promise<AppState['tools']> {
   return t;
 }
 
-let hooksCache: { at: number; v: AppState['globalHooks'] } | null = null;
-async function globalHooksState(): Promise<AppState['globalHooks']> {
-  if (hooksCache && Date.now() - hooksCache.at < 30_000) return hooksCache.v;
-  const hooksPath = await currentGlobalHooksPath();
-  const v = { active: hooksPath === GLOBAL_HOOKS_DIR, hooksPath };
-  hooksCache = { at: Date.now(), v };
+let hooksCache: { at: number; checked: Set<string>; v: AppState['globalHooks'] } | null = null;
+async function globalHooksState(repos: Repo[]): Promise<AppState['globalHooks']> {
+  if (hooksCache && Date.now() - hooksCache.at < 30_000 && repos.every((r) => hooksCache!.checked.has(r.id))) return hooksCache.v;
+  const [hooksPath, own] = await Promise.all([
+    currentGlobalHooksPath(),
+    Promise.all(repos.map(async (r) => [r.id, await repoOwnHooksPath(r.path)] as const)),
+  ]);
+  const ownHooks: Record<string, string> = {};
+  for (const [id, p] of own) if (p) ownHooks[id] = p;
+  const v = { active: hooksPath === GLOBAL_HOOKS_DIR, hooksPath, ownHooks };
+  hooksCache = { at: Date.now(), checked: new Set(repos.map((r) => r.id)), v };
   return v;
 }
 
@@ -107,10 +112,11 @@ export function startHttp(db: DB, mgr: RunManager, watcher: PostPushWatcher, por
         return;
       }
       if (a === 'state' && m === 'GET') {
+        const repos = db.listRepos();
         const state: AppState = {
-          settings: db.getSettings(), usage: db.getUsage(), repos: db.listRepos(), flows: db.listFlows(),
+          settings: db.getSettings(), usage: db.getUsage(), repos, flows: db.listFlows(),
           triggers: db.listTriggers(), tools: await tools(), version: VERSION,
-          globalHooks: await globalHooksState(),
+          globalHooks: await globalHooksState(repos),
         };
         return send(200, state);
       }
