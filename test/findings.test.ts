@@ -374,6 +374,23 @@ test('pushes that get no review of their own say why: superseded in the debounce
   await bot.settled();
   assert.deepEqual(sched, ['bbb1'], "the bot's push has no review coming, so this one isn't left out");
 
+  // an older hook (no `from`) and no answer at the first look: the old tip is what the next answer shows, not "moved"
+  line = 'no';
+  await push('fab1', undefined, [null, 'fab0', 'fab0', 'fab1']);
+  assert.equal(kindOf('fab1'), 'pending', 'scheduled, not skipped as rejected');
+  assert.ok(sched.includes('fab1'));
+  line = 'unknown';
+
+  // the branch moves to a commit pushed to another branch long ago (its old note there promises nothing here), by CI,
+  // with no PR and reviews not PR-only: this push is reviewed
+  db.setSettings({ ...db.getSettings(), postPushPrsOnly: false });
+  db.setPushOutcome({ sha: 'cab9', kind: 'no-pr', reason: 'old', repoPath, branch: 'elsewhere' });
+  pr = null;
+  sched.length = 0;
+  await push('cab1', 'cab0', ['cab0', 'cab9']);
+  assert.deepEqual(sched, ['cab1'], "not taken as covered by cab9's note on another branch");
+  db.setSettings({ ...db.getSettings(), postPushPrsOnly: true });
+
   // the branch moved to something that doesn't include the push (rejected: a teammate's went in instead)
   line = 'no';
   await push('eee3', 'eee0', ['eee0', 'eee4']);

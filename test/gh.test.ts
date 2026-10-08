@@ -30,7 +30,8 @@ D="${dir}"
 case "$1 $2" in
   "auth status") cat "$D/status"; exit ${statusExit} ;;
   "auth token") [ "$6" = "no-token" ] && exit 1; [ -e "$D/blip-$6" ] && { rm "$D/blip-$6"; exit 1; }; echo "tok-$6" ;;
-  "pr view") f="$D/pr-\${GH_TOKEN:-none}.json"; [ -f "$f" ] && { cat "$f"; exit 0; }
+  "pr view") [ -e "$D/garbled" ] && { echo "<html>rate limited</html>"; exit 0; }
+    f="$D/pr-\${GH_TOKEN:-none}.json"; [ -f "$f" ] && { cat "$f"; exit 0; }
     [ -e "$D/offline" ] && { echo "error connecting to api.github.com" >&2; exit 1; }
     [ -e "$D/hidden-\${GH_TOKEN:-none}" ] && { echo "GraphQL: Could not resolve to a Repository with the name 'org/app'." >&2; exit 1; }
     echo "no pull requests found for branch \"$3\"" >&2; exit 1 ;;
@@ -63,12 +64,27 @@ test('prForBranch tries each account, keeps only an open PR, and says which acco
   try { assert.equal((await prForBranch(process.cwd(), 'feat'))?.account, 'work-me', 'an account gh has no token for is skipped'); } finally { gh.restore(); }
 });
 
-test('a review comment is posted once, as the account that found the PR', async () => {
-  const gh = fakeGh(TWO, {});
+test('a review comment is posted once, as the account that found the PR, or else as one that can see it', async () => {
+  const gh = fakeGh(TWO, { 'tok-work-me': pr('OPEN') });
   try {
     assert.equal(await commentOnPr(process.cwd(), 7, 'body', 'work-me'), true);
+    // no account known (a run from before PuRR kept it): not just the active one, which can't see this private repo
     assert.equal(await commentOnPr(process.cwd(), 8, 'body'), true);
-    assert.deepEqual(gh.comments(), ['tok-work-me 7', 'tok-me 8'], 'the found-by account, else the active one');
+    assert.deepEqual(gh.comments(), ['tok-work-me 7', 'tok-work-me 8']);
+  } finally { gh.restore(); }
+});
+
+test("a PR found through gh's own login (an unreadable account list) gets its comment, before and after gh reads normally again", async () => {
+  const { GH_DEFAULT_LOGIN } = await import('../src/server/gh.ts');
+  let gh = fakeGh('Signed in, in words from a future gh\n', { none: pr('OPEN') });
+  try {
+    assert.equal(await commentOnPr(process.cwd(), 7, 'b', GH_DEFAULT_LOGIN), true);
+    assert.deepEqual(gh.comments(), ['none 7'], "gh's own login, no token");
+  } finally { gh.restore(); }
+  gh = fakeGh(TWO, { 'tok-work-me': pr('OPEN') });
+  try {
+    assert.equal(await commentOnPr(process.cwd(), 7, 'b', GH_DEFAULT_LOGIN), true);
+    assert.deepEqual(gh.comments(), ['tok-work-me 7'], 'now an account list again: one that can see the PR');
   } finally { gh.restore(); }
 });
 
@@ -265,6 +281,10 @@ test("a branch's PR: found, none, or gh couldn't say, which is not the same as n
   const hidden = fakeGh(TWO, {});
   writeFileSync(join(hidden.dir, 'hidden-tok-me'), '');
   try { assert.equal(await prLookup(process.cwd(), 'feat'), null); } finally { hidden.restore(); }
+  // gh answers, but not with JSON: that says nothing either way
+  const garbled = fakeGh(TWO, {});
+  writeFileSync(join(garbled.dir, 'garbled'), '');
+  try { assert.equal(await prLookup(process.cwd(), 'feat'), undefined); } finally { garbled.restore(); }
   // one account says there's none, the other can't be reached: it might be the one that sees the PR
   const mixed = fakeGh(TWO.replace('account me', 'account no-token'), {});
   try { assert.equal(await prLookup(process.cwd(), 'feat'), undefined); } finally { mixed.restore(); }

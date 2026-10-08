@@ -45,7 +45,6 @@ export class PostPushWatcher {
   /** gh accounts listed at the first poll */
   private startAccounts: Set<string> | null = null;
   private answeredOnce = false;
-  private lastPoll = 0;
   private deps: WatcherDeps;
   /** push confirmations still waiting for the remote */
   private confirming = new Set<Promise<void>>();
@@ -102,7 +101,8 @@ export class PostPushWatcher {
         const tip = await this.deps.lsRemote(body.repoPath, remote, body.branch);
         // an older hook sends no `from`: the tip at first look stands in, and nothing later does (a quick second
         // push seen after this one landed is a newer push, not the old tip)
-        if (from === undefined) from = tip === body.sha ? null : tip;
+        // (no answer from ls-remote says nothing about the old tip: wait for one that does)
+        if (from === undefined && tip) from = tip === body.sha ? null : tip;
         if (tip && tip !== body.sha && tip !== from) {
           // the branch moved on before this push was seen. On top of it (a quick second push, CI, another machine):
           // that push's review covers this commit, including when git can't tell because the tip isn't local. Not
@@ -112,7 +112,7 @@ export class PostPushWatcher {
             return note('skipped', `the branch moved to ${tip.slice(0, 12)}, which doesn't include this push (was it rejected?)`);
           }
           const pr0 = (await this.deps.ghAuthed()) ? await this.deps.prForBranch(body.repoPath, body.branch) : null;
-          if (await this.reviewed(repo, body.repoPath, tip, pr0)) return note('superseded', 'a newer push to the branch took its place', tip);
+          if (await this.reviewed(repo, body.repoPath, body.branch, tip, pr0)) return note('superseded', 'a newer push to the branch took its place', tip);
           // overtaken by a push nothing will review (a bot's, with no PR the poller sees): review this one instead
         }
         if (tip === body.sha || (tip && tip !== from)) {
@@ -122,7 +122,7 @@ export class PostPushWatcher {
           // gh can be slow: if a newer push landed meanwhile, it's the one to review, and this older push mustn't take
           // its place in the debounce. No answer from ls-remote is no news: it landed
           const again = await this.deps.lsRemote(body.repoPath, remote, body.branch);
-          if (again && again !== body.sha && await this.reviewed(repo, body.repoPath, again, pr)) {
+          if (again && again !== body.sha && await this.reviewed(repo, body.repoPath, body.branch, again, pr)) {
             return note('superseded', 'a newer push to the branch took its place', again);
           }
           // (a newer push nothing will review, a bot's with no PR the poller sees: this push is reviewed after all)
@@ -165,11 +165,12 @@ export class PostPushWatcher {
    * Whether a push at `sha` will be reviewed by something: an open (not draft) PR the poller sees, or a hook here
    * (any clone of the repo) that reported it.
    */
-  private async reviewed(repo: Repo, repoPath: string, sha: string, pr: PrInfo | null): Promise<boolean> {
+  private async reviewed(repo: Repo, repoPath: string, branch: string, sha: string, pr: PrInfo | null): Promise<boolean> {
     if (pr && !pr.isDraft) return true;
     const key = githubRepo(repo.remoteUrl);
     const paths = [repoPath, ...(key ? this.db.listRepos().filter((r) => githubRepo(r.remoteUrl) === key).map((r) => r.path) : [])];
-    return this.db.getPushOutcomes(sha, paths).length > 0;
+    // a note for this branch that still promises a review: one pushed to another branch long ago says nothing here
+    return this.db.getPushOutcomes(sha, paths).some((o) => o.branch === branch && (o.kind === 'pending' || !!o.nextSha));
   }
 
   /** Local clones by GitHub repo ("owner/name"), main checkouts before worktrees. */
@@ -204,8 +205,6 @@ export class PostPushWatcher {
       await discoverRepos(this.db).catch(() => 0);
     }
     const asked = Date.now();
-    const prevPoll = this.lastPoll;
-    this.lastPoll = Date.now();
     const fetched = await this.deps.fetchPrs();
     // gh unusable at the first poll: an account that turns up within the first quarter hour was most likely there all
     // along (gh offline at login, before the network was up); one that turns up later was signed in later
@@ -227,6 +226,9 @@ export class PostPushWatcher {
       return Math.max(this.startedAt, last - 2 * 60_000);
     };
     const marks = new Map(prs.map((pr) => [pr.account, since(pr.account)]));
+    // when each account last answered before this poll: a clone registered after that is new to that account's PRs
+    const before = new Map(this.lastFetch);
+    const anyBefore = Math.max(0, ...before.values());   // for an account answering for the first time
     for (const a of fetched.answered) this.lastFetch.set(a, fetched.askedAt?.[a] ?? asked);
     const clones = await this.clonesByRepo();
     for (const pr of prs) {
@@ -251,9 +253,10 @@ export class PostPushWatcher {
           .some((o) => (o.kind === 'no-pr' || o.kind === 'elsewhere') && o.sha === pr.headRefOid.toLowerCase());
         // or opened shortly before its clone was first registered here: a repo with its own git hooks is only found by
         // discovery, up to ten minutes after it was cloned, pushed and proposed. Not before PuRR started, though
-        // (only for a clone registered since the last poll: one the poller couldn't have seen the PR through before)
+        // (only for a clone registered since this PR's account last answered: before that, the poller couldn't have
+        // seen the PR through it, even if gh failed in the poll that found the clone)
         const cloned = Math.max(...local.map((c) => Date.parse(c.addedAt) || 0));
-        const justCloned = cloned > prevPoll && opened >= this.startedAt && opened >= cloned - DISCOVERY_MS;
+        const justCloned = cloned > (before.get(pr.account) ?? anyBefore) && opened >= this.startedAt && opened >= cloned - DISCOVERY_MS;
         if (!owed && !justCloned && !(opened >= (marks.get(pr.account) ?? this.startedAt))) continue;
       }
       this.lastSeen.set(handled, pr.headRefOid);

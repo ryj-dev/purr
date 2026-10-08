@@ -128,7 +128,7 @@ export async function prLookup(repoPath: string, branch: string): Promise<PrInfo
         const pr = JSON.parse(r.stdout) as PrInfo & { state?: string };
         if (pr.state === 'OPEN') return { ...pr, account };   // gh also returns a branch's closed or merged PR
         return null;
-      } catch { continue; }
+      } catch { unknown = true; continue; }   // garbled output says nothing either way
     }
     if (/no (open )?pull requests? found/i.test(r.stderr)) continue;   // this account sees no PR for it
     if (!/could not resolve to a repository/i.test(r.stderr)) unknown = true;   // (one that can't see the repo says nothing)
@@ -174,11 +174,13 @@ export async function openPrsForAllAccounts(): Promise<PrFetch | null> {
  */
 export async function commentOnPr(repoPath: string, number: number, body: string, account?: string | null): Promise<boolean> {
   const accounts = await ghAccounts();
+  // found through gh's own login while PuRR couldn't read who as: now gh lists accounts, so that's no account at all
+  if (account === GH_DEFAULT_LOGIN && multiAccount) account = null;
   // each account's token is read once, with a second try for a keychain blip, and the post uses that same token
   const tokenOf = async (a: string) => (await tokenFor(a)) ?? (await tokenFor(a));
   // as that account; else (signed out since, nothing sent yet) the first other account that can see the PR, which a
   // read-only `gh pr view` tells without posting anything
-  let as: string | undefined = account ? undefined : accounts[0];   // none known: the active account, as gh would
+  let as: string | undefined;   // none known (a run from before PuRR kept it): the first account that can see the PR
   let token: string | null = null;
   if (account) {
     token = multiAccount ? await tokenOf(account) : null;
