@@ -15,7 +15,7 @@ export function cliAction(s: CliStatus): { kind: 'done' | 'install' | 'blocked';
     return { kind: 'done', button: 'Installed', tray: 'Command line tool installed', note: s.onPath ? '' : 'Add ~/.local/bin to your PATH to use it.' };
   }
   if (s.state === 'blocked') {
-    return { kind: 'blocked', button: 'Something else is there', tray: 'Install command line tool…',
+    return { kind: 'blocked', button: 'Something else is there', tray: 'Command line tool: ~/.local/bin/purr is in the way',
       note: `${s.link} exists and isn't a link: move it aside to install.` };
   }
   if (s.state === 'other') {

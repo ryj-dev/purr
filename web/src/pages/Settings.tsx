@@ -6,7 +6,7 @@ import { useToast } from '../components/Toast.tsx';
 import { UsageMeter } from '../components/UsageMeter.tsx';
 import { fmtTime } from '../util.ts';
 import { PageHeader } from '../components/ui.tsx';
-import { numFieldStep } from '../numText.ts';
+import { numFieldHandlers } from '../numText.ts';
 import { cliAction } from '../../../src/shared/cliLink.ts';
 import { Check, Save, SquareTerminal } from 'lucide-react';
 
@@ -68,17 +68,12 @@ function DesktopCard() {
  */
 function NumField({ label, hint, value, onChange }: { label: string; hint?: string; value: number; onChange: (v: number) => void }) {
   const [text, setText] = useState(String(value));
-  useEffect(() => { setText((t) => numFieldStep({ text: t, value }, { type: 'value', value }).text); }, [value]);
+  const box = numFieldHandlers(() => ({ text, value }), setText, onChange);
+  useEffect(() => { box.value(value); }, [value]);   // eslint-disable-line react-hooks/exhaustive-deps -- only on a new value
   return (
     <label className="field">
       <span>{label}</span>
-      <input type="number" min={0} value={text}
-        onChange={(e) => {
-          const r = numFieldStep({ text, value }, { type: 'type', text: e.target.value });
-          setText(r.text);
-          if (r.emit !== null) onChange(r.emit);
-        }}
-        onBlur={() => setText(numFieldStep({ text, value }, { type: 'blur' }).text)} />
+      <input type="number" min={0} value={text} onChange={(e) => box.type(e.target.value)} onBlur={box.blur} />
       {hint && <span className="hint">{hint}</span>}
     </label>
   );

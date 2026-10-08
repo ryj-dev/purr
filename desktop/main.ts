@@ -298,6 +298,7 @@ async function api(method: string, path: string, body?: unknown) {
 }
 
 function updateTray() {
+  const cli = cliAction(cliStatus());   // read once: the link could change between two reads
   if (!tray) return;
   const { line, active } = trayStatus();
   tray.setTitle(active ? ` ${active}` : '', { fontType: 'monospacedDigit' });
@@ -339,9 +340,9 @@ function updateTray() {
       click: (item) => { setLoginItem(item.checked); updateTray(); },
     },
     { type: 'separator' },
-    cliAction(cliStatus()).kind === 'done'
-      ? { label: cliAction(cliStatus()).tray, enabled: false }
-      : { label: 'Install command line tool…', click: async () => { const r = installCli(); updateTray(); dialog.showMessageBox({ message: r.ok ? 'The purr command line tool is installed' : 'Couldn\'t install the command line tool', detail: r.message }); } },
+    cli.kind !== 'install'
+      ? { label: cli.tray, enabled: false }   // installed, or something in the way that only you can move
+      : { label: cli.tray, click: async () => { const r = installCli(); updateTray(); dialog.showMessageBox({ message: r.ok ? 'The purr command line tool is installed' : 'Couldn\'t install the command line tool', detail: r.message }); } },
     { label: mode === 'external' ? 'Service: started outside the app' : 'Restart service', enabled: mode !== 'external', click: () => restartService() },
     { label: 'Open service log', click: () => shell.openPath(LOG) },
     { type: 'separator' },
@@ -371,16 +372,15 @@ function installCli(): { ok: boolean; message: string } {
   const dir = CLI_DIR;
   const link = CLI_LINK;
   try {
+    // the same reading of the link as Settings and the tray, so the three never disagree
+    const before = cliStatus();
+    if (before.state === 'blocked') return { ok: false, message: `${link} exists and isn't a link; move it aside first.` };
+    if (before.state === 'installed') return { ok: true, message: `${link} already points at this app.` };
     mkdirSync(dir, { recursive: true });
-    if (existsSync(link) || (() => { try { lstatSync(link); return true; } catch { return false; } })()) {
-      const st = lstatSync(link);
-      if (!st.isSymbolicLink()) return { ok: false, message: `${link} exists and isn't a link; remove it first.` };
-      if (readlinkSync(link) === SHIM) return { ok: true, message: `${link} already points at this app.` };
-      unlinkSync(link);
-    }
+    if (before.state === 'other') unlinkSync(link);
     symlinkSync(SHIM, link);
-    const onPath = (userPath || '').split(':').includes(dir);
-    return { ok: true, message: `Linked ${link} → ${SHIM}.${onPath ? '' : ` Add ${dir} to your PATH to use it.`}` };
+    const after = cliStatus();
+    return { ok: true, message: `Linked ${link} → ${SHIM}.${after.onPath ? '' : ` Add ${dir} to your PATH to use it.`}` };
   } catch (e) {
     return { ok: false, message: (e as Error).message };
   }

@@ -50,5 +50,6 @@ test('what Settings and the tray offer for each state of the link', () => {
   assert.equal(of({ state: 'other', target: '/usr/local/bin/purr' }).button, 'Replace the link');
   assert.match(of({ state: 'other', target: '/usr/local/bin/purr' }).note, /something else.*\/usr\/local\/bin\/purr/);
   assert.equal(of({ state: 'blocked' }).kind, 'blocked');
+  assert.match(of({ state: 'blocked' }).tray, /in the way/, 'the tray says so too, instead of offering an install that can only fail');
   assert.match(of({ state: 'blocked' }).note, /isn't a link/);
 });

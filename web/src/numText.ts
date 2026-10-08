@@ -25,3 +25,19 @@ export function numFieldStep(s: { text: string; value: number }, e: NumEvent): {
   if (e.type === 'blur') return { text: settledText(s.text, s.value), value: s.value, emit: null };
   return { text: String(e.value), value: e.value, emit: null };   // loaded, saved or reset from outside
 }
+
+/**
+ * A number box's handlers, used by NumField itself and by its tests: a keystroke, leaving the box, and the setting
+ * changing from outside (NumField calls `value` from an effect on the setting, so only when it actually changes).
+ */
+export function numFieldHandlers(get: () => { text: string; value: number }, setText: (t: string) => void, save: (v: number) => void) {
+  return {
+    type: (text: string) => {
+      const r = numFieldStep(get(), { type: 'type', text });
+      setText(r.text);
+      if (r.emit !== null) save(r.emit);
+    },
+    blur: () => setText(numFieldStep(get(), { type: 'blur' }).text),
+    value: (value: number) => setText(numFieldStep(get(), { type: 'value', value }).text),
+  };
+}

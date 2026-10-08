@@ -39,3 +39,29 @@ test('typing in a number box, step by step: never saves an empty box, and 4 -> 6
   assert.deepEqual(run(4, [{ type: 'type', text: '' }, { type: 'value', value: 9 }]), { text: '9', value: 9, saved: [] }, 'reset from outside');
   assert.deepEqual(run(6, [{ type: 'type', text: '06' }]), { text: '06', value: 6, saved: [6] }, 'the same number: the box keeps what was typed');
 });
+
+test("NumField's own handlers: clear 4, type 6, leave; clear and leave; '06' over 6", async () => {
+  const { numFieldHandlers } = await import('../web/src/numText.ts');
+  // the component's state and props, with its [value] effect: runs only when the saved number is a new value
+  const box = (start: number) => {
+    const s = { text: String(start), value: start, saved: [] as number[] };
+    const h = numFieldHandlers(() => ({ text: s.text, value: s.value }), (t) => { s.text = t; }, (v) => {
+      s.saved.push(v);
+      if (v !== s.value) { s.value = v; h.value(v); }
+    });
+    return { s, h };
+  };
+  let b = box(4);
+  b.h.type('');
+  assert.deepEqual([b.s.text, b.s.saved], ['', []], 'cleared: empty, nothing saved, no 0');
+  b.h.type('6');
+  b.h.blur();
+  assert.deepEqual([b.s.text, b.s.value, b.s.saved], ['6', 6, [6]]);
+  b = box(4);
+  b.h.type('');
+  b.h.blur();
+  assert.deepEqual([b.s.text, b.s.value, b.s.saved], ['4', 4, []]);
+  b = box(6);
+  b.h.type('06');
+  assert.deepEqual([b.s.text, b.s.saved], ['06', [6]], 'the same number: kept as typed');
+});
