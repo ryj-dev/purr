@@ -414,3 +414,26 @@ test('gh offline at login: accounts that turn up in the first quarter hour were 
     assert.deepEqual(scheduled, ['n1']);
   } finally { t.mock.timers.reset(); db.close(); }
 });
+
+test('an account signed in from a terminal after startup: its PRs from since the last account list without it are new', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
+  const db = openDb(); ensureDefaults(db);
+  const mgr = new RunManager(db, new ClaudeRunner(db));
+  const scheduled: string[] = [];
+  mgr.schedulePostPush = (req: RunRequest) => { scheduled.push(req.head!); };
+  const { root, a } = projectsFolder();
+  sh(a, 'remote', 'add', 'origin', 'https://github.com/work-org/app-j.git');
+  db.setSettings({ ...db.getSettings(), projectFolders: [root] });
+  let fetched: any = { prs: [], answered: ['me'] };
+  const watcher = new PostPushWatcher(db, mgr, { fetchPrs: async () => fetched });
+  try {
+    await watcher.poll();
+    t.mock.timers.tick(30 * 60_000);
+    const lastListWithout = Date.now() - 5 * 60_000;   // gh's accounts were read then, without "work"
+    const pr = (n: number, opened: number) => ({ repo: 'work-org/app-j', number: n, headRefOid: `s${n}`, headRefName: `b${n}`, baseRefName: 'main',
+      title: 't', body: '', url: 'u', isDraft: false, account: 'work', createdAt: new Date(opened).toISOString() });
+    fetched = { prs: [pr(1, Date.now() - 4 * 60_000), pr(2, Date.now() - 20 * 60_000)], answered: ['me', 'work'], signedInSince: { work: lastListWithout } };
+    await watcher.poll();
+    assert.deepEqual(scheduled, ['s1'], 'opened after it was signed in: new; opened long before: already open');
+  } finally { t.mock.timers.reset(); db.close(); }
+});

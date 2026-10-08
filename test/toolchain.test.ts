@@ -10,7 +10,7 @@ import { ClaudeRunner } from '../src/server/claude.ts';
 import { RunManager } from '../src/server/manager.ts';
 import { startHttp } from '../src/server/http.ts';
 import { PostPushWatcher } from '../src/server/triggers.ts';
-import { asString, installMissing, installTool, openSignIn, refreshToolchain, signInCommand, toolchainStatus } from '../src/server/toolchain.ts';
+import { asString, installMissing, installTool, onToolchainChange, openSignIn, refreshToolchain, signInCommand, toolchainStatus } from '../src/server/toolchain.ts';
 import { expectGhSignIn, forgetGhAccounts, ghAccounts } from '../src/server/gh.ts';
 
 // A PATH holding only fake tools (plus the system basics), and a fake brew that "installs" by writing a fake tool.
@@ -231,9 +231,12 @@ test('HTTP: /api/tools, installing, unknown tools, and scanners have nothing to 
     const all = await call('POST', '/api/tools/install-missing');
     assert.equal(all.status, 202);
     assert.deepEqual(await all.json(), { installing: [] }, 'zizmor is already queued');
+    // wait on the install itself, not by re-reading (which would clear the sidebar's cache and hide a stale one)
+    const done = new Promise<void>((r) => { const off = onToolchainChange((s) => { if (s) { off(); r(); } }); });
     w.release();                              // brew held zizmor until now, so it couldn't finish first and be queued again
-    assert.equal((await settled('zizmor')).installed, true);
+    await done;
     assert.equal((await (await call('GET', '/api/state')).json()).tools.zizmor, true, 'the sidebar summary updates after an install');
+    assert.equal((await settled('zizmor')).installed, true);
 
     assert.equal((await call('POST', '/api/tools/nmap/install')).status, 404);
     const si = await call('POST', '/api/tools/gitleaks/signin');

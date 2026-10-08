@@ -153,7 +153,9 @@ export class PostPushWatcher {
     // there at the first poll but hasn't answered yet (failing since startup) still starts from startedAt
     if (!this.startAccounts) this.startAccounts = new Set(fetched.accounts ?? fetched.answered);
     const since = (account: string) => {
-      const last = this.lastFetch.get(account) ?? (this.startAccounts!.has(account) ? 0 : Date.now());
+      // signed in after startup: from when PuRR last read gh's accounts without it (a sign-in in a terminal shows
+      // up only when the five-minute account cache runs out), else from now
+      const last = this.lastFetch.get(account) ?? (this.startAccounts!.has(account) ? 0 : fetched.signedInSince?.[account] ?? Date.now());
       return Math.max(this.startedAt, last - 2 * 60_000);
     };
     const marks = new Map(prs.map((pr) => [pr.account, since(pr.account)]));
