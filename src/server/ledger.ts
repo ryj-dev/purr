@@ -22,7 +22,8 @@ export async function fingerprintAll(findings: Finding[], material: Material): P
  * Marks each finding new / open / regression / dismissed / tracked and records it. When `completeBlocks` is given
  * (every block finished), open items this branch raised before from one of those blocks, and not raised now, become fixed.
  */
-export function applyLedger(db: DB, run: Run, findings: Finding[], completeBlocks: Set<string> | null): void {
+export function applyLedger(db: DB, run: Run, findings: Finding[], completeBlocks: Set<string> | null,
+  unchecked: Map<string, Set<string>> = new Map()): void {
   if (!run.repoId) return;
   const ts = now();
   const seen = new Set<string>();
@@ -47,9 +48,10 @@ export function applyLedger(db: DB, run: Run, findings: Finding[], completeBlock
   if (completeBlocks && run.branch && run.mode === 'range' && wholeBranch) {
     for (const item of db.listLedger(run.repoId, 'open')) {
       if (item.branch !== run.branch || item.flowId !== run.flowId || seen.has(item.fingerprint)) continue;
-      const by = item.finding.source.blockId;
       // the default flows' secrets block was scan-gitleaks before betterleaks replaced it: the same block, renamed
-      if (!completeBlocks.has(by) && !(by === 'scan-gitleaks' && completeBlocks.has('scan-betterleaks'))) continue;
+      const by = item.finding.source.blockId === 'scan-gitleaks' && !completeBlocks.has('scan-gitleaks') ? 'scan-betterleaks' : item.finding.source.blockId;
+      if (!completeBlocks.has(by)) continue;
+      if (unchecked.get(by)?.has(item.finding.file)) continue;   // a file this run's scanner couldn't check: still open
       db.putLedger({ ...item, state: 'fixed', lastRunId: run.id, updatedAt: ts });
     }
   }

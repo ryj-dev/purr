@@ -39,6 +39,25 @@ const SESSION_BLOCKS = new Set(['context', 'prompt', 'verify', 'command']);
 /** What a run keeps of its PR, including the account that found it: the one PuRR comments as. */
 export const runPr = (pr: PrInfo): NonNullable<Run['pr']> => ({ number: pr.number, title: pr.title, body: pr.body, url: pr.url, account: pr.account });
 
+/**
+ * The blocks whose run can say an earlier finding of theirs is gone: those that finished, except a scanner that failed
+ * or isn't installed (it checked nothing). A scanner that couldn't check some files (partial) counts, but `unchecked`
+ * lists those files, whose findings it can't vouch for.
+ */
+export function completeBlocks(blocks: Array<{ id: string }>, runs: Map<string, BlockRun>) {
+  const complete = new Set<string>();
+  const unchecked = new Map<string, Set<string>>();
+  for (const b of blocks) {
+    const br = runs.get(b.id);
+    if (br?.status !== 'done') continue;
+    const sc = br.output?.scanner;
+    if (sc && sc.state !== 'ran' && sc.state !== 'n/a' && sc.state !== 'partial') continue;
+    if (sc?.state === 'partial') unchecked.set(b.id, new Set((sc.incomplete ?? []).map((x) => x.file)));
+    complete.add(b.id);
+  }
+  return { complete, unchecked };
+}
+
 export class RunManager {
   db: DB;
   claude: ClaudeRunner;
@@ -191,9 +210,8 @@ export class RunManager {
         { claude: this.claude, signal: controller.signal, onBlock: this.onBlock, isSuppressed, fingerprint: (fs) => fingerprintAll(fs, material) },
       );
       await fingerprintAll(result.findings, material);
-      const complete = result.failedBlocks.length === 0 && !controller.signal.aborted
-        ? new Set(run.flow.blocks.filter((b) => result.blocks.get(b.id)?.status === 'done').map((b) => b.id)) : null;
-      applyLedger(this.db, run, result.findings, complete);
+      const checked = result.failedBlocks.length === 0 && !controller.signal.aborted ? completeBlocks(run.flow.blocks, result.blocks) : null;
+      applyLedger(this.db, run, result.findings, checked?.complete ?? null, checked?.unchecked);
       this.db.setRunFindings(run.id, result.findings);
       run.counts = countBySeverity(active(result.findings));
       if (controller.signal.aborted) {

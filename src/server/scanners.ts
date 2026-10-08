@@ -19,8 +19,10 @@ const WF = /(^|\/)\.github\/workflows\/[^/]+\.ya?ml$/;
 const DOCKERFILE = /(^|\/)(Dockerfile(\.[^/]+)?|[^/]+\.Dockerfile)$/;
 // full pinned trees osv-scanner reads as they are (go.mod lists every module the build uses; osv can't parse go.sum)
 const LOCKS = /(^|\/)(package-lock\.json|npm-shrinkwrap\.json|yarn\.lock|pnpm-lock\.yaml|composer\.lock|uv\.lock|poetry\.lock|pdm\.lock|Pipfile\.lock|requirements[^/]*\.txt|Gemfile\.lock|go\.mod|Cargo\.lock)$/;
-// a change's own scanner config or ignore file must never steer the scan of that change
+// a change's own scanner config or ignore file must never steer the scan of that change, but a secret pasted into one
+// is still a secret: it's scanned under a name the scanner doesn't load as config, and reported under its own
 const SCAN_CONFIG = new Set(['.betterleaks.toml', '.gitleaks.toml', '.betterleaksignore', '.gitleaksignore']);
+const AS_DATA = '.purr-scan';
 const FILE_MS = 60_000;   // one hadolint / actionlint call (one file)
 
 // zizmor rule -> [headline, what goes wrong, fix]
@@ -89,12 +91,13 @@ async function secrets(blockId: string, files: ChangedFile[], work: string): Pro
   const root = join(work, 'secrets');
   let any = false;
   for (const f of files) {
-    if (!f.added.size || f.binary || !safePath(f.path) || SCAN_CONFIG.has(basename(f.path))) continue;
+    if (!f.added.size || f.binary || !safePath(f.path)) continue;
     const max = Math.max(...f.added.keys());
     const lines: string[] = [];
     for (let i = 1; i <= max; i++) lines.push(f.added.get(i) ?? '');
-    mkdirSync(dirname(join(root, f.path)), { recursive: true });
-    writeFileSync(join(root, f.path), lines.join('\n') + '\n');
+    const at = SCAN_CONFIG.has(basename(f.path)) ? f.path + AS_DATA : f.path;
+    mkdirSync(dirname(join(root, at)), { recursive: true });
+    writeFileSync(join(root, at), lines.join('\n') + '\n');
     any = true;
   }
   if (!any) return null;
@@ -115,7 +118,8 @@ async function secrets(blockId: string, files: ChangedFile[], work: string): Pro
   let hits: Array<Record<string, any>> | null = null;
   try { hits = existsSync(rep) ? JSON.parse(readFileSync(rep, 'utf8') || 'null') : null; } catch { /* below */ }
   if (!Array.isArray(hits)) throw new Error(`${tool} wrote no readable report`);   // never a silent pass
-  return hits.map((h) => hit(blockId, tool, relative(root, h.File), h.StartLine ?? null, h.RuleID, 'secrets',
+  const realPath = (p: string) => (p.endsWith(AS_DATA) && SCAN_CONFIG.has(basename(p.slice(0, -AS_DATA.length))) ? p.slice(0, -AS_DATA.length) : p);
+  return hits.map((h) => hit(blockId, tool, realPath(relative(root, h.File)), h.StartLine ?? null, h.RuleID, 'secrets',
     'A secret is committed here; anyone with repo access can use it',
     `This line holds what looks like a real ${secretKind(h.RuleID)}. Anyone who can read the repo, or its history, can use it.`,
     "Revoke and rotate it now; deleting the line doesn't remove it from git history."));

@@ -3,13 +3,14 @@ import { FAKE_AWS, sh, tempRepo } from './helpers.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { runScanner } from '../src/server/scanners.ts';
 import { changedFiles, type ChangeSpec } from '../src/server/git.ts';
 import { fingerprint } from '../src/server/engine/findings.ts';
 import { DEFAULT_FLOWS } from '../src/server/flows/defaults.ts';
 import { exportFlow, previewImport } from '../src/server/flows/share.ts';
 import { foundBy } from '../src/shared/scanners.ts';
+import { paths } from '../src/server/util.ts';
 import type { Finding } from '../src/shared/types.ts';
 
 /** A folder of fake tools, put first on PATH with only the system's own folders after it (git is in /usr/bin). */
@@ -26,7 +27,7 @@ function fakeTools(tools: Record<string, string>) {
 
 // A secrets scanner: notes its arguments and folder, keeps a copy of what it was shown, and reports each AKIA line.
 const SECRETS = `printf '%s\\n' "$@" > "$D/$(basename "$0").args"
-pwd > "$D/cwd"
+pwd -P > "$D/cwd"
 while [ $# -gt 0 ]; do case "$1" in dir) shift; root="$1";; -r) shift; rep="$1";; esac; shift; done
 cp -R "$root" "$D/seen"
 grep -rn AKIA "$root" | awk -F: 'BEGIN { printf "[" } { if (NR > 1) printf ","; printf "{\\"File\\":\\"%s\\",\\"StartLine\\":%s,\\"RuleID\\":\\"aws-access-token\\",\\"Description\\":\\"AWS\\",\\"Secret\\":\\"REDACTED\\"}", $1, $2 } END { printf "]" }' > "$rep"`;
@@ -52,20 +53,31 @@ test('betterleaks sees only the added lines, never validates or redacts nothing,
   const { repo, change, files } = await staged({
     'app.js': `const a = 1;\nconst key = "${FAKE_AWS}";\n`,
     '.betterleaks.toml': `# a change's own config must not steer its scan\n# "${FAKE_AWS}"\n`,
+    '.gitleaks.toml': `[allowlist]\nregexes = ["${FAKE_AWS}"]\n`,
   }, { 'app.js': 'const a = 1;\n' });
   const t = fakeTools({ betterleaks: SECRETS });
   try {
     const r = await runScanner('betterleaks', 'scan-betterleaks', files, change);
     assert.equal(r.state.state, 'ran', r.state.error ?? '');
-    assert.deepEqual(r.findings.map((f) => [f.file, f.line, f.source.scanner, f.source.rule, f.severity, f.category]),
-      [['app.js', 2, 'betterleaks', 'aws-access-token', 'must_fix', 'secrets']]);
-    assert.match(r.findings[0].scenario, /real AWS access token/);
+    // a secret pasted into a scanner config file is still a secret, reported where it really is
+    assert.deepEqual(r.findings.map((f) => [f.file, f.line, f.source.scanner, f.source.rule, f.severity, f.category])
+      .sort((a, b) => String(a[0]).localeCompare(String(b[0]))),
+      [['.betterleaks.toml', 2, 'betterleaks', 'aws-access-token', 'must_fix', 'secrets'],
+        ['.gitleaks.toml', 2, 'betterleaks', 'aws-access-token', 'must_fix', 'secrets'],
+        ['app.js', 2, 'betterleaks', 'aws-access-token', 'must_fix', 'secrets']]);
+    assert.match(r.findings.find((f) => f.file === 'app.js')!.scenario, /real AWS access token/);
     assert.ok(!JSON.stringify(r.findings).includes(FAKE_AWS), 'the secret itself is never kept');
     const args = readFileSync(join(t.dir, 'betterleaks.args'), 'utf8').split('\n');
     for (const a of ['--validation=false', '--redact', '--no-banner']) assert.ok(args.includes(a), a);
     assert.equal(readFileSync(join(t.dir, 'seen', 'app.js'), 'utf8'), `\nconst key = "${FAKE_AWS}";\n`, 'line 1 blank: it was already there');
-    assert.ok(!existsSync(join(t.dir, 'seen', '.betterleaks.toml')), 'its own scanner config is never scanned or used');
-    assert.notEqual(readFileSync(join(t.dir, 'cwd'), 'utf8').trim(), realpathSync(repo), "not run in the repo, where its config would apply");
+    for (const c of ['.betterleaks.toml', '.gitleaks.toml']) {
+      assert.ok(!existsSync(join(t.dir, 'seen', c)), `${c} is never where the scanner would load it as config`);
+      assert.ok(existsSync(join(t.dir, 'seen', c + '.purr-scan')), `${c} is scanned as plain text`);
+    }
+    const cwd = readFileSync(join(t.dir, 'cwd'), 'utf8').trim();   // physical: the folder itself is gone by now
+    assert.notEqual(cwd, realpathSync(repo), 'not run in the repo, where its config would apply');
+    assert.equal(join(cwd, '..'), realpathSync(paths.scratch), "run in PuRR's own scratch folder");
+    assert.match(basename(cwd), /^betterleaks-/);
   } finally { t.restore(); }
 });
 
@@ -91,13 +103,20 @@ test('without betterleaks, gitleaks does the job; with neither, the scanner says
   } finally { t.restore(); }
 });
 
-test('a secrets scanner that writes no readable report fails, never a clean pass', async () => {
+test('a secrets scanner that writes no readable report, or exits non-zero, fails: never a clean pass', async () => {
   const { change, files } = await staged({ 'app.js': 'x\n' });
-  const t = fakeTools({ betterleaks: 'exit 0' });
+  let t = fakeTools({ betterleaks: 'exit 0' });
   try {
     const r = await runScanner('betterleaks', 'b', files, change);
     assert.equal(r.state.state, 'failed');
     assert.match(r.state.error!, /no readable report/);
+  } finally { t.restore(); }
+  // a report written, then a non-zero exit (it's run with --exit-code 0, so anything else is it going wrong)
+  t = fakeTools({ betterleaks: `while [ $# -gt 0 ]; do case "$1" in -r) shift; rep="$1";; esac; shift; done\necho '[]' > "$rep"\necho 'config error' >&2\nexit 1` });
+  try {
+    const r = await runScanner('betterleaks', 'b', files, change);
+    assert.equal(r.state.state, 'failed');
+    assert.match(r.state.error!, /betterleaks exited 1: config error/);
   } finally { t.restore(); }
 });
 
@@ -137,6 +156,11 @@ test('actionlint: workflow errors on added lines, as consider; nothing to check 
     const r = await runScanner('actionlint', 'scan-actionlint', files, change);
     assert.equal(r.state.state, 'ran', r.state.error ?? '');
     assert.deepEqual(r.findings.map((f) => [f.file, f.line, f.source.rule, f.severity]), [[wf, 3, 'syntax-check', 'consider']]);
+    // a clean workflow: actionlint prints nothing and exits 0
+    writeFileSync(join(t.dir, `actionlint-${wf.replace(/\//g, '_')}.json`), '');
+    writeFileSync(join(t.dir, 'actionlint'), `#!/bin/sh\nexit 0\n`);
+    const clean = await runScanner('actionlint', 'scan-actionlint', files, change);
+    assert.deepEqual([clean.state.state, clean.findings.length], ['ran', 0]);
     const none = await staged({ 'app.js': 'x\n' });
     assert.equal((await runScanner('actionlint', 'a', none.files, none.change)).state.state, 'n/a');
     assert.equal((await runScanner('hadolint', 'h', none.files, none.change)).state.state, 'n/a');
@@ -190,4 +214,83 @@ test('a scanner finding says which tool found it and what that tool is', () => {
   assert.match(by('hadolint', 'DL3009'), /Found by \*\*hadolint\*\*.*\[`DL3009`\]\(https:\/\/github\.com\/hadolint\/hadolint\/wiki\/DL3009\)/);
   assert.match(by('betterleaks', 'aws-access-token'), /Found by \*\*betterleaks\*\*, an open-source tool that finds secrets/);
   assert.match(by('gitleaks', 'x'), /Found by \*\*gitleaks\*\*/, 'findings recorded before the switch still say what found them');
+});
+
+// osv-scanner: answers from what's in the file it's given (the last argument), and notes what it was asked to read
+const OSV = `for a; do f="$a"; done
+echo "$f" >> "$D/osv.files"
+case "$(cat "$f")" in *EXIT128*) exit 128;; *EXIT2*) echo boom >&2; exit 2;; *GARBAGE*) echo not json; exit 0;; esac
+vulns=""
+for id in VULN-A VULN-B; do
+  grep -q "$id" "$f" || continue
+  [ -n "$vulns" ] && vulns="$vulns,"
+  vulns="$vulns{\\"id\\":\\"GHSA-$id\\",\\"summary\\":\\"bad $id\\",\\"affected\\":[{\\"package\\":{\\"name\\":\\"lodash\\"},\\"ranges\\":[{\\"events\\":[{\\"fixed\\":\\"4.17.21\\"}]}]}]}"
+done
+[ -z "$vulns" ] && { echo '{"results":[]}'; exit 0; }
+printf '{"results":[{"packages":[{"package":{"name":"lodash","version":"4.17.0"},"groups":[{"max_severity":"9.8"}],"vulnerabilities":[%s]}]}]}' "$vulns"
+exit 1`;
+
+test('osv-scanner: only vulnerabilities new on this change, an empty file is fine, a failed or unreadable scan fails, go.mod is read', async () => {
+  const lock = (marks: string) => `{\n  "name": "app",\n  "dependencies": {\n    "lodash": "4.17.0"\n  }\n}\n// ${marks}\n`;
+  const t = fakeTools({ 'osv-scanner': OSV });
+  try {
+    // B is new on this change (critical), A was already on the base branch: only B is raised, on lodash's line
+    const a = await staged({ 'package-lock.json': lock('VULN-A VULN-B') }, { 'package-lock.json': lock('VULN-A') });
+    const r = await runScanner('osv', 'scan-osv', a.files, a.change);
+    assert.equal(r.state.state, 'ran', r.state.error ?? '');
+    assert.deepEqual(r.findings.map((f) => [f.file, f.line, f.source.rule, f.severity]), [['package-lock.json', 4, 'GHSA-VULN-B', 'must_fix']]);
+    assert.match(r.findings[0].title, /`lodash` 4\.17\.0 has 1 known vulnerability \(worst: critical\)/);
+    assert.match(r.findings[0].fix!, /4\.17\.21/);
+    // the same vulnerabilities on both sides: nothing new
+    const same = await staged({ 'package-lock.json': lock('VULN-A x') }, { 'package-lock.json': lock('VULN-A') });
+    assert.deepEqual((await runScanner('osv', 'o', same.files, same.change)).findings, []);
+    // exit 128 is osv's "no packages in this file": a clean run
+    const empty = await staged({ 'package-lock.json': 'EXIT128\n' });
+    assert.deepEqual(await runScanner('osv', 'o', empty.files, empty.change).then((x) => [x.state.state, x.findings.length]), ['ran', 0]);
+    for (const bad of ['EXIT2', 'GARBAGE']) {
+      const b = await staged({ 'package-lock.json': `${bad}\n` });
+      const x = await runScanner('osv', 'o', b.files, b.change);
+      assert.equal(x.state.state, 'failed', bad);
+      assert.match(x.state.error!, /osv-scanner failed/);
+    }
+    const go = await staged({ 'go.mod': 'module x\n\nrequire example.com/y v1.0.0\n' });
+    assert.equal((await runScanner('osv', 'o', go.files, go.change)).state.state, 'ran');
+    assert.ok(readFileSync(join(t.dir, 'osv.files'), 'utf8').split('\n').some((l) => l.endsWith('/go.mod')), 'go.mod is read (osv can\'t parse go.sum)');
+  } finally { t.restore(); }
+});
+
+test("a scanner that couldn't check a file can't call its findings there fixed; a failed one can't call any fixed", async () => {
+  const { completeBlocks } = await import('../src/server/manager.ts');
+  const { openDb } = await import('../src/server/db.ts');
+  const { applyLedger } = await import('../src/server/ledger.ts');
+  const br = (state: string | null, incomplete: string[] = []) => ({ runId: 'r', blockId: 'x', status: 'done', startedAt: null, finishedAt: null, error: null,
+    output: state ? { scanner: { state, secs: 1, incomplete: incomplete.map((file) => ({ file, reason: 'timed out' })) } } : {} }) as any;
+  const runs = new Map([['scan-hadolint', br('partial', ['api/Dockerfile'])], ['scan-actionlint', br('failed')], ['scan-osv', br('n/a')],
+    ['context', br(null)], ['scan-zizmor', { ...br('ran'), status: 'skipped' }]]);
+  const got = completeBlocks(['scan-hadolint', 'scan-actionlint', 'scan-osv', 'context', 'scan-zizmor'].map((id) => ({ id })), runs);
+  assert.deepEqual([...got.complete].sort(), ['context', 'scan-hadolint', 'scan-osv'], 'not the failed one, nor one that never ran');
+  assert.deepEqual([...got.unchecked.get('scan-hadolint')!], ['api/Dockerfile']);
+
+  const db = openDb(join(mkdtempSync(join(process.env.TMPDIR!, 'purr-db-')), 'purr.db'));
+  const open = (fp: string, file: string, blockId: string) => db.putLedger({ fingerprint: fp, repoId: 'r1', branch: 'feat', state: 'open', flowId: 'default-review',
+    finding: { id: fp, file, line: 1, category: 'lint', severity: 'consider', title: 't', scenario: 's', source: { blockId, kind: 'scanner' } },
+    firstRunId: 'r0', lastRunId: 'r0', updatedAt: 'x' });
+  open('checked', 'Dockerfile', 'scan-hadolint');
+  open('unchecked', 'api/Dockerfile', 'scan-hadolint');
+  open('failed', '.github/workflows/ci.yml', 'scan-actionlint');
+  applyLedger(db, { id: 'r1run', repoId: 'r1', branch: 'feat', flowId: 'default-review', trigger: 'post-push', mode: 'range' } as any, [], got.complete, got.unchecked);
+  assert.deepEqual(['checked', 'unchecked', 'failed'].map((fp) => db.getLedger(fp, 'r1')?.state), ['fixed', 'open', 'open']);
+  db.close();
+});
+
+test("a PR comment says which tool found a scanner finding, and nothing of the kind under Claude's", async () => {
+  const { renderComment } = await import('../src/server/manager.ts');
+  const f = (kind: 'scanner' | 'model', title: string): Finding => ({ id: title, file: 'Dockerfile', line: 2, category: 'lint', severity: 'consider', title,
+    scenario: 's', source: kind === 'scanner' ? { blockId: 'scan-hadolint', kind, scanner: 'hadolint', rule: 'DL3009' } : { blockId: 'lens', kind } });
+  const text = renderComment({ flowName: 'Full review', baseSha: 'a'.repeat(40), headSha: 'b'.repeat(40) } as any, [f('scanner', 'From hadolint'), f('model', 'From Claude')]);
+  const lines = text.split('\n');
+  const at = (title: string) => lines.findIndex((l) => l.includes(title));
+  assert.match(lines[at('From hadolint') + 1], /^  _?Found by \*\*hadolint\*\*/);
+  assert.doesNotMatch(lines[at('From Claude') + 1] ?? '', /Found by/);
+  assert.equal(text.match(/Found by/g)?.length, 1);
 });
