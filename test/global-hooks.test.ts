@@ -94,12 +94,15 @@ test('own-hooks flags refresh in the background: never awaited, one refresh at a
   git(a, 'config', 'core.hooksPath', '.githooks');
   const repos = [a, b].map((path, i) => ({ id: `r${i}`, path, name: `r${i}`, remoteUrl: null, addedAt: '' }));
   let changes = 0;
-  const t = ownHooksTracker(() => changes++, 50);
+  const t = ownHooksTracker(() => changes++, { ttlMs: 50 });
   assert.deepEqual(t.get(repos), {}, 'the first call answers at once, before git has');
-  const first = t.settled();
-  t.get(repos);
-  assert.equal(t.settled(), first, 'a second call while refreshing shares the same refresh');
-  await first;
+  let calls = 0;
+  const counted = ownHooksTracker(() => {}, { check: async () => { calls++; return null; } });
+  counted.get(repos);
+  counted.get(repos);
+  await counted.settled();
+  assert.equal(calls, 2, 'a second call while refreshing shares the same refresh (one check per repo)');
+  await t.settled();
   assert.deepEqual(t.get(repos), { r0: '.githooks' });
   assert.equal(changes, 1, 'the change is announced so open windows refetch');
   await new Promise((r) => setTimeout(r, 60));
@@ -113,4 +116,49 @@ test('own-hooks flags refresh in the background: never awaited, one refresh at a
   assert.deepEqual(t.get(repos), {});
   assert.equal(changes, 2);
   writeFileSync(gitGlobal, '');
+});
+
+test('own-hooks tracker: a slow repo keeps its flag, repos added mid-refresh are checked straight after', async () => {
+  const { ownHooksTracker } = await import('../src/server/http.ts');
+  const repo = (id: string) => ({ id, path: `/repos/${id}`, name: id, remoteUrl: null, addedAt: '' });
+  const answers: Record<string, string | null | 'slow'> = { '/repos/a': '.githooks', '/repos/b': null, '/repos/c': '.husky/_' };
+  let release!: () => void;
+  let hold: Promise<void> | null = null;
+  const check = async (p: string) => {
+    if (hold) await hold;
+    const v = answers[p];
+    if (v === 'slow') throw new Error('timed out');
+    return v ?? null;
+  };
+  let changes = 0;
+  const t = ownHooksTracker(() => changes++, { ttlMs: 0, check });
+  t.get([repo('a'), repo('b')]);
+  await t.settled();
+  assert.deepEqual(t.get([repo('a'), repo('b')]), { a: '.githooks' });
+  await t.settled();
+  changes = 0;
+
+  // a times out: its flag stays, and nothing is announced
+  answers['/repos/a'] = 'slow';
+  t.get([repo('a'), repo('b')]);
+  await t.settled();
+  assert.deepEqual(t.get([repo('a'), repo('b')]), { a: '.githooks' }, 'a slow repo keeps its earlier flag');
+  await t.settled();
+  assert.equal(changes, 0);
+  answers['/repos/a'] = '.githooks';
+
+  // c is added while a refresh is running: it's checked as soon as that refresh ends, not a TTL later
+  hold = new Promise((r) => { release = () => { hold = null; r(); }; });
+  t.get([repo('a'), repo('b')]);
+  t.get([repo('a'), repo('b'), repo('c')]);
+  release();
+  await t.settled();
+  assert.deepEqual(t.get([repo('a'), repo('b'), repo('c')]), { a: '.githooks', c: '.husky/_' });
+  await t.settled();
+
+  // a removed repo drops out on the next refresh
+  t.get([repo('b'), repo('c')]);
+  await t.settled();
+  assert.deepEqual(t.get([repo('b'), repo('c')]), { c: '.husky/_' });
+  await t.settled();
 });

@@ -34,7 +34,10 @@ let hooksCache: { at: number; v: Promise<{ active: boolean; hooksPath: string | 
 function globalHooksPath() {
   // concurrent requests share one git call (every open window refetches state at once)
   if (!hooksCache || Date.now() - hooksCache.at >= 30_000) {
-    hooksCache = { at: Date.now(), v: currentGlobalHooksPath().then((hooksPath) => ({ active: hooksPath === GLOBAL_HOOKS_DIR, hooksPath })) };
+    const v = currentGlobalHooksPath().then((hooksPath) => ({ active: hooksPath === GLOBAL_HOOKS_DIR, hooksPath }));
+    hooksCache = { at: Date.now(), v };
+    // a failed call isn't cached: the next request tries again
+    v.catch(() => { if (hooksCache?.v === v) hooksCache = null; });
   }
   return hooksCache.v;
 }
@@ -45,17 +48,21 @@ function globalHooksPath() {
  * served straight away and a stale one is refreshed in the background, a few repos at a time, one refresh at once.
  * onChange fires when the answer changes, so open windows pick it up.
  */
-export function ownHooksTracker(onChange: () => void, ttlMs = 30_000) {
+export function ownHooksTracker(onChange: () => void, opts: { ttlMs?: number; check?: (repoPath: string) => Promise<string | null> } = {}) {
+  const ttlMs = opts.ttlMs ?? 30_000;
+  const check = opts.check ?? repoOwnHooksPath;
   let known: Record<string, string> = {};
   let checked = new Set<string>();
   let at = 0;
   let refreshing: Promise<void> | null = null;
+  let covering = new Set<string>();    // repo ids the running refresh checks
+  let waiting: Repo[] | null = null;   // a repo list with ids the running refresh doesn't cover
   const gate = new Semaphore(4);
   const refresh = async (repos: Repo[]) => {
     const found = await Promise.all(repos.map(async (r) => {
       const release = await gate.acquire();
       // a repo that didn't answer in time keeps what was known about it
-      try { return [r.id, await repoOwnHooksPath(r.path)] as const; } catch { return [r.id, known[r.id] ?? null] as const; } finally { release(); }
+      try { return [r.id, await check(r.path)] as const; } catch { return [r.id, known[r.id] ?? null] as const; } finally { release(); }
     }));
     const next: Record<string, string> = {};
     for (const [id, p] of found) if (p) next[id] = p;
@@ -65,14 +72,24 @@ export function ownHooksTracker(onChange: () => void, ttlMs = 30_000) {
     at = Date.now();
     if (changed) onChange();
   };
+  const start = (repos: Repo[]) => {
+    covering = new Set(repos.map((r) => r.id));
+    refreshing = refresh(repos).catch(() => {}).finally(() => {
+      refreshing = null;
+      const next = waiting;
+      waiting = null;
+      if (next) start(next);
+    });
+  };
   return {
     get(repos: Repo[]): Record<string, string> {
-      const stale = Date.now() - at >= ttlMs || repos.some((r) => !checked.has(r.id));
-      if (stale && !refreshing) refreshing = refresh(repos).catch(() => {}).finally(() => { refreshing = null; });
+      const unseen = repos.some((r) => !checked.has(r.id));
+      if (refreshing) { if (repos.some((r) => !covering.has(r.id))) waiting = repos; }
+      else if (unseen || Date.now() - at >= ttlMs) start(repos);
       return known;
     },
-    /** Resolves when the refresh in progress, if any, is done (for tests). */
-    settled: () => refreshing ?? Promise.resolve(),
+    /** Resolves once no refresh is running or waiting (for tests). */
+    async settled() { while (refreshing) await refreshing; },
   };
 }
 
