@@ -9,6 +9,7 @@ import { exec } from './util.ts';
 export interface PrInfo {
   number: number; title: string; body: string; url: string; baseRefName: string; headRefName: string; headRefOid: string;
   isDraft: boolean; createdAt?: string;
+  account?: string;   // the signed-in account that found it, and that PuRR comments as
 }
 /** An open PR plus where it lives, from an account's PR list. */
 export interface OpenPr extends PrInfo { repo: string; account: string }   // repo: "owner/name", lower-case
@@ -18,7 +19,7 @@ const FIELDS = 'number,title,body,url,baseRefName,headRefName,headRefOid,isDraft
 async function gh(cwd: string, args: string[], opts: { input?: string; account?: string } = {}) {
   try {
     let env: NodeJS.ProcessEnv | undefined;
-    if (opts.account) {
+    if (opts.account && multiAccount) {   // an older gh has one login and no --user: just use it
       const token = await tokenFor(opts.account);
       if (!token) return null;
       env = { ...process.env, GH_TOKEN: token };
@@ -36,6 +37,19 @@ async function tokenFor(account: string): Promise<string | null> {
 }
 
 let accountsCache: { at: number; list: string[] } | null = null;
+/** Whether gh lists accounts the multi-account way (gh 2.40+), so each can be picked with `gh auth token --user`. */
+let multiAccount = true;
+
+/** Accounts in `gh auth status` output, the active one first. Older gh says "Logged in to github.com as <name>". */
+export function parseGhStatus(text: string): { accounts: string[]; multi: boolean } {
+  const found = [...text.matchAll(/Logged in to github\.com account (\S+)[^\n]*\n\s*- Active account: (true|false)/g)];
+  if (found.length) {
+    return { accounts: found.sort((a, b) => (a[2] === 'true' ? -1 : 0) - (b[2] === 'true' ? -1 : 0)).map((m) => m[1]), multi: true };
+  }
+  const old = text.match(/Logged in to github\.com (?:as|account) (\S+)/);
+  return { accounts: old ? [old[1]] : [], multi: false };
+}
+
 /** Until then, a sign-in may be finishing in Terminal: look again every few seconds instead of every five minutes. */
 let signInUntil = 0;
 /** github.com accounts signed in to gh, the active one first. */
@@ -45,9 +59,10 @@ export async function ghAccounts(): Promise<string[]> {
   let list: string[] = [];
   try {
     const r = await exec('gh', ['auth', 'status', '--hostname', 'github.com'], { timeoutMs: 15_000 });
-    const text = r.stdout + r.stderr;
-    const found = [...text.matchAll(/Logged in to github\.com account (\S+)[^\n]*\n\s*- Active account: (true|false)/g)];
-    list = found.sort((a, b) => (a[2] === 'true' ? -1 : 0) - (b[2] === 'true' ? -1 : 0)).map((m) => m[1]);
+    const parsed = parseGhStatus(r.stdout + r.stderr);
+    multiAccount = parsed.multi;
+    // signed in (exit 0) in words PuRR doesn't know: still use gh, as its default login
+    list = parsed.accounts.length || r.code !== 0 ? parsed.accounts : ['github.com'];
   } catch { /* gh missing */ }
   accountsCache = { at: Date.now(), list };
   return list;
@@ -77,7 +92,7 @@ export async function prForBranch(repoPath: string, branch: string): Promise<PrI
     if (!out) continue;
     try {
       const pr = JSON.parse(out) as PrInfo & { state?: string };
-      if (pr.state === 'OPEN') return pr;   // gh also returns a branch's closed or merged PR
+      if (pr.state === 'OPEN') return { ...pr, account };   // gh also returns a branch's closed or merged PR
       return null;
     } catch { /* try the next account */ }
   }
@@ -105,10 +120,12 @@ export async function openPrsForAllAccounts(): Promise<OpenPr[] | null> {
   return all;
 }
 
-export async function commentOnPr(repoPath: string, number: number, body: string): Promise<boolean> {
-  // post as whichever signed-in account can see the PR (the one that found it)
-  for (const account of await ghAccounts()) {
-    if ((await gh(repoPath, ['pr', 'comment', String(number), '--body-file', '-'], { input: body, account })) !== null) return true;
-  }
-  return false;
+/**
+ * Posts as the account that found the PR (else the active one), once: trying the next account after a failure could
+ * post the comment twice, since a timed-out `gh pr comment` may still have posted it.
+ */
+export async function commentOnPr(repoPath: string, number: number, body: string, account?: string | null): Promise<boolean> {
+  const as = account || (await ghAccounts())[0];
+  if (!as) return false;
+  return (await gh(repoPath, ['pr', 'comment', String(number), '--body-file', '-'], { input: body, account: as })) !== null;
 }

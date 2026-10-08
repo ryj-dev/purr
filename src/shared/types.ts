@@ -149,7 +149,7 @@ export interface Run {
   headSha: string | null;
   mode: 'staged' | 'range';
   workdir: string | null;     // checkout the Claude sessions ran in (cd here to `claude --resume` one)
-  pr: { number: number; title: string; body: string; url: string } | null;
+  pr: { number: number; title: string; body: string; url: string; account?: string } | null;   // account: the gh login that found it
   status: RunStatus;
   queuedAt: string;
   startedAt: string | null;

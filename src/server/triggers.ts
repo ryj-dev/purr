@@ -33,6 +33,7 @@ export class PostPushWatcher {
   private polling = false;
   private lastDiscovery = 0;
   private startedAt = Date.now();
+  private lastFetch = 0;
   private deps: WatcherDeps;
   /** push confirmations still waiting for the remote */
   private confirming = new Set<Promise<void>>();
@@ -81,6 +82,8 @@ export class PostPushWatcher {
               repoPath: body.repoPath, branch: body.branch });
             return;
           }
+          // post-push off for this clone: leave the commit to the poller, which may review it through another clone
+          if (!this.mgr.resolveFlow('post-push', repo.id)) return;
           const key = this.handledKey(repo, body.branch);
           if (this.lastSeen.get(key) === body.sha) return;   // already scheduled from another clone
           this.lastSeen.set(key, body.sha);
@@ -121,8 +124,10 @@ export class PostPushWatcher {
   }
 
   /**
-   * One poll. A PR's first sighting only counts if it was opened after the service started (within the last 10
-   * minutes): otherwise discovering a repo, or restarting PuRR, would review every PR that's already open.
+   * One poll. A PR's first sighting only counts if it was opened since the service started and since the last poll
+   * that got an answer: otherwise discovering a repo, or restarting PuRR, would review every PR that's already open.
+   * Measured from the last good poll rather than a fixed window, so a long poll interval or a gh outage doesn't
+   * lose a PR opened in between.
    */
   async poll() {
     if (Date.now() - this.lastDiscovery > 10 * 60_000) {
@@ -131,6 +136,9 @@ export class PostPushWatcher {
     }
     const prs = await this.deps.fetchPrs();
     if (!prs) return;
+    // PRs opened before the last good poll were there to be seen then (two minutes' slack for GitHub's clock)
+    const since = Math.max(this.startedAt, this.lastFetch - 2 * 60_000);
+    this.lastFetch = Date.now();
     const clones = await this.clonesByRepo();
     for (const pr of prs) {
       const repo = clones.get(pr.repo)?.[0];
@@ -143,7 +151,7 @@ export class PostPushWatcher {
       if (this.lastSeen.get(handled) === pr.headRefOid) continue;   // the push hook (from any clone) has it
       if (seen === undefined) {
         const opened = pr.createdAt ? Date.parse(pr.createdAt) : 0;
-        if (!(opened >= this.startedAt && Date.now() - opened < 10 * 60_000)) continue;
+        if (!(opened >= since)) continue;
       }
       this.lastSeen.set(handled, pr.headRefOid);
       this.mgr.schedulePostPush({

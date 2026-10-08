@@ -79,10 +79,6 @@ export function exec(cmd: string, args: string[], opts: {
   });
 }
 
-export async function which(bin: string): Promise<boolean> {
-  try { return (await exec('/usr/bin/which', [bin])).code === 0; } catch { return false; }
-}
-
 export class Semaphore {
   private waiters: Array<() => void> = [];
   private active = 0;

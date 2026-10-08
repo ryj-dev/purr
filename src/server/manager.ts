@@ -74,7 +74,7 @@ export class RunManager {
     const run: Run = {
       id: newId('run-'), flowId: flow.id, flowName: flow.name, flow: structuredClone(flow), trigger: req.trigger,
       repoId: repo?.id ?? null, repoPath: req.repoPath, branch: req.branch ?? null, baseSha: req.base ?? null, headSha: req.head ?? null,
-      mode: req.mode, pr: req.pr ? { number: req.pr.number, title: req.pr.title, body: req.pr.body, url: req.pr.url } : null,
+      mode: req.mode, pr: req.pr ? { number: req.pr.number, title: req.pr.title, body: req.pr.body, url: req.pr.url, account: req.pr.account } : null,
       workdir: null, status: 'queued', queuedAt: now(), startedAt: null, finishedAt: null, counts: { must_fix: 0, consider: 0, minor: 0 },
       error: errors.length ? `Flow "${flow.name}" is invalid: ${errors.map((e) => e.message).join('; ')}` : null,
     };
@@ -290,7 +290,7 @@ export class RunManager {
       else await notify(`purr · ${where}`, msg);
     }
     if (outputs.some((o) => o.postPrComment) && run.pr && counted.length) {
-      await commentOnPr(run.repoPath, run.pr.number, renderComment(run, counted));
+      await commentOnPr(run.repoPath, run.pr.number, renderComment(run, counted), run.pr.account);
     }
   }
 }

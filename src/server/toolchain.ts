@@ -195,7 +195,7 @@ export function signInCommand(name: 'claude' | 'gh', binPath: string): string {
 export const HOMEBREW_INSTALL = '/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"';
 
 async function inTerminal(cmd: string): Promise<void> {
-  const r = await exec('/usr/bin/osascript', [
+  const r = await exec(process.env.PURR_OSASCRIPT || '/usr/bin/osascript', [
     '-e', 'tell application "Terminal"', '-e', 'activate', '-e', `do script ${asString(cmd)}`, '-e', 'end tell',
   ], { timeoutMs: 20_000 });
   if (r.code !== 0) throw new Error(`Couldn't open Terminal: ${lastLine(r.stderr)}. Run this yourself: ${cmd}`);
