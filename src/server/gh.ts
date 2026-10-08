@@ -64,6 +64,7 @@ export async function ghAccounts(): Promise<string[]> {
     if (r.code === 0 && parsed.accounts.length) multiAccount = parsed.multi;
     // signed in (exit 0) in words PuRR doesn't know: still use gh, as its default login
     list = parsed.accounts.length || r.code !== 0 ? parsed.accounts : ['github.com'];
+    if (r.code === 0 && !parsed.accounts.length) multiAccount = false;   // that placeholder has no token: use gh's own login
   } catch { /* gh missing */ }
   accountsCache = { at: Date.now(), list };
   return list;
@@ -103,8 +104,11 @@ export async function prForBranch(repoPath: string, branch: string): Promise<PrI
 const OPEN_PRS = `query($n: Int!) { viewer { login pullRequests(first: $n, states: OPEN, orderBy: { field: UPDATED_AT, direction: DESC }) {
   nodes { number title body url isDraft createdAt baseRefName headRefName headRefOid repository { nameWithOwner } } } } }`;
 
-/** Open PRs, and the accounts whose query got an answer (an account that failed this time may have PRs it didn't list). */
-export interface PrFetch { prs: OpenPr[]; answered: string[] }
+/**
+ * Open PRs; the accounts whose query got an answer (one that failed this time may have PRs it didn't list); and every
+ * account asked (default: those that answered).
+ */
+export interface PrFetch { prs: OpenPr[]; answered: string[]; accounts?: string[] }
 
 /** Every open PR authored by any signed-in account: one GraphQL call per account. null if gh isn't usable at all. */
 export async function openPrsForAllAccounts(): Promise<PrFetch | null> {
@@ -122,7 +126,7 @@ export async function openPrsForAllAccounts(): Promise<PrFetch | null> {
       answered.push(account);
     } catch { /* skip this account this time */ }
   }
-  return { prs, answered };
+  return { prs, answered, accounts };
 }
 
 /**

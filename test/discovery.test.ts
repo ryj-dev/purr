@@ -295,3 +295,51 @@ test('a push is reviewed by the hook when gh is signed out or reviews aren\'t PR
   assert.deepEqual(scheduled.map((r) => r.head), ['h1', 'h2'], 'the PR then opened on h2 is not reviewed twice');
   db.close();
 });
+
+test('a draft marked ready, a push made while post-push was off, and an account failing since startup all still get reviewed', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
+  const db = openDb(); ensureDefaults(db);
+  const mgr = new RunManager(db, new ClaudeRunner(db));
+  const scheduled: string[] = [];
+  mgr.schedulePostPush = (req: RunRequest) => { scheduled.push(req.head!); };
+  const { root, a } = projectsFolder();
+  sh(a, 'remote', 'add', 'origin', 'https://github.com/work-org/app-g.git');
+  db.setSettings({ ...db.getSettings(), projectFolders: [root] });
+  let prs: OpenPr[] = [];
+  let answered = ['me'];
+  const watcher = new PostPushWatcher(db, mgr, { fetchPrs: async () => ({ prs, answered, accounts: ['me', 'work'] }) });
+  const pr = (n: number, sha: string, over: Partial<OpenPr> = {}): OpenPr => ({ repo: 'work-org/app-g', number: n, headRefOid: sha,
+    headRefName: `b${n}`, baseRefName: 'main', title: 't', body: '', url: 'u', isDraft: false, account: 'me',
+    createdAt: new Date().toISOString(), ...over });
+  try {
+    await watcher.poll();                          // work's query fails from the start
+    t.mock.timers.tick(60_000);
+    prs = [pr(1, 'd1', { isDraft: true })];
+    await watcher.poll();
+    assert.deepEqual(scheduled, [], 'a draft is not reviewed');
+    t.mock.timers.tick(60_000);
+    prs = [pr(1, 'd1')];                           // marked ready, same head
+    await watcher.poll();
+    assert.deepEqual(scheduled, ['d1'], 'marked ready: reviewed');
+
+    // a PR opened long ago, first seen while post-push is off for every clone, is pushed to once it's back on
+    const id = db.getRepoByPath(a)!.id;
+    const old = new Date(Date.now() - 86_400_000).toISOString();
+    db.setTrigger({ trigger: 'post-push', repoId: id, flowId: null });
+    prs = [pr(1, 'd1'), pr(3, 'x1', { createdAt: old })];
+    await watcher.poll();
+    db.deleteTrigger('post-push', id);
+    prs = [pr(1, 'd1'), pr(3, 'x2', { createdAt: old })];
+    await watcher.poll();
+    assert.deepEqual(scheduled, ['d1', 'x2'], 'a new head on a PR it already knew, not an old PR seen for the first time');
+    prs = [pr(1, 'd3'), pr(3, 'x2', { createdAt: old })];
+    await watcher.poll();
+    assert.deepEqual(scheduled, ['d1', 'x2', 'd3']);
+
+    t.mock.timers.tick(60_000);
+    answered = ['me', 'work'];                     // work answers at last, with a PR it opened after startup
+    prs = [pr(1, 'd3'), pr(2, 'w1', { account: 'work', createdAt: new Date(Date.now() - 90_000).toISOString() })];
+    await watcher.poll();
+    assert.deepEqual(scheduled, ['d1', 'x2', 'd3', 'w1'], 'listed since startup: its PRs from since then are new');
+  } finally { t.mock.timers.reset(); db.close(); }
+});
