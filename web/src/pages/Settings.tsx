@@ -7,6 +7,7 @@ import { UsageMeter } from '../components/UsageMeter.tsx';
 import { fmtTime } from '../util.ts';
 import { PageHeader } from '../components/ui.tsx';
 import { numFieldStep } from '../numText.ts';
+import { cliAction } from '../../../src/shared/cliLink.ts';
 import { Check, Save, SquareTerminal } from 'lucide-react';
 
 function DesktopCard() {
@@ -25,6 +26,7 @@ function DesktopCard() {
     window.addEventListener('focus', loadCli);
     return () => window.removeEventListener('focus', loadCli);
   }, [loadCli]);
+  const act = cliState ? cliAction(cliState) : null;
   const cli = async () => {
     const r = await bridge.installCli();
     toast(r.message, r.ok ? 'ok' : 'error');
@@ -46,17 +48,14 @@ function DesktopCard() {
         <div>
           <div className="t">Command line tool</div>
           <div className="d">Links <code>~/.local/bin/purr</code> to this app, so you can use <code>purr run</code> and <code>purr hooks</code> from a terminal.
-            {cliState?.state === 'other' && <> It points at {cliState.purrCopy ? 'another copy of PuRR' : 'something else'} now: <code>{cliState.target}</code>.</>}
-            {cliState?.state === 'installed' && !cliState.onPath && <> Add <code>~/.local/bin</code> to your PATH to use it.</>}</div>
+            {act?.note && <> {act.note}</>}</div>
         </div>
-        {cliState?.state === 'installed' ? (
-          <span className="chip ok" title={`${cliState.link} → ${cliState.target}`}><Check size={12} />Installed</span>
-        ) : cliState?.state === 'blocked' ? (
-          <span className="chip warn" title={`${cliState.link} is a file, not a link: remove it to install`}>Blocked by a file</span>
+        {act?.kind === 'done' ? (
+          <span className="chip ok" title={`${cliState!.link} → ${cliState!.target}`}><Check size={12} />{act.button}</span>
+        ) : act?.kind === 'blocked' ? (
+          <span className="chip warn" title={act.note}>{act.button}</span>
         ) : (
-          <button onClick={cli} title={cliState?.state === 'other' ? `${cliState.link} points at ${cliState.target}` : undefined}>
-            <SquareTerminal size={13} />{cliState?.state === 'other' ? (cliState.purrCopy ? <>Point <code>purr</code> at this app</> : 'Replace the link') : <>Install <code>purr</code></>}
-          </button>
+          <button onClick={cli}><SquareTerminal size={13} />{act?.button ?? 'Install purr'}</button>
         )}
       </div>
     </div>

@@ -14,6 +14,7 @@ import {
 } from 'electron';
 import type { AppState, Run, ServerEvent } from '../src/shared/types.ts';
 import { cliStatusOf } from './cliLink.ts';
+import { cliAction } from '../src/shared/cliLink.ts';
 
 const PURR_HOME = process.env.PURR_HOME || join(homedir(), '.purr');
 const LOG = join(PURR_HOME, 'logs', 'daemon.log');
@@ -338,8 +339,8 @@ function updateTray() {
       click: (item) => { setLoginItem(item.checked); updateTray(); },
     },
     { type: 'separator' },
-    cliStatus().state === 'installed'
-      ? { label: 'Command line tool installed', enabled: false }
+    cliAction(cliStatus()).kind === 'done'
+      ? { label: cliAction(cliStatus()).tray, enabled: false }
       : { label: 'Install command line tool…', click: async () => { const r = installCli(); updateTray(); dialog.showMessageBox({ message: r.ok ? 'The purr command line tool is installed' : 'Couldn\'t install the command line tool', detail: r.message }); } },
     { label: mode === 'external' ? 'Service: started outside the app' : 'Restart service', enabled: mode !== 'external', click: () => restartService() },
     { label: 'Open service log', click: () => shell.openPath(LOG) },
@@ -453,7 +454,7 @@ if (!app.requestSingleInstanceLock()) {
     const icon = nativeImage.createFromPath(TRAY_ICON);
     icon.setTemplateImage(true);
     tray = new Tray(icon);
-    tray.on('click', () => tray?.popUpContextMenu());
+    tray.on('click', () => { updateTray(); tray?.popUpContextMenu(); });   // fresh: the CLI link may have changed
     updateTray();
 
     appLog('ready');
