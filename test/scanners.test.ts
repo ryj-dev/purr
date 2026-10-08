@@ -2,7 +2,7 @@
 import { FAKE_SECRET, sh, tempRepo } from './helpers.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { Cancelled, isDockerfile, limits, runScanner } from '../src/server/scanners.ts';
@@ -276,9 +276,33 @@ test('osv-scanner: only vulnerabilities new on this change, an empty file is fin
     assert.match(m.state.incomplete![0].reason, /osv-scanner failed \(exit 2\)/);
     assert.deepEqual(m.findings.map((f) => [f.file, f.source.rule, f.severity]), [['package-lock.json', 'GHSA-VULN-B', 'must_fix']],
       'still a must-fix, so the pre-push gate still blocks');
+    // go.mod on its own: start a fresh log, so an earlier case's go.mod can't answer for this one
+    rmSync(join(t.dir, 'osv.files'), { force: true });
     const go = await staged({ 'go.mod': 'module x\n\nrequire example.com/y v1.0.0\n' });
     assert.equal((await runScanner('osv', 'o', go.files, go.change)).state.state, 'ran');
-    assert.ok(readFileSync(join(t.dir, 'osv.files'), 'utf8').split('\n').some((l) => l.endsWith('/go.mod')), 'go.mod is read (osv can\'t parse go.sum)');
+    const read = readFileSync(join(t.dir, 'osv.files'), 'utf8').trim().split('\n');
+    assert.equal(read.length, 1, read.join('\n'));
+    assert.ok(read[0].endsWith('/go.mod'), 'go.mod is read (osv can\'t parse go.sum)');
+  } finally { t.restore(); }
+});
+
+test("osv-scanner can't read the base branch's lockfile: new can't be told from old, so that file is unchecked, saying why", async () => {
+  const lock = (marks: string) => `{\n  "name": "app",\n  "dependencies": {\n    "lodash": "4.17.0"\n  }\n}\n// ${marks}\n`;
+  const t = fakeTools({ 'osv-scanner': OSV });
+  try {
+    // the only lockfile: the scan fails
+    const one = await staged({ 'package-lock.json': lock('VULN-B') }, { 'package-lock.json': 'EXIT2\n' });
+    const r = await runScanner('osv', 'o', one.files, one.change);
+    assert.equal(r.state.state, 'failed');
+    assert.match(r.state.error ?? '', /base branch/);
+    // beside a second lockfile osv reads on both sides: partial, the unread one listed with the base branch named
+    const two = await staged({ 'package-lock.json': lock('VULN-B'), 'sub/package-lock.json': lock('VULN-A VULN-B') },
+      { 'package-lock.json': 'EXIT2\n', 'sub/package-lock.json': lock('VULN-A') });
+    const x = await runScanner('osv', 'o', two.files, two.change);
+    assert.equal(x.state.state, 'partial');
+    assert.deepEqual(x.state.incomplete?.map((i) => i.file), ['package-lock.json']);
+    assert.match(x.state.incomplete![0].reason, /base branch/);
+    assert.deepEqual(x.findings.map((f) => [f.file, f.source.rule]), [['sub/package-lock.json', 'GHSA-VULN-B']], 'the readable one is still checked');
   } finally { t.restore(); }
 });
 
@@ -455,4 +479,33 @@ test('the real actionlint accepts PuRR\'s flags and raises a workflow error on a
   assert.equal(r.state.state, 'ran', JSON.stringify(r.state));
   // actionlint puts a `needs:` error on the job's own line
   assert.ok(r.findings.some((f) => f.source.rule === 'job-needs' && f.line === 3), JSON.stringify(r.findings));
+});
+
+test('a review cancelled mid-scan: the scanner block ends cancelled, not failed, and the ledger closes nothing', async () => {
+  const { executeFlow } = await import('../src/server/engine/executor.ts');
+  const { completeBlocks } = await import('../src/server/manager.ts');
+  const { applyLedger } = await import('../src/server/ledger.ts');
+  const { openDb } = await import('../src/server/db.ts');
+  const { change, files, repo } = await staged({ 'a/Dockerfile': 'FROM a\n', 'b/Dockerfile': 'FROM b\n' });
+  const t = fakeTools({ hadolint: `for a; do f="$a"; done\necho "$f" >> "$D/ran"\nsleep 5\necho '[]'` });
+  const db = openDb(join(mkdtempSync(join(process.env.TMPDIR!, 'purr-db-')), 'purr.db'));
+  try {
+    const flow = { id: 'f', name: 'scan', blocks: [{ id: 'scan-hadolint', type: 'scanner', label: 'hadolint', position: { x: 0, y: 0 }, config: { scanner: 'hadolint' } }],
+      edges: [] } as any;
+    const run = { id: 'r-cancel', repoId: 'r1', branch: 'feat', flowId: 'f', trigger: 'post-push', mode: 'staged' } as any;
+    const ac = new AbortController();
+    const started = setInterval(() => { if (existsSync(join(t.dir, 'ran'))) { clearInterval(started); ac.abort(); } }, 20);
+    const t0 = Date.now();
+    const result = await executeFlow({ run, flow, change, files, cwd: repo }, { claude: {} as any, signal: ac.signal, onBlock: () => {} });
+    assert.ok(Date.now() - t0 < 4_000, `stopped promptly (${Date.now() - t0}ms)`);
+    assert.equal(result.blocks.get('scan-hadolint')?.status, 'cancelled');
+    assert.deepEqual(result.failedBlocks, [], 'cancelled is not failed');
+    // an open finding of that block stays open: a cancelled scan says nothing about what's fixed
+    db.putLedger({ fingerprint: 'df', repoId: 'r1', branch: 'feat', state: 'open', flowId: 'f', firstRunId: 'r0', lastRunId: 'r0', updatedAt: 'x',
+      finding: { id: 'df', file: 'a/Dockerfile', line: 1, category: 'lint', severity: 'consider', title: 't', scenario: 's', source: { blockId: 'scan-hadolint', kind: 'scanner' } } });
+    const checked = completeBlocks(flow.blocks, result.blocks);
+    assert.equal(checked.complete.has('scan-hadolint'), false);
+    applyLedger(db, { ...run, mode: 'range' }, result.findings, checked.complete, checked.unchecked);
+    assert.equal(db.getLedger('df', 'r1')?.state, 'open');
+  } finally { t.restore(); db.close(); }
 });
