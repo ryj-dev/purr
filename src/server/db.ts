@@ -86,8 +86,12 @@ export function openDb(file = paths.db) {
     CREATE TABLE IF NOT EXISTS ledger (fingerprint TEXT NOT NULL, repo_id TEXT NOT NULL, branch TEXT, state TEXT NOT NULL,
       data TEXT NOT NULL, first_run_id TEXT NOT NULL, last_run_id TEXT NOT NULL, updated_at TEXT NOT NULL,
       PRIMARY KEY (fingerprint, repo_id));
-    CREATE TABLE IF NOT EXISTS push_outcomes (sha TEXT PRIMARY KEY, data TEXT NOT NULL, at TEXT NOT NULL);
   `);
+  // one row per commit, repo and branch: the same commit can go to two branches with different fates
+  const cols = (db.prepare('PRAGMA table_info(push_outcomes)').all() as { name: string }[]).map((c) => c.name);
+  if (cols.length && !cols.includes('branch')) db.exec('DROP TABLE push_outcomes');   // an early shape; only notes in flight
+  db.exec(`CREATE TABLE IF NOT EXISTS push_outcomes (sha TEXT NOT NULL, repo_path TEXT NOT NULL, branch TEXT NOT NULL, data TEXT NOT NULL,
+    at TEXT NOT NULL, PRIMARY KEY (sha, repo_path, branch))`);
   try { db.exec('ALTER TABLE ledger ADD COLUMN flow_id TEXT'); } catch { /* already there */ }
 
   const kvGet = <T>(key: string, dflt: T): T => {
@@ -240,35 +244,37 @@ export function openDb(file = paths.db) {
     /** Best effort: losing the note never costs a review (the callers are mid-way through scheduling one). */
     setPushOutcome: (o: Omit<PushOutcome, 'at'>) => {
       try {
-        db.prepare('INSERT INTO push_outcomes (sha, data, at) VALUES (?, ?, ?) ON CONFLICT(sha) DO UPDATE SET data = excluded.data, at = excluded.at')
-          .run(o.sha.toLowerCase(), JSON.stringify(o), now());
+        db.prepare(`INSERT INTO push_outcomes (sha, repo_path, branch, data, at) VALUES (?, ?, ?, ?, ?)
+          ON CONFLICT(sha, repo_path, branch) DO UPDATE SET data = excluded.data, at = excluded.at`)
+          .run(o.sha.toLowerCase(), o.repoPath, o.branch ?? '', JSON.stringify(o), now());
         db.prepare('DELETE FROM push_outcomes WHERE at < ?').run(new Date(Date.now() - 30 * 86_400_000).toISOString());
       } catch { /* the database is busy: --wait then waits out its timeout instead of stopping early */ }
     },
+    /** The commit has its review now: whatever was noted about its pushes no longer matters. */
     clearPushOutcome: (sha: string) => { try { db.prepare('DELETE FROM push_outcomes WHERE sha = ?').run(sha.toLowerCase()); } catch { /* as above */ } },
-    /** The newest outcome for a commit (by sha prefix) pushed from one of `repoPaths`: another repo's commit can share a short prefix. */
-    getPushOutcome: (shaPrefix: string, repoPaths: string[]): PushOutcome | null => {
+    /**
+     * What was noted about a commit's pushes (by sha prefix), newest first, from `repoPaths` only: another repo's
+     * commit can share a short prefix. One per branch it went to.
+     */
+    getPushOutcomes: (shaPrefix: string, repoPaths: string[]): PushOutcome[] => {
       const hex = shaPrefix.replace(/[^0-9a-f]/gi, '').toLowerCase();
-      if (!hex) return null;
+      if (!hex || !repoPaths.length) return [];
       // a range on the key rather than LIKE, so the primary key index is used ('g' sorts after every hex digit)
-      const rows = db.prepare('SELECT data, at FROM push_outcomes WHERE sha >= ? AND sha < ? ORDER BY at DESC LIMIT 50').all(hex, `${hex}g`) as
-        { data: string; at: string }[];
-      const paths = new Set(repoPaths);
-      for (const r of rows) {
-        const o = { ...JSON.parse(r.data), at: r.at } as PushOutcome;
-        if (paths.has(o.repoPath)) return o;
-      }
-      return null;
+      const rows = db.prepare(`SELECT data, at FROM push_outcomes WHERE sha >= ? AND sha < ? AND repo_path IN (${repoPaths.map(() => '?').join(', ')})
+        ORDER BY at DESC LIMIT 50`).all(hex, `${hex}g`, ...repoPaths) as { data: string; at: string }[];
+      return rows.map((r) => ({ ...JSON.parse(r.data), at: r.at }));
     },
     /** On start: pushes still pending lost their review when the service stopped. */
     expirePendingPushes: () => {
-      const rows = db.prepare('SELECT sha, data FROM push_outcomes').all() as { sha: string; data: string }[];
-      for (const r of rows) {
-        const o = JSON.parse(r.data) as PushOutcome;
-        if (o.kind !== 'pending') continue;
-        db.prepare('UPDATE push_outcomes SET data = ? WHERE sha = ?')
-          .run(JSON.stringify({ ...o, kind: 'skipped', reason: 'PuRR stopped before reviewing it; push again or run purr run' }), r.sha);
-      }
+      try {
+        const rows = db.prepare('SELECT sha, repo_path, branch, data FROM push_outcomes').all() as { sha: string; repo_path: string; branch: string; data: string }[];
+        for (const r of rows) {
+          const o = JSON.parse(r.data) as PushOutcome;
+          if (o.kind !== 'pending') continue;
+          db.prepare('UPDATE push_outcomes SET data = ? WHERE sha = ? AND repo_path = ? AND branch = ?')
+            .run(JSON.stringify({ ...o, kind: 'skipped', reason: 'PuRR stopped before reviewing it; push again or run purr run' }), r.sha, r.repo_path, r.branch);
+        }
+      } catch { /* as above */ }
     },
 
     // sessions (for the daily cap and audit)

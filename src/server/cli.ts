@@ -129,8 +129,6 @@ async function hook(name: HookName) {
 
 async function daemon() {
   const { db, mgr } = setup();
-  const orphans = db.failOrphanRuns();
-  db.expirePendingPushes();
   if (!process.env.PURR_NO_GLOBAL_HOOKS) {
     try {
       const g = await installGlobalHooks();
@@ -148,6 +146,10 @@ async function daemon() {
   });
   server.on('listening', () => {
     writePidFile();
+    // only the daemon that got the port tidies up after the last one: a second `purr daemon` started by mistake
+    // must not fail the live one's runs or give up on the pushes it's about to review
+    const orphans = db.failOrphanRuns();
+    db.expirePendingPushes();
     console.log(`purr daemon ${orphans ? `(marked ${orphans} interrupted run(s) failed) ` : ''}listening on http://127.0.0.1:${port}`);
     watcher.start();
   });
@@ -306,8 +308,10 @@ async function findingsCmd(): Promise<number> {
       if (!st.done) { console.error(`purr: review ${run.id} is still ${run.status} after ${timeoutSec}s`); return 3; }
     } else {
       const find = () => runId ? db.getRun(runId) : db.findRuns({ ...q, limit: 1 })[0] ?? null;
-      run = wait ? (await waitForReview({ check: async () => { const r = find(); return { run: r, done: !r || isFinished(r) }; } },
-        { timeoutMs: timeoutSec * 1000 })).run : find();
+      run = wait ? (await waitForReview({ check: async () => { const r = find(); return { run: r, done: !r || isFinished(r) }; } }, {
+        timeoutMs: timeoutSec * 1000,
+        onChange: (r) => { if (r && !isFinished(r)) process.stderr.write(`${C.dim}purr: review ${r.id} is ${r.status}…${C.x}\n`); },
+      })).run : find();
       if (!run) { console.error(`purr: no review of ${runId ? `run ${runId}` : describe(q)} found (purr runs lists them)`); return 3; }
     }
     const findings = currentFindings(db, run);

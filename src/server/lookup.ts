@@ -2,7 +2,7 @@
 import { existsSync, realpathSync } from 'node:fs';
 import type { Finding, Run } from '../shared/types.ts';
 import type { DB, RunQuery } from './db.ts';
-import { githubRepo, prForBranch } from './gh.ts';
+import { type PrInfo, githubRepo, prForBranch } from './gh.ts';
 import { remoteUrl, repoRoot } from './git.ts';
 import { TERMINAL } from './manager.ts';
 
@@ -55,7 +55,7 @@ export class ReviewWatch {
   notes: string[] = [];
   private db: DB;
   private findPr: typeof prForBranch;
-  private prChecked = new Map<string, { at: number; state: 'open' | 'draft' | 'none' }>();
+  private prChecked = new Map<string, { at: number; pr: PrInfo | null }>();
   constructor(db: DB, q: RunQuery, findPr: typeof prForBranch = prForBranch) { this.db = db; this.q = q; this.findPr = findPr; }
 
   async check(): Promise<ReviewState> {
@@ -68,15 +68,24 @@ export class ReviewWatch {
       }
       if (run) return { run, done: isFinished(run) };
       const paths = (this.q.repoIds ?? []).map((id) => this.db.getRepo(id)?.path).filter((p): p is string => !!p);
-      const out = this.q.sha ? this.db.getPushOutcome(this.q.sha, paths) : null;
-      if (out?.kind === 'pending') return { run: null, done: false };
-      if (out?.nextSha) { this.follow(out.nextSha, `commit ${out.sha.slice(0, 12)} wasn't reviewed on its own: ${out.reason}`); continue; }
-      if (out?.kind === 'no-pr' && out.branch) {
-        const pr = await this.prState(out.repoPath, out.branch);
-        if (pr === 'open') return { run: null, done: false };
-        if (pr === 'draft') return { run: null, done: true, stop: `commit ${out.sha.slice(0, 12)} won't be reviewed yet: its PR is a draft (PuRR reviews it once it's marked ready)` };
+      // one note per branch the commit went to: wait while any of them may still bring a review
+      const outs = this.q.sha ? this.db.getPushOutcomes(this.q.sha, paths) : [];
+      if (outs.some((o) => o.kind === 'pending')) return { run: null, done: false };
+      const overtaken = outs.find((o) => o.nextSha);
+      if (overtaken) { this.follow(overtaken.nextSha!, `commit ${overtaken.sha.slice(0, 12)} wasn't reviewed on its own: ${overtaken.reason}`); continue; }
+      let stop: string | null = null;
+      for (const out of outs) {
+        if (out.kind !== 'no-pr' || !out.branch) continue;
+        const pr = await this.prOf(out.repoPath, out.branch);
+        if (pr && !pr.isDraft) {
+          // a PR is open now, and the poller reviews its head: this commit, or a later push that covers it
+          if (pr.headRefOid && pr.headRefOid !== out.sha) { this.follow(pr.headRefOid, `${out.branch}'s PR is at a later push now`); stop = 'follow'; break; }
+          return { run: null, done: false };
+        }
+        if (pr?.isDraft) stop ??= `commit ${out.sha.slice(0, 12)} won't be reviewed yet: its PR is a draft (PuRR reviews it once it's marked ready)`;
       }
-      if (out) return { run: null, done: true, stop: `commit ${out.sha.slice(0, 12)} won't be reviewed: ${out.reason}` };
+      if (stop === 'follow') continue;
+      if (outs.length) return { run: null, done: true, stop: stop ?? `commit ${outs[0].sha.slice(0, 12)} won't be reviewed: ${outs[0].reason}` };
       return { run: null, done: false };
     }
     return { run: null, done: true, stop: 'gave up following newer pushes' };
@@ -87,15 +96,15 @@ export class ReviewWatch {
     this.q = { ...this.q, sha, branch: null, pr: null };
   }
 
-  /** The branch's PR now: open (the poller then reviews it within a minute), a draft (never reviewed) or none. At most every 20s. */
-  private async prState(repoPath: string, branch: string): Promise<'open' | 'draft' | 'none'> {
+  /** The branch's open PR now (a draft included), or null; asked of gh at most every 20s. */
+  private async prOf(repoPath: string, branch: string): Promise<PrInfo | null> {
     const c = this.prChecked.get(branch);
-    if (c && Date.now() - c.at < 20_000) return c.state;
+    if (c && Date.now() - c.at < 20_000) return c.pr;
     const pr = await this.findPr(repoPath, branch).catch(() => null);
-    const state = !pr ? 'none' : pr.isDraft ? 'draft' : 'open';
-    this.prChecked.set(branch, { at: Date.now(), state });
-    return state;
+    this.prChecked.set(branch, { at: Date.now(), pr });
+    return pr;
   }
+
 }
 
 /** Polls until the watch is done or the timeout passes, then returns its last state. */

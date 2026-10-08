@@ -9,6 +9,8 @@ import { ReviewWatch, currentFindings, isActive, resolvedBy, sameRepoIds, waitFo
 import { applyLedger } from '../src/server/ledger.ts';
 import type { Finding, Run } from '../src/shared/types.ts';
 
+const one = (db: ReturnType<typeof openDb>, sha: string, paths: string[]) => db.getPushOutcomes(sha, paths)[0] ?? null;
+
 let n = 0;
 function fakeRun(over: Partial<Run>): Run {
   n++;
@@ -130,10 +132,23 @@ test('ReviewWatch follows a newer push that took a commit\'s place, and stops wh
   const draft = await new ReviewWatch(db, { ...q, sha: 'ffff01' }, async () => ({ number: 9, isDraft: true }) as any).check();
   assert.match(draft.stop ?? '', /draft/);
 
+  // one commit, two branches: still waiting while one push is pending, whatever became of the other
+  outcome('acac01', 'no-pr');
+  db.setPushOutcome({ sha: 'acac01', kind: 'pending', reason: 'pending', repoPath, branch: 'other' });
+  assert.deepEqual(await new ReviewWatch(db, { ...q, sha: 'acac01' }, async () => null).check(), { run: null, done: false });
+
+  // pushed S then T with no PR; the PR then opened is reviewed at T, which covers S
+  outcome('bcbc01', 'no-pr');
+  const ws = new ReviewWatch(db, { ...q, sha: 'bcbc01' }, async () => ({ number: 9, isDraft: false, headRefOid: 'bcbc02' }) as any);
+  assert.deepEqual(await ws.check(), { run: null, done: false });
+  assert.match(ws.notes[0], /PR is at a later push now; following the review of bcbc02/);
+  db.putRun(at({ id: 'rt', headSha: 'bcbc02', status: 'passed' }));
+  assert.equal((await ws.check()).run?.id, 'rt');
+
   // a restart loses what was pending
   outcome('abab01', 'pending');
   db.expirePendingPushes();
-  assert.equal(db.getPushOutcome('abab01', [repoPath])?.kind, 'skipped');
+  assert.equal(one(db, 'abab01', [repoPath])?.kind, 'skipped');
   db.close();
 });
 
@@ -188,27 +203,27 @@ test('pushes that get no review of their own say why: superseded in the debounce
   const repoPath = repo.path;
   const mgr = new RunManager(db, new ClaudeRunner(db));
   const req = (head: string) => ({ trigger: 'post-push' as const, repoPath, mode: 'range' as const, head, branch: 'feat' });
-  const kind = (sha: string) => { const o = db.getPushOutcome(sha, [repoPath]); return o && [o.kind, o.nextSha ?? null]; };
+  const kind = (sha: string) => { const o = one(db, sha, [repoPath]); return o && [o.kind, o.nextSha ?? null]; };
 
   db.setSettings({ ...db.getSettings(), debounceSec: 3600 });
   mgr.schedulePostPush(req('aaa1'));
   mgr.schedulePostPush(req('aaa2'));                 // a second push inside the debounce
   assert.deepEqual(kind('aaa1'), ['superseded', 'aaa2']);
-  assert.equal(db.getPushOutcome('aaa2', [repoPath]), null, 'the newer one is still on its way');
+  assert.equal(one(db, 'aaa2', [repoPath]), null, 'the newer one is still on its way');
 
   db.setSettings({ ...db.getSettings(), reviewsPaused: true });
   mgr.schedulePostPush(req('bbb1'));
   assert.deepEqual(kind('bbb1'), ['skipped', null]);
-  assert.match(db.getPushOutcome('bbb1', [repoPath])!.reason, /paused/);
+  assert.match(one(db, 'bbb1', [repoPath])!.reason, /paused/);
 
   db.setSettings({ ...db.getSettings(), reviewsPaused: false, debounceSec: 0 });
   db.setTrigger({ trigger: 'post-push', repoId: repo.id, flowId: null });
   mgr.schedulePostPush(req('ccc1'));
   await new Promise((r) => setTimeout(r, 20));
-  assert.match(db.getPushOutcome('ccc1', [repoPath])!.reason, /trigger is off/);
+  assert.match(one(db, 'ccc1', [repoPath])!.reason, /trigger is off/);
   db.deleteTrigger('post-push', repo.id);
 
-  const kindOf = (sha: string) => db.getPushOutcome(sha, [repoPath])?.kind ?? null;
+  const kindOf = (sha: string) => one(db, sha, [repoPath])?.kind ?? null;
   let tips: (string | null)[] = [], pr: any = null;
   const watcher = new PostPushWatcher(db, mgr, {
     lsRemote: async () => (tips.length > 1 ? tips.shift()! : tips[0]) ?? null, ghAuthed: async () => true, prForBranch: async () => pr,
@@ -232,6 +247,13 @@ test('pushes that get no review of their own say why: superseded in the debounce
   db.setSettings({ ...db.getSettings(), debounceSec: 3600 });
   await push('fff1', 'fff9', ['fff9', 'fff9', 'fff1']);
   assert.equal(kindOf('fff1'), 'pending', 'scheduled: its review is on the way');
+
+  // a hook from before `from` existed: the tip seen first stands in for it, so a push landing isn't "overtaken"
+  db.setSettings({ ...db.getSettings(), postPushPrsOnly: false });
+  await push('acd1', undefined, ['acd0', 'acd1']);
+  assert.equal(kindOf('acd1'), 'pending', 'landed and scheduled');
+  await push('acd2', undefined, ['acd2']);
+  assert.equal(kindOf('acd2'), 'pending', 'already there at first look');
 
   // post-push off here, and on in no other clone: no review is coming
   db.setTrigger({ trigger: 'post-push', repoId: repo.id, flowId: null });

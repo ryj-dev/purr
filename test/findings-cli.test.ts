@@ -74,24 +74,54 @@ test('purr findings: exit codes, usage errors, --json and purr runs', async () =
   db2.close();
   assert.equal(code(), 0, 'found by commit');
 
-  // --wait with --branch: waits for the running review, then reports it
+  // --wait with --branch or --run: waits for the running review, then reports it
   execFileSync('git', ['checkout', '-q', '-'], { cwd: repoPath });
   const db3 = openDb();
-  const live = run({ repoId: repo.id, repoPath, headSha: 'cccc000001', branch: 'live', status: 'running' });
-  db3.putRun(live);
-  db3.setRunFindings(live.id, []);
-  const waiting = new Promise<{ status: number | null; stdout: string }>((res) => {
-    const p = spawn(process.execPath, [CLI, 'findings', '--branch', 'live', '--wait', '--json', '--timeout', '30'], { cwd: repoPath });
-    let stdout = '';
+  // the child must be seen waiting before the run finishes, or this wouldn't test waiting at all
+  const waitFor = (args: string[], id: string) => new Promise<{ status: number | null; stdout: string; sawRunning: boolean }>((res) => {
+    const p = spawn(process.execPath, [CLI, 'findings', ...args, '--wait', '--json', '--timeout', '30'], { cwd: repoPath });
+    let stdout = '', sawRunning = false;
     p.stdout.on('data', (d) => { stdout += d; });
-    p.on('close', (status) => res({ status, stdout }));
+    p.stderr.on('data', (d) => {
+      if (!sawRunning && String(d).includes(`review ${id} is running`)) {
+        sawRunning = true;
+        const db = openDb();
+        db.putRun({ ...db.getRun(id)!, status: 'passed' });
+        db.close();
+      }
+    });
+    p.on('close', (status) => res({ status, stdout, sawRunning }));
   });
-  await new Promise((r) => setTimeout(r, 1500));
-  db3.putRun({ ...live, status: 'passed' });
+  for (const [args, branch] of [[['--branch', 'live'], 'live'], [['--run', 'RUN'], 'byid']] as const) {
+    const live = run({ repoId: repo.id, repoPath, headSha: 'cccc000001', branch, status: 'running' });
+    db3.putRun(live);
+    db3.setRunFindings(live.id, []);
+    const w = await waitFor(args.map((a) => a === 'RUN' ? live.id : a), live.id);
+    assert.ok(w.sawRunning, `${args[0]}: waited while it ran`);
+    assert.equal(w.status, 0);
+    assert.equal(JSON.parse(w.stdout).run.status, 'passed', 'reported once finished');
+  }
   db3.close();
-  const w = await waiting;
-  assert.equal(w.status, 0);
-  assert.equal(JSON.parse(w.stdout).run.status, 'passed', 'reported once finished, not while running');
+
+  // the text report: dismissed hidden unless --all, fixed-since marked, resolved listed
+  const t = openDb();
+  const older = run({ repoId: repo.id, repoPath, headSha: 'dddd000001', branch: 'txt' });
+  t.putRun(older);
+  t.setRunFindings(older.id, [mustFix('t1'), mustFix('t2'), mustFix('t3')]);
+  const newer = run({ repoId: repo.id, repoPath, headSha: 'dddd000002', branch: 'txt' });
+  t.putRun(newer);
+  t.setRunFindings(newer.id, []);
+  const ledger = (fp: string, state: 'dismissed' | 'fixed', last: string) => t.putLedger({ fingerprint: fp, repoId: repo.id, branch: 'txt', state,
+    flowId: 'full', finding: mustFix(fp), firstRunId: older.id, lastRunId: last, updatedAt: 'x' });
+  ledger('t1', 'dismissed', older.id);
+  ledger('t2', 'fixed', newer.id);
+  t.close();
+  const text = purr(repoPath, 'findings', '--sha', 'dddd000001').stderr;
+  assert.doesNotMatch(text, /bug t1/, 'dismissed: hidden');
+  assert.match(text, /bug t2.*\[fixed since\]/);
+  assert.match(text, /bug t3/);
+  assert.match(purr(repoPath, 'findings', '--sha', 'dddd000001', '--all').stderr, /bug t1.*\[dismissed\]/);
+  assert.match(purr(repoPath, 'findings', '--sha', 'dddd000002').stderr, /Resolved by this review[\s\S]*fixed\s+a\.ts:1\s+bug t2/);
 
   const runs = purr(repoPath, 'runs', '--branch', 'feat');
   assert.equal(runs.status, 0);
