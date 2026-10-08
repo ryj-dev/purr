@@ -99,7 +99,8 @@ export class PostPushWatcher {
           // the branch moved on before this push was seen. On top of it (a quick second push, CI, another machine):
           // that push's review covers this commit, including when git can't tell because the tip isn't local. Not
           // on top (the push was rejected, a teammate's went in instead): nothing will review it
-          if ((await this.deps.ancestry(body.repoPath, body.sha, tip)) === 'no') {
+          // (once seen on the remote it wasn't rejected: replaced by a force-push, say an amend, whose review is next)
+          if (!landed && (await this.deps.ancestry(body.repoPath, body.sha, tip)) === 'no') {
             return note('skipped', `the branch moved to ${tip.slice(0, 12)}, which doesn't include this push (was it rejected?)`);
           }
           return note('superseded', 'a newer push to the branch took its place', tip);

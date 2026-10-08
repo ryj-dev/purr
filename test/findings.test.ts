@@ -266,6 +266,10 @@ test('pushes that get no review of their own say why: superseded in the debounce
   assert.match(one(db, 'ccc1', [repoPath])!.reason, /trigger is off/);
   db.deleteTrigger('post-push', repo.id);
 
+  // what actually got scheduled, not just the note (which says pending before confirming starts)
+  const sched: string[] = [];
+  const realSchedule = mgr.schedulePostPush.bind(mgr);
+  mgr.schedulePostPush = (r: any) => { sched.push(r.head); realSchedule(r); };
   const kindOf = (sha: string) => one(db, sha, [repoPath])?.kind ?? null;
   let tips: (string | null)[] = [], pr: any = null;
   let line: 'yes' | 'no' | 'unknown' = 'unknown';
@@ -308,6 +312,19 @@ test('pushes that get no review of their own say why: superseded in the debounce
   await blip.pushIntent({ repoPath, branch: 'feat', sha: 'bcd1', from: 'bcd0' });
   await blip.settled();
   assert.equal(kindOf('bcd1'), 'pending', 'scheduled, not "never showed up"');
+  assert.ok(sched.includes('bcd1'));
+
+  // landed, then amended and force-pushed before it was scheduled: the amend's review covers it
+  line = 'no';
+  const amend = new PostPushWatcher(db, mgr, {
+    lsRemote: async () => (tips.length > 1 ? tips.shift()! : tips[0]) ?? null, ghAuthed: async () => true,
+    prForBranch: async () => { tips = ['cde2']; return pr; }, ancestry: async () => line, confirmEveryMs: 5,
+  });
+  tips = ['cde0', 'cde1'];
+  await amend.pushIntent({ repoPath, branch: 'feat', sha: 'cde1', from: 'cde0' });
+  await amend.settled();
+  assert.deepEqual(kind('cde1'), ['superseded', 'cde2']);
+  line = 'unknown';
 
   // the branch moved to something that doesn't include the push (rejected: a teammate's went in instead)
   line = 'no';
@@ -321,13 +338,16 @@ test('pushes that get no review of their own say why: superseded in the debounce
   db.setSettings({ ...db.getSettings(), debounceSec: 3600 });
   await push('fff1', 'fff9', ['fff9', 'fff9', 'fff1']);
   assert.equal(kindOf('fff1'), 'pending', 'scheduled: its review is on the way');
+  assert.ok(sched.includes('fff1'));
 
   // a hook from before `from` existed: the tip seen first stands in for it, so a push landing isn't "overtaken"
   db.setSettings({ ...db.getSettings(), postPushPrsOnly: false });
   await push('acd1', undefined, ['acd0', 'acd1']);
   assert.equal(kindOf('acd1'), 'pending', 'landed and scheduled');
+  assert.ok(sched.includes('acd1'));
   await push('acd2', undefined, ['acd2']);
   assert.equal(kindOf('acd2'), 'pending', 'already there at first look');
+  assert.ok(sched.includes('acd2'));
 
   // something going wrong while confirming the push is reported, not left pending
   const broken = new PostPushWatcher(db, mgr, { lsRemote: async () => { throw new Error('git crashed'); }, confirmMs: 60, confirmEveryMs: 10 });
