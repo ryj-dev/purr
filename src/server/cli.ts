@@ -98,7 +98,7 @@ async function hook(name: HookName) {
     const chunks: Buffer[] = [];
     for await (const c of process.stdin) chunks.push(c as Buffer);
     const refs = Buffer.concat(chunks).toString().split('\n').map((l) => l.trim().split(/\s+/)).filter((p) => p.length === 4);
-    const pushed: Array<{ branch: string; sha: string }> = [];
+    const pushed: Array<{ branch: string; sha: string; from: string | null }> = [];
     for (const [localRef, localSha, remoteRef, remoteSha] of refs) {
       if (ZERO.test(localSha) || !remoteRef.startsWith('refs/heads/')) continue; // branch deletion or tag
       const branch = remoteRef.slice('refs/heads/'.length);
@@ -110,10 +110,10 @@ async function hook(name: HookName) {
         process.stderr.write(`${C.dim}Push blocked by purr. Fix the above, dismiss a false positive in the purr UI (Findings), or skip once with PURR_SKIP=1.${C.x}\n`);
         return 1;
       }
-      pushed.push({ branch, sha: localSha });
+      pushed.push({ branch, sha: localSha, from: ZERO.test(remoteSha) ? null : remoteSha });
     }
     for (const p of pushed) {
-      const r = await daemonPost('/api/hooks/push-intent', { repoPath, branch: p.branch, sha: p.sha, remote });
+      const r = await daemonPost('/api/hooks/push-intent', { repoPath, branch: p.branch, sha: p.sha, from: p.from, remote });
       if (r?.queued) {
         process.stderr.write(`${C.dim}purr: ${p.branch} will be reviewed once the push lands${r.prOnly ? ' (if it has an open PR)' : ''}. `
           + `For the results: purr findings --sha ${p.sha.slice(0, 12)} --wait${C.x}\n`);
@@ -130,6 +130,7 @@ async function hook(name: HookName) {
 async function daemon() {
   const { db, mgr } = setup();
   const orphans = db.failOrphanRuns();
+  db.expirePendingPushes();
   if (!process.env.PURR_NO_GLOBAL_HOOKS) {
     try {
       const g = await installGlobalHooks();

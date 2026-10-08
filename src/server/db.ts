@@ -55,11 +55,12 @@ export interface RunQuery {
 
 /**
  * Why a pushed commit got no review of its own: its branch had no open PR (it gets one once a PR is opened), a newer
- * push to the branch took its place (`nextSha`, whose review covers it), or reviews were off.
+ * push to the branch took its place (`nextSha`, whose review covers it), or reviews were off. 'pending' while that
+ * isn't known yet.
  */
 export interface PushOutcome {
   sha: string;
-  kind: 'no-pr' | 'superseded' | 'skipped';
+  kind: 'pending' | 'no-pr' | 'superseded' | 'skipped';
   reason: string;
   repoPath: string;
   branch: string | null;
@@ -245,13 +246,29 @@ export function openDb(file = paths.db) {
       } catch { /* the database is busy: --wait then waits out its timeout instead of stopping early */ }
     },
     clearPushOutcome: (sha: string) => { try { db.prepare('DELETE FROM push_outcomes WHERE sha = ?').run(sha.toLowerCase()); } catch { /* as above */ } },
-    getPushOutcome: (shaPrefix: string): PushOutcome | null => {
+    /** The newest outcome for a commit (by sha prefix) pushed from one of `repoPaths`: another repo's commit can share a short prefix. */
+    getPushOutcome: (shaPrefix: string, repoPaths: string[]): PushOutcome | null => {
       const hex = shaPrefix.replace(/[^0-9a-f]/gi, '').toLowerCase();
       if (!hex) return null;
       // a range on the key rather than LIKE, so the primary key index is used ('g' sorts after every hex digit)
-      const r = db.prepare('SELECT data, at FROM push_outcomes WHERE sha >= ? AND sha < ? ORDER BY at DESC LIMIT 1').get(hex, `${hex}g`) as
-        { data: string; at: string } | undefined;
-      return r ? { ...JSON.parse(r.data), at: r.at } : null;
+      const rows = db.prepare('SELECT data, at FROM push_outcomes WHERE sha >= ? AND sha < ? ORDER BY at DESC LIMIT 50').all(hex, `${hex}g`) as
+        { data: string; at: string }[];
+      const paths = new Set(repoPaths);
+      for (const r of rows) {
+        const o = { ...JSON.parse(r.data), at: r.at } as PushOutcome;
+        if (paths.has(o.repoPath)) return o;
+      }
+      return null;
+    },
+    /** On start: pushes still pending lost their review when the service stopped. */
+    expirePendingPushes: () => {
+      const rows = db.prepare('SELECT sha, data FROM push_outcomes').all() as { sha: string; data: string }[];
+      for (const r of rows) {
+        const o = JSON.parse(r.data) as PushOutcome;
+        if (o.kind !== 'pending') continue;
+        db.prepare('UPDATE push_outcomes SET data = ? WHERE sha = ?')
+          .run(JSON.stringify({ ...o, kind: 'skipped', reason: 'PuRR stopped before reviewing it; push again or run purr run' }), r.sha);
+      }
     },
 
     // sessions (for the daily cap and audit)

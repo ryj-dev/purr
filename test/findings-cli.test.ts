@@ -1,7 +1,7 @@
 import { tempRepo } from './helpers.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { openDb } from '../src/server/db.ts';
 import { addRepo } from '../src/server/http.ts';
 import type { Finding, Run } from '../src/shared/types.ts';
@@ -38,7 +38,7 @@ test('purr findings: exit codes, usage errors, --json and purr runs', async () =
   seed('aaaa000005', {}, [mustFix('m5')]);
   db.putLedger({ fingerprint: 'm5', repoId: repo.id, branch: 'feat', state: 'dismissed', flowId: 'full', finding: mustFix('m5'),
     firstRunId: 'x', lastRunId: 'x', updatedAt: 'x' });
-  db.setPushOutcome({ sha: 'aaaa000006', kind: 'skipped', reason: 'reviews are paused', repoPath, branch: 'feat' });
+  db.setPushOutcome({ sha: 'aaaa000006', kind: 'skipped', reason: 'reviews are paused', repoPath: repo.path, branch: 'feat' });
   db.close();
 
   const code = (...a: string[]) => purr(repoPath, 'findings', ...a).status;
@@ -74,8 +74,27 @@ test('purr findings: exit codes, usage errors, --json and purr runs', async () =
   db2.close();
   assert.equal(code(), 0, 'found by commit');
 
+  // --wait with --branch: waits for the running review, then reports it
+  execFileSync('git', ['checkout', '-q', '-'], { cwd: repoPath });
+  const db3 = openDb();
+  const live = run({ repoId: repo.id, repoPath, headSha: 'cccc000001', branch: 'live', status: 'running' });
+  db3.putRun(live);
+  db3.setRunFindings(live.id, []);
+  const waiting = new Promise<{ status: number | null; stdout: string }>((res) => {
+    const p = spawn(process.execPath, [CLI, 'findings', '--branch', 'live', '--wait', '--json', '--timeout', '30'], { cwd: repoPath });
+    let stdout = '';
+    p.stdout.on('data', (d) => { stdout += d; });
+    p.on('close', (status) => res({ status, stdout }));
+  });
+  await new Promise((r) => setTimeout(r, 1500));
+  db3.putRun({ ...live, status: 'passed' });
+  db3.close();
+  const w = await waiting;
+  assert.equal(w.status, 0);
+  assert.equal(JSON.parse(w.stdout).run.status, 'passed', 'reported once finished, not while running');
+
   const runs = purr(repoPath, 'runs', '--branch', 'feat');
   assert.equal(runs.status, 0);
-  assert.equal(runs.stdout.trim().split('\n').length, 5);
+  assert.equal(runs.stdout.trim().split('\n').length, 5, runs.stdout);
   assert.equal(purr(repoPath, 'runs', '--limit', 'x').status, 4);
 });

@@ -67,7 +67,9 @@ export class ReviewWatch {
         return { run, done: false };   // the newer push's review is still in its debounce
       }
       if (run) return { run, done: isFinished(run) };
-      const out = this.q.sha ? this.db.getPushOutcome(this.q.sha) : null;
+      const paths = (this.q.repoIds ?? []).map((id) => this.db.getRepo(id)?.path).filter((p): p is string => !!p);
+      const out = this.q.sha ? this.db.getPushOutcome(this.q.sha, paths) : null;
+      if (out?.kind === 'pending') return { run: null, done: false };
       if (out?.nextSha) { this.follow(out.nextSha, `commit ${out.sha.slice(0, 12)} wasn't reviewed on its own: ${out.reason}`); continue; }
       if (out?.kind === 'no-pr' && out.branch) {
         const pr = await this.prState(out.repoPath, out.branch);
