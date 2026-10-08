@@ -56,14 +56,19 @@ export class ReviewWatch {
   private db: DB;
   private findPr: typeof prForBranch;
   private prChecked = new Map<string, { at: number; pr: PrInfo | null }>();
-  constructor(db: DB, q: RunQuery, findPr: typeof prForBranch = prForBranch) { this.db = db; this.q = q; this.findPr = findPr; }
+  private visited = new Set<string>();
+  private via: { repoPath: string; branch: string } | null = null;
+  constructor(db: DB, q: RunQuery, findPr: typeof prForBranch = prForBranch) {
+    this.db = db; this.q = q; this.findPr = findPr;
+    if (q.sha) this.visited.add(q.sha.toLowerCase());
+  }
 
   async check(): Promise<ReviewState> {
     for (let hops = 0; hops < 20; hops++) {
       const run = this.db.findRuns({ ...this.q, limit: 1 })[0] ?? null;
       if (run?.status === 'superseded') {
         const next = run.branch ? this.db.findRuns({ repoIds: this.q.repoIds, branch: run.branch, triggers: this.q.triggers, limit: 1 })[0] : null;
-        if (next?.headSha && next.id !== run.id && next.queuedAt > run.queuedAt) { this.follow(next.headSha, `review ${run.id} was superseded by a newer push`); continue; }
+        if (next?.headSha && next.id !== run.id && next.queuedAt > run.queuedAt && this.follow(next.headSha, `review ${run.id} was superseded by a newer push`)) continue;
         return { run, done: false };   // the newer push's review is still in its debounce
       }
       if (run) return { run, done: isFinished(run) };
@@ -72,7 +77,11 @@ export class ReviewWatch {
       const outs = this.q.sha ? this.db.getPushOutcomes(this.q.sha, paths) : [];
       // a newer push that took its place: follow it, whatever else is still pending
       const overtaken = outs.find((o) => o.nextSha);
-      if (overtaken) { this.follow(overtaken.nextSha!, `commit ${overtaken.sha.slice(0, 12)} wasn't reviewed on its own: ${overtaken.reason}`); continue; }
+      if (overtaken) {
+        // back to a commit already followed (pushes bouncing between two): its review is still to come, so wait
+        if (!this.follow(overtaken.nextSha!, `commit ${overtaken.sha.slice(0, 12)} wasn't reviewed on its own: ${overtaken.reason}`, overtaken)) return { run: null, done: false };
+        continue;
+      }
       if (outs.some((o) => o.kind === 'pending')) return { run: null, done: false };
       let stop: string | null = null;
       for (const out of outs) {
@@ -81,21 +90,43 @@ export class ReviewWatch {
         const pr = await this.prOf(out.repoPath, out.branch);
         if (pr && !pr.isDraft) {
           // a PR is open now, and the poller reviews its head: this commit, or a later push that covers it
-          if (pr.headRefOid && pr.headRefOid !== out.sha) { this.follow(pr.headRefOid, `${out.branch}'s PR is at a later push now`); stop = 'follow'; break; }
+          if (pr.headRefOid && pr.headRefOid !== out.sha) {
+            if (!this.follow(pr.headRefOid, `${out.branch}'s PR is at a later push now`, out)) return { run: null, done: false };
+            stop = 'follow';
+            break;
+          }
           return { run: null, done: false };
         }
         if (pr?.isDraft) stop ??= `commit ${out.sha.slice(0, 12)} won't be reviewed yet: its PR is a draft (PuRR reviews it once it's marked ready)`;
       }
       if (stop === 'follow') continue;
       if (outs.length) return { run: null, done: true, stop: stop ?? `commit ${outs[0].sha.slice(0, 12)} won't be reviewed: ${outs[0].reason}` };
+      // followed to a push no hook here reported (CI, another machine): no note says what becomes of it, so its PR does
+      if (this.via) return this.byPr(this.via);
       return { run: null, done: false };
     }
     return { run: null, done: true, stop: 'gave up following newer pushes' };
   }
 
-  private follow(sha: string, why: string) {
+  /** Moves on to `sha`'s review; false if it was followed before (a loop). `from`: the push note that led here. */
+  private follow(sha: string, why: string, from?: { repoPath: string; branch: string | null }): boolean {
+    const key = sha.toLowerCase();
+    if ([...this.visited].some((v) => key.startsWith(v))) return false;   // the first may be a short prefix
+    this.visited.add(key);
     this.notes.push(`${why}; following the review of ${sha.slice(0, 12)}, which covers it`);
     this.q = { ...this.q, sha, branch: null, pr: null };
+    this.via = from?.branch ? { repoPath: from.repoPath, branch: from.branch } : null;
+    return true;
+  }
+
+  /** For a push nothing here noted: reviewed if its branch's PR is open (not a draft), or if reviews aren't PR-only. */
+  private async byPr(via: { repoPath: string; branch: string }): Promise<ReviewState> {
+    const pr = await this.prOf(via.repoPath, via.branch);
+    if (pr?.isDraft) return { run: null, done: true, stop: `${via.branch}'s PR is a draft: PuRR reviews it once it's marked ready` };
+    if (!pr && this.db.getSettings().postPushPrsOnly) {
+      return { run: null, done: true, stop: `${via.branch} has no open PR, so the newer push won't be reviewed until one is opened` };
+    }
+    return { run: null, done: false };
   }
 
   /** The branch's open PR now (a draft included), or null; asked of gh at most every 20s. */

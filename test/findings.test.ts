@@ -101,13 +101,24 @@ test('ReviewWatch follows a newer push that took a commit\'s place, and stops wh
 
   // a re-push in the debounce: no run for A ever, B's review covers it
   outcome('aaaa01', 'superseded', 'bbbb01');
-  const w1 = new ReviewWatch(db, { ...q, sha: 'aaaa01' });
+  const openPr = async () => ({ number: 9, isDraft: false }) as any;
+  const w1 = new ReviewWatch(db, { ...q, sha: 'aaaa01' }, openPr);
   assert.deepEqual(await w1.check(), { run: null, done: false }, 'waits for B\'s review to exist');
   db.putRun(at({ id: 'rb', headSha: 'bbbb01', status: 'passed' }));
   const st1 = await w1.check();
   assert.equal(st1.run?.id, 'rb');
   assert.equal(st1.done, true);
   assert.match(w1.notes[0], /following the review of bbbb01/);
+
+  // overtaken by a push nothing here noted (CI, another machine): its branch's PR decides
+  outcome('fafa01', 'superseded', 'fafa02');
+  assert.deepEqual(await new ReviewWatch(db, { ...q, sha: 'fafa01' }, openPr).check(), { run: null, done: false }, 'PR open: its review is coming');
+  assert.match((await new ReviewWatch(db, { ...q, sha: 'fafa01' }, async () => null).check()).stop ?? '', /no open PR/);
+
+  // pushes bouncing between two commits: no endless following, just waiting for the review that's coming
+  outcome('baba01', 'superseded', 'baba02');
+  outcome('baba02', 'superseded', 'baba01');
+  assert.deepEqual(await new ReviewWatch(db, { ...q, sha: 'baba01' }, openPr).check(), { run: null, done: false });
 
   // a running review superseded by a newer push's review
   db.putRun(at({ id: 'rc', headSha: 'cccc01', status: 'superseded' }));
@@ -243,8 +254,10 @@ test('pushes that get no review of their own say why: superseded in the debounce
 
   const kindOf = (sha: string) => one(db, sha, [repoPath])?.kind ?? null;
   let tips: (string | null)[] = [], pr: any = null;
+  let line: 'yes' | 'no' | 'unknown' = 'unknown';
   const watcher = new PostPushWatcher(db, mgr, {
     lsRemote: async () => (tips.length > 1 ? tips.shift()! : tips[0]) ?? null, ghAuthed: async () => true, prForBranch: async () => pr,
+    ancestry: async () => line, confirmEveryMs: 5,
   });
   const push = async (sha: string, from: string | null | undefined, seen: (string | null)[]) => {
     tips = seen;
@@ -259,6 +272,13 @@ test('pushes that get no review of their own say why: superseded in the debounce
   // the branch moves past the push before it's seen: superseded by what's there, whether or not it's local
   await push('eee1', 'eee0', ['eee0', 'eee2']);
   assert.deepEqual(kind('eee1'), ['superseded', 'eee2']);
+
+  // the branch moved to something that doesn't include the push (rejected: a teammate's went in instead)
+  line = 'no';
+  await push('eee3', 'eee0', ['eee0', 'eee4']);
+  assert.equal(kindOf('eee3'), 'skipped');
+  assert.match(one(db, 'eee3', [repoPath])!.reason, /doesn't include this push/);
+  line = 'unknown';
 
   // a force-push back to an older commit: the old tip is still there at first, which is not "moved past"
   pr = { number: 3, title: 't', body: '', url: 'u', baseRefName: 'main', headRefName: 'feat', headRefOid: 'fff1', isDraft: false };
@@ -357,5 +377,55 @@ test('pushes across clones: left to the clone with post-push on, one note per re
     isDraft: false, account: 'me', createdAt: new Date(Date.now() - 86_400_000).toISOString() }];
   await watcher.poll();
   assert.deepEqual(scheduled, ['aa02@main', 'aa03@main'], 'still owed its review');
+  db.close();
+});
+
+test("a review's creation clears its commit's notes on that branch in every clone; scheduling it again clears its own superseded note", async () => {
+  const { ClaudeRunner } = await import('../src/server/claude.ts');
+  const { RunManager } = await import('../src/server/manager.ts');
+  const { ensureDefaults } = await import('../src/server/flows/store.ts');
+  const db = openDb(join(mkdtempSync(join(process.env.TMPDIR!, 'purr-db-')), 'purr.db'));
+  ensureDefaults(db);
+  const repo = await addRepo(db, tempRepo());
+  const mgr = new RunManager(db, new ClaudeRunner(db));
+  (mgr as any).start = () => {};                     // the run is created, not run
+  const note = (sha: string, kind: PushOutcome['kind'], path: string, branch: string) => db.setPushOutcome({ sha, kind, reason: kind, repoPath: path, branch });
+  const left = (sha: string) => db.getPushOutcomes(sha, [repo.path, '/other/clone']).map((o) => `${o.branch}@${o.repoPath === repo.path ? 'here' : 'other'}`).sort();
+  note('abc1', 'pending', repo.path, 'feat');
+  note('abc1', 'pending', '/other/clone', 'feat');
+  note('abc1', 'no-pr', repo.path, 'elsewhere');
+  db.setSettings({ ...db.getSettings(), debounceSec: 0 });
+  mgr.schedulePostPush({ trigger: 'post-push', repoPath: repo.path, mode: 'range', head: 'abc1', branch: 'feat' });
+  await new Promise((r) => setTimeout(r, 30));
+  assert.deepEqual(left('abc1'), ['elsewhere@here'], 'both clones cleared on feat; the other branch still owed');
+
+  db.setPushOutcome({ sha: 'abc2', kind: 'superseded', reason: 'took its place', repoPath: repo.path, branch: 'feat', nextSha: 'abc3' });
+  db.setSettings({ ...db.getSettings(), debounceSec: 3600 });
+  mgr.schedulePostPush({ trigger: 'post-push', repoPath: repo.path, mode: 'range', head: 'abc2', branch: 'feat' });
+  assert.deepEqual(left('abc2'), [], 'pushed back to it: no longer superseded');
+  db.close();
+});
+
+test('a push handed to another clone, whose PR the poller first sees late, is still owed its review', async () => {
+  const { ClaudeRunner } = await import('../src/server/claude.ts');
+  const { RunManager } = await import('../src/server/manager.ts');
+  const { PostPushWatcher } = await import('../src/server/triggers.ts');
+  const { ensureDefaults } = await import('../src/server/flows/store.ts');
+  const db = openDb(join(mkdtempSync(join(process.env.TMPDIR!, 'purr-db-')), 'purr.db'));
+  ensureDefaults(db);
+  const main = tempRepo();
+  sh(main, 'remote', 'add', 'origin', 'https://github.com/work-org/app-y.git');
+  const a = await addRepo(db, main);
+  const mgr = new RunManager(db, new ClaudeRunner(db));
+  const scheduled: string[] = [];
+  mgr.schedulePostPush = (req: any) => { scheduled.push(req.head); };
+  let prs: any[] = [];
+  const watcher = new PostPushWatcher(db, mgr, { fetchPrs: async () => ({ prs, answered: ['me'] }) });
+  await watcher.poll();
+  db.setPushOutcome({ sha: 'ee01', kind: 'elsewhere', reason: 'elsewhere', repoPath: a.path, branch: 'feat' });
+  prs = [{ repo: 'work-org/app-y', number: 3, headRefOid: 'ee01', headRefName: 'feat', baseRefName: 'main', title: 't', body: '', url: 'u',
+    isDraft: false, account: 'me', createdAt: new Date(Date.now() - 86_400_000).toISOString() }];
+  await watcher.poll();
+  assert.deepEqual(scheduled, ['ee01']);
   db.close();
 });

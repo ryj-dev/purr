@@ -85,8 +85,22 @@ test('git push: pre-push scan blocks a secret; a clean push lands and queues the
     assert.equal(out.run.id, post!.id);
     assert.equal(out.findings.length, findings.length);
     assert.equal(w.status, findings.some((f) => f.severity === 'must_fix') ? 1 : 0, 'exit 1 on a must-fix, like purr run');
+    // a second, fast-forward push to the branch: the hook's `from` is the old tip, so this one isn't "overtaken"
+    writeFileSync(join(repo, 'app.js'), 'export const x = 2;\nexport function avg(t, n) {\n  return n ? t / n : 0;\n}\n');
+    sh(repo, 'commit', '-qam', 'guard', '--no-verify');
+    const second = sh(repo, 'rev-parse', 'HEAD');
+    const ff = await run(repo, 'push', 'origin', 'feature');
+    assert.equal(ff.status, 0, ff.stderr);
+    let next;
+    for (let i = 0; i < 100 && !next; i++) {
+      await new Promise((r) => setTimeout(r, 200));
+      next = db.listRuns(50).find((r) => r.trigger === 'post-push' && r.headSha === second && ['passed', 'failed', 'blocked'].includes(r.status));
+    }
+    assert.ok(next, 'the second push is reviewed (and finished, before the database closes)');
+    assert.equal(db.getPushOutcomes(second, [registered.path]).some((o) => o.kind === 'superseded'), false);
+
     const prePush = db.listRuns(50).filter((r) => r.trigger === 'pre-push' && r.repoId === registered.id);
-    assert.deepEqual(prePush.map((r) => r.status).sort(), ['blocked', 'passed']);
+    assert.deepEqual(prePush.map((r) => r.status).sort(), ['blocked', 'passed', 'passed'], 'the blocked push, then the two that went through');
   } finally {
     await uninstallGlobalHooks();
     rmSync(PID_FILE, { force: true });

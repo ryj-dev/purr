@@ -5,7 +5,7 @@
 //     repos git's hooks can't reach. Repos in the project folders are discovered and registered every 10 minutes.
 import { existsSync, realpathSync } from 'node:fs';
 import type { DB, PushOutcome } from './db.ts';
-import { lsRemote, remoteUrl } from './git.ts';
+import { ancestry, lsRemote, remoteUrl } from './git.ts';
 import { addRepo } from './http.ts';
 import { type PrFetch, type PrInfo, ghAuthed, githubRepo, openPrsForAllAccounts, prForBranch } from './gh.ts';
 import { discoverRepos } from './discovery.ts';
@@ -20,6 +20,7 @@ export interface WatcherDeps {
   lsRemote: (cwd: string, remote: string, branch: string) => Promise<string | null>;
   ghAuthed: () => Promise<boolean>;
   prForBranch: (repoPath: string, branch: string) => Promise<PrInfo | null>;
+  ancestry: (cwd: string, a: string, b: string) => Promise<'yes' | 'no' | 'unknown'>;
   /** how long the hook's push gets to show up on the remote, and how often to look */
   confirmMs: number;
   confirmEveryMs: number;
@@ -49,7 +50,7 @@ export class PostPushWatcher {
 
   constructor(db: DB, mgr: RunManager, deps: Partial<WatcherDeps> = {}) {
     this.db = db; this.mgr = mgr;
-    this.deps = { fetchPrs: openPrsForAllAccounts, lsRemote, ghAuthed, prForBranch, confirmMs: 90_000, confirmEveryMs: 3000, ...deps };
+    this.deps = { fetchPrs: openPrsForAllAccounts, lsRemote, ghAuthed, prForBranch, ancestry, confirmMs: 90_000, confirmEveryMs: 3000, ...deps };
   }
 
   start() {
@@ -94,10 +95,13 @@ export class PostPushWatcher {
         const tip = await this.deps.lsRemote(body.repoPath, remote, body.branch);
         if (from === undefined && tip !== body.sha) from = tip;
         if (tip && tip !== body.sha && tip !== from) {
-          // the branch moved past this push before it was seen (a quick second push, CI, another machine): that
-          // push's review is the one that covers this commit
-          note('superseded', 'a newer push to the branch took its place', tip);
-          return;
+          // the branch moved on before this push was seen. On top of it (a quick second push, CI, another machine):
+          // that push's review covers this commit, including when git can't tell because the tip isn't local. Not
+          // on top (the push was rejected, a teammate's went in instead): nothing will review it
+          if ((await this.deps.ancestry(body.repoPath, body.sha, tip)) === 'no') {
+            return note('skipped', `the branch moved to ${tip.slice(0, 12)}, which doesn't include this push (was it rejected?)`);
+          }
+          return note('superseded', 'a newer push to the branch took its place', tip);
         }
         if (tip === body.sha) {
           const gh = await this.deps.ghAuthed();
@@ -210,7 +214,7 @@ export class PostPushWatcher {
         // an older PR, unless its head is a push the hook saw with no PR to review it through (opened while PuRR
         // was down, say): that push is still owed its review
         const owed = this.db.getPushOutcomes(pr.headRefOid, local.map((c) => c.path))
-          .some((o) => o.kind === 'no-pr' && o.sha === pr.headRefOid.toLowerCase());
+          .some((o) => (o.kind === 'no-pr' || o.kind === 'elsewhere') && o.sha === pr.headRefOid.toLowerCase());
         if (!owed && !(opened >= (marks.get(pr.account) ?? this.startedAt))) continue;
       }
       this.lastSeen.set(handled, pr.headRefOid);

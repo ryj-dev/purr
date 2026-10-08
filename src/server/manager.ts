@@ -150,6 +150,12 @@ export class RunManager {
       if (sha) this.db.setPushOutcome({ sha, kind, reason, repoPath: req.repoPath, branch: req.branch ?? null, nextSha });
     };
     const skip = (reason: string) => outcome(req.head, 'skipped', reason);
+    // pushed again (back to it, say): a note that another push took its place no longer holds
+    if (req.head) {
+      for (const o of this.db.getPushOutcomes(req.head, [req.repoPath])) {
+        if (o.kind === 'superseded' && o.branch === (req.branch ?? null) && o.sha === req.head.toLowerCase()) this.db.deletePushOutcome(o.sha, o.repoPath, o.branch);
+      }
+    }
     if (this.db.getSettings().reviewsPaused) return skip('reviews are paused'); // paused from the tray or Settings
     const key = `${req.repoPath}\u0000${req.branch}`;
     const prev = this.debounces.get(key);

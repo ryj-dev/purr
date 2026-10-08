@@ -153,6 +153,11 @@ export async function lsRemote(cwd: string, remote: string, branch: string): Pro
   return r.stdout.split(/\s+/)[0] || null;
 }
 
+/** Whether `a` is in `b`'s history: unknown when git doesn't have one of them (a commit only on the remote, say). */
+export async function ancestry(cwd: string, a: string, b: string): Promise<'yes' | 'no' | 'unknown'> {
+  const r = await exec('git', ['merge-base', '--is-ancestor', a, b], { cwd, timeoutMs: 30_000 });
+  return r.code === 0 ? 'yes' : r.code === 1 ? 'no' : 'unknown';
+}
 export async function isAncestor(cwd: string, a: string, b: string): Promise<boolean> {
   return (await exec('git', ['merge-base', '--is-ancestor', a, b], { cwd, timeoutMs: 30_000 })).code === 0;
 }
