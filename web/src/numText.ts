@@ -41,3 +41,12 @@ export function numFieldHandlers(get: () => { text: string; value: number }, set
     value: (value: number) => setText(numFieldStep(get(), { type: 'value', value }).text),
   };
 }
+
+/**
+ * NumField's effect, run after every render: tells the box about the setting only when it is a new value (so a box
+ * someone has just cleared isn't refilled by a re-render). Returns the value to remember for next time.
+ */
+export function syncValue(last: number | undefined, value: number, box: { value: (v: number) => void }): number {
+  if (last !== undefined && last !== value) box.value(value);
+  return value;
+}

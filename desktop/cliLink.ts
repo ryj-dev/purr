@@ -1,5 +1,5 @@
 // What ~/.local/bin/purr is: kept apart from Electron so it can be tested.
-import { existsSync, lstatSync, readFileSync, readlinkSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, symlinkSync, unlinkSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import type { CliStatus } from '../src/shared/cliLink.ts';
 
@@ -25,4 +25,23 @@ export function cliStatusOf(link: string, shim: string, path: string): CliStatus
   const target = resolve(dirname(link), raw);   // a relative link points from the link's folder
   if (target === resolve(shim)) return { state: 'installed', link, target, purrCopy: false, onPath };
   return { state: 'other', link, target, purrCopy: isPurr(target), onPath };
+}
+
+/**
+ * Links `link` to `shim`. Only ever replaces a link: a file or folder at `link` is left alone, as is a link that is
+ * already right.
+ */
+export function installCliAt(link: string, shim: string, path: string): { ok: boolean; message: string } {
+  try {
+    const before = cliStatusOf(link, shim, path);
+    if (before.state === 'blocked') return { ok: false, message: `${link} exists and isn't a link; move it aside first.` };
+    if (before.state === 'installed') return { ok: true, message: `${link} already points at this app.` };
+    mkdirSync(dirname(link), { recursive: true });
+    if (before.state === 'other') unlinkSync(link);
+    symlinkSync(shim, link);
+    const after = cliStatusOf(link, shim, path);
+    return { ok: true, message: `Linked ${link} → ${shim}.${after.onPath ? '' : ` Add ${dirname(link)} to your PATH to use it.`}` };
+  } catch (e) {
+    return { ok: false, message: (e as Error).message };
+  }
 }

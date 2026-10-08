@@ -42,13 +42,16 @@ test('typing in a number box, step by step: never saves an empty box, and 4 -> 6
 
 test("NumField's own handlers: clear 4, type 6, leave; clear and leave; '06' over 6", async () => {
   const { numFieldHandlers } = await import('../web/src/numText.ts');
-  // the component's state and props, with its [value] effect: runs only when the saved number is a new value
+  // the component's state and props, and its effect after each render (syncValue, the same function NumField runs).
+  // Like React, a state change re-renders after the handler returns, and the effect runs after that render
+  const { syncValue } = await import('../web/src/numText.ts');
   const box = (start: number) => {
-    const s = { text: String(start), value: start, saved: [] as number[] };
-    const h = numFieldHandlers(() => ({ text: s.text, value: s.value }), (t) => { s.text = t; }, (v) => {
-      s.saved.push(v);
-      if (v !== s.value) { s.value = v; h.value(v); }
-    });
+    const s = { text: String(start), value: start, saved: [] as number[], last: undefined as number | undefined };
+    let dirty = true;
+    const flush = () => { while (dirty) { dirty = false; s.last = syncValue(s.last, s.value, h); } };
+    const h0 = numFieldHandlers(() => ({ text: s.text, value: s.value }), (t) => { s.text = t; dirty = true; }, (v) => { s.saved.push(v); s.value = v; dirty = true; });
+    const h = { ...h0, type: (t: string) => { h0.type(t); flush(); }, blur: () => { h0.blur(); flush(); } };
+    flush();
     return { s, h };
   };
   let b = box(4);

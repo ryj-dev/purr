@@ -13,7 +13,7 @@ import {
   BrowserWindow, Menu, Notification, Tray, app, dialog, ipcMain, nativeImage, shell, type MenuItemConstructorOptions,
 } from 'electron';
 import type { AppState, Run, ServerEvent } from '../src/shared/types.ts';
-import { cliStatusOf } from './cliLink.ts';
+import { cliStatusOf, installCliAt } from './cliLink.ts';
 import { cliAction } from '../src/shared/cliLink.ts';
 
 const PURR_HOME = process.env.PURR_HOME || join(homedir(), '.purr');
@@ -368,23 +368,7 @@ const CLI_LINK = join(CLI_DIR, 'purr');
 
 const cliStatus = () => cliStatusOf(CLI_LINK, SHIM, userPath || '');
 
-function installCli(): { ok: boolean; message: string } {
-  const dir = CLI_DIR;
-  const link = CLI_LINK;
-  try {
-    // the same reading of the link as Settings and the tray, so the three never disagree
-    const before = cliStatus();
-    if (before.state === 'blocked') return { ok: false, message: `${link} exists and isn't a link; move it aside first.` };
-    if (before.state === 'installed') return { ok: true, message: `${link} already points at this app.` };
-    mkdirSync(dir, { recursive: true });
-    if (before.state === 'other') unlinkSync(link);
-    symlinkSync(SHIM, link);
-    const after = cliStatus();
-    return { ok: true, message: `Linked ${link} → ${SHIM}.${after.onPath ? '' : ` Add ${dir} to your PATH to use it.`}` };
-  } catch (e) {
-    return { ok: false, message: (e as Error).message };
-  }
-}
+const installCli = () => installCliAt(CLI_LINK, SHIM, userPath || '');
 
 ipcMain.handle('purr:get-login-item', () => loginItemEnabled());
 ipcMain.handle('purr:set-login-item', (_e, on: boolean) => { const r = setLoginItem(!!on); updateTray(); return r; });

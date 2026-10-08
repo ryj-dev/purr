@@ -1,9 +1,9 @@
 import './helpers.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, readlinkSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { cliStatusOf } from '../desktop/cliLink.ts';
+import { cliStatusOf, installCliAt } from '../desktop/cliLink.ts';
 import { cliAction } from '../src/shared/cliLink.ts';
 
 test("the command line tool's link: missing, something in the way, this app's, another PuRR's, something else's", () => {
@@ -52,4 +52,23 @@ test('what Settings and the tray offer for each state of the link', () => {
   assert.equal(of({ state: 'blocked' }).kind, 'blocked');
   assert.match(of({ state: 'blocked' }).tray, /in the way/, 'the tray says so too, instead of offering an install that can only fail');
   assert.match(of({ state: 'blocked' }).note, /isn't a link/);
+});
+
+test("installing the link creates or replaces a link, and never touches a file in the way", () => {
+  const dir = mkdtempSync(join(process.env.TMPDIR!, 'purr-cli-install-'));
+  const shim = '/Applications/PuRR.app/Contents/Resources/bin/purr';
+  const link = join(dir, 'bin', 'purr');
+  assert.equal(installCliAt(link, shim, '').ok, true, 'missing: created, folder and all');
+  assert.equal(readlinkSync(link), shim);
+  assert.match(installCliAt(link, shim, '').message, /already points at this app/);
+  const theirs = join(dir, 'theirs');
+  symlinkSync('/usr/local/bin/purr', theirs);
+  assert.equal(installCliAt(theirs, shim, '').ok, true);
+  assert.equal(readlinkSync(theirs), shim, 'a link elsewhere is replaced');
+  const file = join(dir, 'file');
+  writeFileSync(file, 'my own script\n');
+  assert.equal(installCliAt(file, shim, '').ok, false);
+  assert.equal(readFileSync(file, 'utf8'), 'my own script\n', 'a real file is left alone');
+  assert.doesNotMatch(installCliAt(join(dir, 'p', 'purr'), shim, join(dir, 'p') + '/').message, /PATH/, 'on PATH (trailing slash): no PATH hint');
+  assert.match(installCliAt(join(dir, 'q', 'purr'), shim, '/usr/bin').message, /Add .* to your PATH/);
 });

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Settings } from '../../../src/shared/types.ts';
 import { api, errMsg } from '../api.ts';
 import { useApp } from '../state.tsx';
@@ -6,7 +6,7 @@ import { useToast } from '../components/Toast.tsx';
 import { UsageMeter } from '../components/UsageMeter.tsx';
 import { fmtTime } from '../util.ts';
 import { PageHeader } from '../components/ui.tsx';
-import { numFieldHandlers } from '../numText.ts';
+import { numFieldHandlers, syncValue } from '../numText.ts';
 import { cliAction } from '../../../src/shared/cliLink.ts';
 import { Check, Save, SquareTerminal } from 'lucide-react';
 
@@ -69,7 +69,8 @@ function DesktopCard() {
 function NumField({ label, hint, value, onChange }: { label: string; hint?: string; value: number; onChange: (v: number) => void }) {
   const [text, setText] = useState(String(value));
   const box = numFieldHandlers(() => ({ text, value }), setText, onChange);
-  useEffect(() => { box.value(value); }, [value]);   // eslint-disable-line react-hooks/exhaustive-deps -- only on a new value
+  const last = useRef<number | undefined>(undefined);
+  useEffect(() => { last.current = syncValue(last.current, value, box); });
   return (
     <label className="field">
       <span>{label}</span>
