@@ -5,7 +5,7 @@
 // the CLI or an older launch agent), the app attaches to it instead of starting a second one.
 
 import { spawn, execFile, type ChildProcess } from 'node:child_process';
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync, symlinkSync, lstatSync, readlinkSync, unlinkSync } from 'node:fs';
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';

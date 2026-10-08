@@ -52,7 +52,9 @@ test("NumField's own handlers: clear 4, type 6, leave; clear and leave; '06' ove
     const h0 = numFieldHandlers(() => ({ text: s.text, value: s.value }), (t) => { s.text = t; dirty = true; }, (v) => { s.saved.push(v); s.value = v; dirty = true; });
     const h = { ...h0, type: (t: string) => { h0.type(t); flush(); }, blur: () => { h0.blur(); flush(); } };
     flush();
-    return { s, h };
+    // the setting changes somewhere else (a reload, Save, another window): the box shows it
+    const outside = (v: number) => { s.value = v; dirty = true; flush(); };
+    return { s, h, outside };
   };
   let b = box(4);
   b.h.type('');
@@ -67,4 +69,10 @@ test("NumField's own handlers: clear 4, type 6, leave; clear and leave; '06' ove
   b = box(6);
   b.h.type('06');
   assert.deepEqual([b.s.text, b.s.saved], ['06', [6]], 'the same number: kept as typed');
+  b = box(4);
+  b.outside(8);
+  assert.equal(b.s.text, '8', 'changed elsewhere: shown');
+  b.h.type('');
+  b.outside(9);
+  assert.equal(b.s.text, '9', 'even over a box someone had cleared');
 });
