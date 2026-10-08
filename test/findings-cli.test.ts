@@ -196,6 +196,17 @@ test('purr findings: exit codes, usage errors, --json and purr runs', async () =
   db7.close();
   assert.equal(purr(empty, 'findings', '--wait').status, 4);
 
+  // --wait gives up at its timeout: on a review that never appeared, and on one still running
+  const never = purr(repoPath, 'findings', '--sha', 'abab00ff', '--wait', '--timeout', '1');
+  assert.equal(never.status, 3);
+  assert.match(never.stderr, /no review of commit abab00ff appeared within 1s/);
+  const db8 = openDb();
+  db8.putRun(run({ repoId: repo.id, repoPath, headSha: 'abab00fe', branch: 'slow', status: 'running' }));
+  db8.close();
+  const stuck = purr(repoPath, 'findings', '--sha', 'abab00fe', '--wait', '--timeout', '1');
+  assert.equal(stuck.status, 3);
+  assert.match(stuck.stderr, /is still running after 1s/);
+
   const runs = purr(repoPath, 'runs', '--branch', 'feat');
   assert.equal(runs.status, 0);
   assert.equal(runs.stdout.trim().split('\n').length, 5, runs.stdout);

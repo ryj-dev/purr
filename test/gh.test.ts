@@ -250,4 +250,7 @@ test("a branch's PR: found, none, or gh couldn't say, which is not the same as n
     writeFileSync(join(none.dir, 'offline'), '');
     assert.equal(await prLookup(process.cwd(), 'feat'), undefined, "offline: gh couldn't say");
   } finally { none.restore(); }
+  // one account says there's none, the other can't be reached: it might be the one that sees the PR
+  const mixed = fakeGh(TWO.replace('account me', 'account no-token'), {});
+  try { assert.equal(await prLookup(process.cwd(), 'feat'), undefined); } finally { mixed.restore(); }
 });

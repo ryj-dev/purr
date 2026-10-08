@@ -113,10 +113,12 @@ export async function prForBranch(repoPath: string, branch: string): Promise<PrI
  * out, offline, a timeout), which isn't the same as no PR.
  */
 export async function prLookup(repoPath: string, branch: string): Promise<PrInfo | null | undefined> {
-  let none = false;
-  for (const account of await ghAccounts()) {
+  const accounts = await ghAccounts();
+  if (!accounts.length) return undefined;   // signed out: gh can't say
+  let unknown = false;
+  for (const account of accounts) {
     const r = await ghRun(repoPath, ['pr', 'view', branch, '--json', FIELDS], { account });
-    if (!r) continue;
+    if (!r) { unknown = true; continue; }
     if (r.code === 0) {
       try {
         const pr = JSON.parse(r.stdout) as PrInfo & { state?: string };
@@ -124,9 +126,11 @@ export async function prLookup(repoPath: string, branch: string): Promise<PrInfo
         return null;
       } catch { continue; }
     }
-    if (/no (open )?pull requests? found/i.test(r.stderr)) none = true;   // this account sees no PR for it
+    if (/no (open )?pull requests? found/i.test(r.stderr)) continue;   // this account sees no PR for it
+    if (!/could not resolve to a repository/i.test(r.stderr)) unknown = true;   // (one that can't see the repo says nothing)
   }
-  return none ? null : undefined;
+  // an account that couldn't answer might be the one that sees the PR: "none" only when every one that could see said so
+  return unknown ? undefined : null;
 }
 
 const OPEN_PRS = `query($n: Int!) { viewer { login pullRequests(first: $n, states: OPEN, orderBy: { field: UPDATED_AT, direction: DESC }) {

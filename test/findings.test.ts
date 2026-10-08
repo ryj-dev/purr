@@ -124,6 +124,16 @@ test('ReviewWatch follows a newer push that took a commit\'s place, and stops wh
   outcome('baba02', 'superseded', 'baba01');
   assert.deepEqual(await new ReviewWatch(db, { ...q, sha: 'baba01' }, openPr).check(), { run: null, done: false });
 
+  // pushed A, then B, then A again: A's first review was superseded by B's, and B's by A's second
+  db.putRun(at({ id: 'rA1', headSha: 'acab01', status: 'superseded' }));
+  const rB = at({ id: 'rB', headSha: 'acab02', status: 'running' });
+  db.putRun(rB);
+  const wb = new ReviewWatch(db, { ...q, sha: 'acab01' }, openPr);
+  assert.equal((await wb.check()).run?.id, 'rB', 'followed to B');
+  db.putRun({ ...rB, status: 'superseded' });
+  db.putRun(at({ id: 'rA2', headSha: 'acab01', status: 'passed' }));
+  assert.equal((await wb.check()).run?.id, 'rA2', "back to A's new review, not a wait on B's superseded one");
+
   // a running review superseded by a newer push's review
   db.putRun(at({ id: 'rc', headSha: 'cccc01', status: 'superseded' }));
   const w2 = new ReviewWatch(db, { ...q, sha: 'cccc01' });
@@ -288,6 +298,16 @@ test('pushes that get no review of their own say why: superseded in the debounce
   await slow.pushIntent({ repoPath, branch: 'feat', sha: 'aba1', from: 'aba0' });
   await slow.settled();
   assert.deepEqual(kind('aba1'), ['superseded', 'aba2'], 'covered by B, not scheduled over it');
+
+  // seen on the remote, then ls-remote has no answer after asking gh: it still landed, so it's scheduled
+  const blip = new PostPushWatcher(db, mgr, {
+    lsRemote: async () => (tips.length > 1 ? tips.shift()! : tips[0]) ?? null, ghAuthed: async () => true,
+    prForBranch: async () => { tips = [null]; return pr; }, confirmEveryMs: 5,
+  });
+  tips = ['bcd0', 'bcd1'];
+  await blip.pushIntent({ repoPath, branch: 'feat', sha: 'bcd1', from: 'bcd0' });
+  await blip.settled();
+  assert.equal(kindOf('bcd1'), 'pending', 'scheduled, not "never showed up"');
 
   // the branch moved to something that doesn't include the push (rejected: a teammate's went in instead)
   line = 'no';

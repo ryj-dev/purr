@@ -68,7 +68,11 @@ export class ReviewWatch {
       const run = this.db.findRuns({ ...this.q, limit: 1 })[0] ?? null;
       if (run?.status === 'superseded') {
         const next = run.branch ? this.db.findRuns({ repoIds: this.q.repoIds, branch: run.branch, triggers: this.q.triggers, limit: 1 })[0] : null;
-        if (next?.headSha && next.id !== run.id && next.queuedAt > run.queuedAt && this.follow(next.headSha, `review ${run.id} was superseded by a newer push`)) continue;
+        if (next?.headSha && next.id !== run.id && next.queuedAt > run.queuedAt) {
+          // back to a commit followed before (pushed A, B, then A again): its newer review is the one to wait on now
+          if (!this.follow(next.headSha, `review ${run.id} was superseded by a newer push`)) this.q = { ...this.q, sha: next.headSha, branch: null, pr: null };
+          continue;
+        }
         return { run, done: false };   // the newer push's review is still in its debounce
       }
       if (run) return { run, done: isFinished(run) };

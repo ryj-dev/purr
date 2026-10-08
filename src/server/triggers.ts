@@ -91,6 +91,7 @@ export class PostPushWatcher {
       const deadline = Date.now() + this.deps.confirmMs;
       // the branch's tip before this push (null: a new branch); the hook says, else it's what's there at first look
       let from = body.from;
+      let landed = false;   // seen on the remote once: whatever happens next, it didn't "never show up"
       while (Date.now() < deadline) {
         const tip = await this.deps.lsRemote(body.repoPath, remote, body.branch);
         if (from === undefined && tip !== body.sha) from = tip;
@@ -107,8 +108,10 @@ export class PostPushWatcher {
           const gh = await this.deps.ghAuthed();
           const pr = gh ? await this.deps.prForBranch(body.repoPath, body.branch) : null;
           // gh can take a while: if the branch moved on meanwhile (a quick second push), look again from the top,
-          // so this older push doesn't take the newer one's place in the debounce
-          if ((await this.deps.lsRemote(body.repoPath, remote, body.branch)) !== body.sha) continue;
+          // so this older push doesn't take the newer one's place in the debounce. No answer is no news: it landed
+          landed = true;
+          const again = await this.deps.lsRemote(body.repoPath, remote, body.branch);
+          if (again && again !== body.sha) continue;
           // no open PR (a push to main, or a branch not yet proposed): no review, and nothing marked as handled, so
           // the poller reviews this commit when its PR is opened
           if (prOnly && gh && !pr) return note('no-pr', `${body.branch} has no open PR; it's reviewed once one is opened`);
@@ -132,7 +135,8 @@ export class PostPushWatcher {
         }
         await new Promise((r) => setTimeout(r, this.deps.confirmEveryMs));
       }
-      note('skipped', `the push never showed up on ${remote}/${body.branch}`);
+      note('skipped', landed ? `${remote}/${body.branch} went back to the commit before it after this push landed`
+        : `the push never showed up on ${remote}/${body.branch}`);
     })().catch((e) => {
       // a waiting `purr findings` must hear that this went wrong, not wait out its timeout on "pending"
       try { note('skipped', `PuRR couldn't confirm the push: ${e?.message ?? e}`); } catch { /* nothing more to do */ }
