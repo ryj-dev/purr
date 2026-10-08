@@ -75,7 +75,8 @@ test('an older gh (one login, no --user) is used as it is, without a token per a
     assert.deepEqual(await ghAccounts(), ['old-me']);
     assert.equal((await prForBranch(process.cwd(), 'feat'))?.number, 7);
     await commentOnPr(process.cwd(), 7, 'b');
-    assert.deepEqual(gh.comments(), ['none 7']);
+    await commentOnPr(process.cwd(), 8, 'b', 'old-me');   // a run whose PR this gh found, as 'old-me'
+    assert.deepEqual(gh.comments(), ['none 7', 'none 8'], 'no token asked for: gh posts as its one login');
   } finally { gh.restore(); }
   const unknown = fakeGh('Signed in, in words from a future gh\n', { none: pr('OPEN') });
   try { assert.equal((await ghAccounts()).length, 1, 'exit 0 means signed in, even unparsed'); } finally { unknown.restore(); }
@@ -244,4 +245,13 @@ test('a manual review keeps the account that found its PR', async () => {
     assert.equal(run.pr?.number, 7);
     assert.equal(run.pr?.account, 'work-me', 'found by the non-active account: it comments as that one');
   } finally { gh.restore(); db.close(); }
+});
+
+test("PuRR adds the folders where Claude Code's installer and Homebrew put tools to a short PATH, once each, after what's there", async () => {
+  const { withToolDirs } = await import('../src/server/util.ts');
+  const extra = '/h/.local/bin:/opt/homebrew/bin:/usr/local/bin';
+  assert.equal(withToolDirs('/usr/bin:/bin', '/h'), `/usr/bin:/bin:${extra}`, 'launchd: appended, in order');
+  assert.equal(withToolDirs('/opt/homebrew/bin:/usr/bin', '/h'), '/opt/homebrew/bin:/usr/bin:/h/.local/bin:/usr/local/bin', 'none twice, order kept');
+  assert.equal(withToolDirs('', '/h'), `/usr/bin:/bin:/usr/sbin:/sbin:${extra}`, 'empty: the system folders, then those');
+  assert.equal(withToolDirs(withToolDirs('/usr/bin', '/h'), '/h'), withToolDirs('/usr/bin', '/h'), 'running it again changes nothing');
 });
