@@ -6,6 +6,7 @@ import { useToast } from '../components/Toast.tsx';
 import { UsageMeter } from '../components/UsageMeter.tsx';
 import { fmtTime } from '../util.ts';
 import { PageHeader } from '../components/ui.tsx';
+import { parseNumText, settledText } from '../numText.ts';
 import { Check, Save, SquareTerminal } from 'lucide-react';
 
 function DesktopCard() {
@@ -18,7 +19,12 @@ function DesktopCard() {
   };
   const [cliState, setCliState] = useState<Awaited<ReturnType<PurrDesktop['cliStatus']>> | null>(null);
   const loadCli = useCallback(() => { bridge.cliStatus?.().then(setCliState, () => setCliState(null)); }, [bridge]);
-  useEffect(loadCli, [loadCli]);
+  useEffect(() => {
+    loadCli();
+    // installed from the tray, or changed in a terminal, while this page was open
+    window.addEventListener('focus', loadCli);
+    return () => window.removeEventListener('focus', loadCli);
+  }, [loadCli]);
   const cli = async () => {
     const r = await bridge.installCli();
     toast(r.message, r.ok ? 'ok' : 'error');
@@ -70,10 +76,10 @@ function NumField({ label, hint, value, onChange }: { label: string; hint?: stri
       <input type="number" min={0} value={text}
         onChange={(e) => {
           setText(e.target.value);
-          const v = e.target.value.trim();
-          if (v !== '' && Number.isFinite(Number(v))) onChange(Number(v));
+          const v = parseNumText(e.target.value);
+          if (v !== null) onChange(v);
         }}
-        onBlur={() => { if (text.trim() === '' || !Number.isFinite(Number(text))) setText(String(value)); }} />
+        onBlur={() => setText(settledText(text, value))} />
       {hint && <span className="hint">{hint}</span>}
     </label>
   );

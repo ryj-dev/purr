@@ -369,7 +369,8 @@ function cliStatus(): { state: 'installed' | 'missing' | 'other' | 'blocked'; li
   let st;
   try { st = lstatSync(CLI_LINK); } catch { return { state: 'missing', link: CLI_LINK, target: null, onPath }; }
   if (!st.isSymbolicLink()) return { state: 'blocked', link: CLI_LINK, target: null, onPath };
-  const target = readlinkSync(CLI_LINK);
+  let target: string;
+  try { target = readlinkSync(CLI_LINK); } catch { return { state: 'missing', link: CLI_LINK, target: null, onPath }; }   // removed meanwhile
   return { state: target === SHIM ? 'installed' : 'other', link: CLI_LINK, target, onPath };
 }
 
