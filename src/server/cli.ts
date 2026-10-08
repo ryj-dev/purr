@@ -7,6 +7,8 @@ import type { Finding, Run } from '../shared/types.ts';
 import { ClaudeRunner } from './claude.ts';
 import { openDb } from './db.ts';
 import { ensureDefaults } from './flows/store.ts';
+import { exportFlow, importFlow, previewImport } from './flows/share.ts';
+import { readFileSync } from 'node:fs';
 import { repoRoot } from './git.ts';
 import { addRepo, startHttp } from './http.ts';
 import { installGlobalHooks, removePidFile, uninstallGlobalHooks, writePidFile } from './globalHooks.ts';
@@ -164,6 +166,50 @@ async function manualRun() {
   return done.counts.must_fix > 0 ? 1 : 0;
 }
 
+/** `purr flow export <id> [--json]` prints a flow as share text; `purr flow import [file|-] [--yes]` reads one back. */
+async function flowCmd(sub: string | undefined, arg: string | undefined): Promise<number> {
+  const db = openDb();
+  ensureDefaults(db);
+  try {
+    if (sub === 'list') {
+      for (const f of db.listFlows()) console.log(`${f.id.padEnd(22)} ${f.name}${f.isDefault ? '  (default)' : ''}`);
+      return 0;
+    }
+    if (sub === 'export') {
+      const f = arg && !arg.startsWith('--') ? db.getFlow(arg) : null;
+      if (!f) { console.error('Usage: purr flow export <flow id> [--json]   (ids: purr flow list)'); return 2; }
+      const e = exportFlow(f);
+      console.log(args.includes('--json') ? e.json : e.text);
+      return 0;
+    }
+    if (sub === 'import') {
+      const src = arg && !arg.startsWith('--') && arg !== '-' ? readFileSync(arg, 'utf8') : await new Promise<string>((res) => {
+        let t = ''; process.stdin.on('data', (d) => { t += d; }).on('end', () => res(t));
+      });
+      const p = previewImport(src);
+      process.stderr.write(`${C.b}${p.name}${C.x}: ${p.blocks.length} blocks, ${p.edges.length} connections\n`);
+      for (const n of p.notes) process.stderr.write(`  ${C.dim}note: ${n}${C.x}\n`);
+      for (const r of p.risks) process.stderr.write(`  ${r.level === 'danger' ? C.red : r.level === 'warn' ? C.yel : C.dim}${r.level}${C.x}  ${r.label}: ${r.message}${r.detail ? `\n           ${C.dim}${r.detail}${C.x}` : ''}\n`);
+      const errors = p.issues.filter((i) => i.level === 'error');
+      if (errors.length) process.stderr.write(`  ${C.yel}${errors.length} validation error(s): fix them in the editor before assigning it to a trigger${C.x}\n`);
+      if (p.risks.some((r) => r.level !== 'info') && !args.includes('--yes')) {
+        process.stderr.write(`Read the above, then run again with --yes to import it.\n`);
+        return 1;
+      }
+      const f = importFlow(db, src);
+      console.log(`Imported "${f.name}" (${f.id}). It isn't assigned to any trigger yet.`);
+      return 0;
+    }
+    console.error('Usage: purr flow list | export <id> [--json] | import [file|-] [--yes]');
+    return 2;
+  } catch (e: any) {
+    console.error(`purr: ${e?.message ?? e}`);
+    return 2;
+  } finally {
+    db.close();
+  }
+}
+
 const PLIST = join(homedir(), 'Library/LaunchAgents/com.purr.daemon.plist');
 async function agent(action: string | undefined) {
   if (action === 'install' && process.env.PURR_APP_BUNDLE) {
@@ -211,6 +257,8 @@ const USAGE = `PuRR: Pull Request Reviewer
   purr repo add [PATH]            register a repository (default: current)
   purr hooks install|uninstall    git hooks for every repo (the service installs them on start);
                                  uninstall restores your previous core.hooksPath
+  purr flow list | export <id> [--json] | import [file|-] [--yes]
+                                 share flows as text
   purr agent install|uninstall    start the daemon at login (macOS launchd)
   purr hook pre-commit|pre-push   (called by the installed git hooks)
 `;
@@ -238,6 +286,7 @@ async function main(): Promise<number> {
       if (sub === 'install') { const g = await installGlobalHooks(); console.log(`purr hooks run for every repo (${g.changed ? 'installed' : 'already installed'})`); return 0; }
       break;
     }
+    case 'flow': return flowCmd(sub, args[2]);
     case 'agent': return agent(sub);
   }
   process.stdout.write(USAGE);

@@ -33,6 +33,9 @@ interface BlockTypeInfo {
 | PATCH | `/api/flows/:id/blocks/:blockId/options` | preference options only, e.g. `{ notify: false }` (see `PREFERENCE_OPTIONS`: output → `notify`, `postPrComment`) | `Flow`. **Allowed on default flows too**: kept as overrides that survive the defaults being rewritten. 400 for any other key |
 | DELETE | `/api/flows/:id` | | 204; **403** for a default flow. Trigger assignments pointing at it fall back to the default for that trigger |
 | POST | `/api/flows/validate` | `{ blocks, edges }` | `ValidationIssue[]` |
+| GET | `/api/flows/:id/export` | | `FlowExport`: `{ text, json, bytes }`. `text` is `purr-flow:v1:` + base64url(deflate-raw(JSON)) |
+| POST | `/api/flows/import/preview` | `{ text }` (share text or the JSON) | `ImportPreview`: the rebuilt blocks and edges, `risks` (shell commands, tool permissions, PR comments), `notes` (what was dropped or repaired) and `issues` (validation). Nothing is saved |
+| POST | `/api/flows/import` | `{ text, name? }` | `Flow` (201): a new editable flow, not assigned to any trigger. A clashing name gets " (imported)" |
 
 ## Triggers
 | Method | Path | Body | Returns |

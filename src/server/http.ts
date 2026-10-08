@@ -7,6 +7,7 @@ import type { DB } from './db.ts';
 import { BLOCK_TYPES } from './flows/blockTypes.ts';
 import { HttpError, createFlow, deleteFlow, setBlockOptions, updateFlow } from './flows/store.ts';
 import { validateFlow } from './flows/validate.ts';
+import { exportFlow, importFlow, previewImport } from './flows/share.ts';
 import { remoteUrl, repoRoot } from './git.ts';
 import { ghAuthed } from './gh.ts';
 import type { RunManager } from './manager.ts';
@@ -124,6 +125,18 @@ export function startHttp(db: DB, mgr: RunManager, watcher: PostPushWatcher, por
         if (id === 'validate' && m === 'POST') {
           const b = await body<{ blocks: any[]; edges: any[] }>(req);
           return send(200, validateFlow(b.blocks ?? [], b.edges ?? []));
+        }
+        // sharing: export as text, preview a pasted flow, import it as a new flow
+        if (id === 'import' && sub === 'preview' && m === 'POST') return send(200, previewImport((await body<{ text: string }>(req)).text));
+        if (id === 'import' && !sub && m === 'POST') {
+          const b = await body<{ text: string; name?: string }>(req);
+          const f = importFlow(db, b.text, b.name);
+          broadcastState();
+          return send(201, f);
+        }
+        if (id && sub === 'export' && m === 'GET') {
+          const f = db.getFlow(id);
+          return f ? send(200, exportFlow(f)) : send(404, { error: 'Flow not found' });
         }
         if (id && sub === 'blocks' && parts[4] === 'options' && m === 'PATCH') {
           const f = setBlockOptions(db, id, decodeURIComponent(parts[3] ?? ''), await body(req));

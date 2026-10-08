@@ -1,6 +1,6 @@
 import { useEffect, type ReactNode } from 'react';
 
-export function Modal({ title, children, onClose, actions }: { title: string; children: ReactNode; onClose: () => void; actions?: ReactNode }) {
+export function Modal({ title, children, onClose, actions, wide }: { title: string; children: ReactNode; onClose: () => void; actions?: ReactNode; wide?: boolean }) {
   useEffect(() => {
     const k = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
     window.addEventListener('keydown', k);
@@ -8,7 +8,7 @@ export function Modal({ title, children, onClose, actions }: { title: string; ch
   }, [onClose]);
   return (
     <div className="overlay" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
-      <div className="modal" role="dialog" aria-label={title}>
+      <div className={`modal${wide ? ' wide' : ''}`} role="dialog" aria-label={title}>
         <div className="m-head"><h2>{title}</h2></div>
         <div className="m-body">{children}</div>
         {actions && <div className="actions">{actions}</div>}

@@ -1,7 +1,6 @@
 import { useEffect, useRef } from 'react';
 import type {
-  AppState, Block, BlockType, Edge, Flow, FlowMeta, LedgerItem, Repo, Run, RunDetail, ServerEvent, Settings,
-  TriggerAssignment, TriggerKind, Usage, ValidationIssue,
+  AppState, Block, BlockType, Edge, Flow, FlowMeta, LedgerItem, Repo, Run, RunDetail, ServerEvent, Settings, TriggerAssignment, TriggerKind, Usage, ValidationIssue, FlowExport, ImportPreview,
 } from '../../src/shared/types.ts';
 
 export interface BlockTypeInfo {
@@ -56,6 +55,9 @@ export const api = {
   flow: (id: string) => req<Flow>('GET', `/api/flows/${encodeURIComponent(id)}`),
   createFlow: (b: { name: string; description?: string; blocks?: Block[]; edges?: Edge[] }) => req<Flow>('POST', '/api/flows', b),
   duplicateFlow: (id: string, name?: string) => req<Flow>('POST', '/api/flows', { duplicateOf: id, name }),
+  exportFlow: (id: string) => req<FlowExport>('GET', `/api/flows/${encodeURIComponent(id)}/export`),
+  previewImport: (text: string) => req<ImportPreview>('POST', '/api/flows/import/preview', { text }),
+  importFlow: (text: string, name?: string) => req<Flow>('POST', '/api/flows/import', { text, name }),
   saveFlow: (id: string, b: Partial<Pick<Flow, 'name' | 'description' | 'blocks' | 'edges'>>) =>
     req<Flow>('PUT', `/api/flows/${encodeURIComponent(id)}`, b),
   deleteFlow: (id: string) => req<void>('DELETE', `/api/flows/${encodeURIComponent(id)}`),

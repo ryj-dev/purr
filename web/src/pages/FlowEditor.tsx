@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  ChevronLeft, CircleAlert, CircleCheck, Copy, LayoutGrid, ListChecks, LoaderCircle, Lock, MousePointerClick, Save, TriangleAlert,
+  ChevronLeft, CircleAlert, CircleCheck, Copy, LayoutGrid, ListChecks, LoaderCircle, Lock, MousePointerClick, Save, Share2, TriangleAlert,
 } from 'lucide-react';
 import { EmptyState, ErrorCard, TypeTile } from '../components/ui.tsx';
 import type { Block, BlockType, Edge, Flow, ValidationIssue } from '../../../src/shared/types.ts';
@@ -11,6 +11,7 @@ import { Inspector } from '../components/Inspector.tsx';
 import { Palette } from '../components/Palette.tsx';
 import { RouteMini } from '../components/Station.tsx';
 import { useToast } from '../components/Toast.tsx';
+import { ExportFlowModal } from '../components/Share.tsx';
 import { BLOCK_META, autoLayout, navigate, rid } from '../util.ts';
 
 export function FlowEditorPage({ id }: { id: string }) {
@@ -23,6 +24,7 @@ export function FlowEditorPage({ id }: { id: string }) {
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
   const [dirty, setDirty] = useState(false);
+  const [sharing, setSharing] = useState(false);
   const [saving, setSaving] = useState(false);
   const [selected, setSelected] = useState<string | null>(null);
   const [issues, setIssues] = useState<ValidationIssue[]>([]);
@@ -196,6 +198,7 @@ export function FlowEditorPage({ id }: { id: string }) {
         {!readOnly && <button className="ghost" onClick={layout} title="Arrange blocks left to right"><LayoutGrid size={14} />Auto-layout</button>}
         <button className="ghost" onClick={() => runValidate(blocks, edges, true)}><ListChecks size={14} />Validate</button>
         <button className="ghost" onClick={duplicate}><Copy size={14} />Duplicate</button>
+        <button className="ghost" onClick={() => setSharing(true)} title={dirty ? 'Shares the saved version' : 'Copy this flow as text to share'}><Share2 size={14} />Share</button>
         {!readOnly && <>
           <span className="vsep" />
           <button className="primary" disabled={!dirty || saving} onClick={save} title="Save (⌘S)">{saving ? <><LoaderCircle size={13} className="spin" />Saving…</> : <><Save size={13} />Save <kbd>⌘S</kbd></>}</button>
@@ -274,6 +277,7 @@ export function FlowEditorPage({ id }: { id: string }) {
           </div>
         )}
       </div>
+      {sharing && flow && <ExportFlowModal flowId={flow.id} flowName={flow.name} onClose={() => setSharing(false)} />}
     </div>
   );
 }

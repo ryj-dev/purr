@@ -229,6 +229,22 @@ export interface AppState {
 
 export interface ValidationIssue { blockId: string | null; level: 'error' | 'warning'; message: string }
 
+/** Something an imported flow is allowed to do that the importer should read before trusting it. */
+export interface ShareRisk { blockId: string; label: string; level: 'danger' | 'warn' | 'info'; message: string; detail?: string }
+
+/** A shared flow, checked but not saved: what the Import dialog shows before you confirm. */
+export interface ImportPreview {
+  name: string;
+  description: string;
+  blocks: Block[];
+  edges: Edge[];
+  risks: ShareRisk[];
+  notes: string[];             // what was dropped or repaired while reading it
+  issues: ValidationIssue[];   // the usual flow validation
+}
+
+export interface FlowExport { text: string; json: string; bytes: number }
+
 // Template variables available in context/prompt/verify prompts (documented in the UI).
 export const TEMPLATE_VARS: Record<string, string> = {
   pr_title: 'PR title (empty without a PR)',

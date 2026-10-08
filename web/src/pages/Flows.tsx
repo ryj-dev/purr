@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState, type MouseEvent } from 'react';
-import { Boxes, Copy, Eye, Lock, Pencil, Plus, Trash } from 'lucide-react';
+import { Boxes, Copy, Download, Eye, Lock, Pencil, Plus, Share2, Trash } from 'lucide-react';
 import { ErrorCard, PageHeader, triggerIcon } from '../components/ui.tsx';
 import type { Flow, FlowMeta, TriggerAssignment } from '../../../src/shared/types.ts';
 import { RouteMini } from '../components/Station.tsx';
@@ -7,6 +7,7 @@ import { api, errMsg } from '../api.ts';
 import { useApp } from '../state.tsx';
 import { Confirm, Modal } from '../components/Modal.tsx';
 import { useToast } from '../components/Toast.tsx';
+import { ExportFlowModal, ImportFlowModal } from '../components/Share.tsx';
 import { navigate, timeAgo } from '../util.ts';
 
 function NewFlowModal({ flows, onClose }: { flows: FlowMeta[]; onClose: () => void }) {
@@ -52,6 +53,8 @@ export function FlowsPage() {
   const [error, setError] = useState<string | null>(null);
   const [showNew, setShowNew] = useState(false);
   const [toDelete, setToDelete] = useState<FlowMeta | null>(null);
+  const [toShare, setToShare] = useState<FlowMeta | null>(null);
+  const [showImport, setShowImport] = useState(false);
   const [graphs, setGraphs] = useState<Record<string, Flow>>({});
 
   const load = useCallback(async () => {
@@ -94,7 +97,10 @@ export function FlowsPage() {
     <div className="page">
       <PageHeader title="Flows"
         sub={<>A flow is a graph of scanners, Claude sessions and gates. Assign flows to triggers on the <a href="#/triggers">Repos &amp; triggers</a> page.</>}
-        actions={<button className="primary" onClick={() => setShowNew(true)}><Plus size={14} />New flow</button>} />
+        actions={<>
+          <button onClick={() => setShowImport(true)}><Download size={14} />Import</button>
+          <button className="primary" onClick={() => setShowNew(true)}><Plus size={14} />New flow</button>
+        </>} />
       {error && <ErrorCard>{error}</ErrorCard>}
       {!flows && !error && (
         <div className="cards">{Array.from({ length: 3 }, (_, i) => <div key={i} className="card skel" style={{ height: 168 }} />)}</div>
@@ -125,6 +131,7 @@ export function FlowsPage() {
               <div className="fc-foot">
                 <button className="sm" onClick={stop(() => navigate(`/flows/${f.id}`))}>{f.isDefault ? <><Eye size={13} />View</> : <><Pencil size={13} />Edit</>}</button>
                 <button className="sm" onClick={stop(() => duplicate(f))}><Copy size={13} />Duplicate</button>
+                <button className="sm" onClick={stop(() => setToShare(f))} title="Copy this flow as text to share"><Share2 size={13} />Share</button>
                 <span className="spacer" />
                 {!f.isDefault && <button className="sm ghost danger icon" title="Delete" aria-label={`Delete ${f.name}`} onClick={stop(() => setToDelete(f))}><Trash size={13} /></button>}
               </div>
@@ -133,6 +140,8 @@ export function FlowsPage() {
         })}
       </div>
       {showNew && flows && <NewFlowModal flows={flows} onClose={() => setShowNew(false)} />}
+      {toShare && <ExportFlowModal flowId={toShare.id} flowName={toShare.name} onClose={() => setToShare(null)} />}
+      {showImport && <ImportFlowModal onClose={() => setShowImport(false)} onImported={(id) => { setShowImport(false); navigate(`/flows/${id}`); }} />}
       {toDelete && (
         <Confirm title={`Delete ${toDelete.name}?`} danger confirmLabel="Delete"
           message={usedBy(toDelete.id).length

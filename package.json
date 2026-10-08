@@ -39,6 +39,7 @@
   },
   "main": "dist/desktop/main.cjs",
   "author": "Ry Jenkins",
+  "license": "MIT",
   "build": {
     "appId": "com.ryjenkins.purr",
     "productName": "PuRR",
