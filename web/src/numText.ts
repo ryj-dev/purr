@@ -8,8 +8,6 @@ export function parseNumText(text: string): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
-/** What a box shows once you leave it: what you typed if it's a number, else the setting's value. */
-export const settledText = (text: string, value: number) => (parseNumText(text) === null ? String(value) : text);
 
 export type NumEvent = { type: 'type'; text: string } | { type: 'value'; value: number };   // leaving the box: numFieldHandlers.blur
 
