@@ -32,7 +32,7 @@ export interface RunRequest {
   pr?: PrInfo | null;
 }
 
-const TERMINAL = new Set(['passed', 'blocked', 'failed', 'cancelled', 'superseded']);
+export const TERMINAL = new Set<string>(['passed', 'blocked', 'failed', 'cancelled', 'superseded']);
 const SESSION_BLOCKS = new Set(['context', 'prompt', 'verify', 'command']);
 
 export class RunManager {

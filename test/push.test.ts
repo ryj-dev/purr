@@ -12,6 +12,14 @@ const run = (cwd: string, ...args: string[]) => new Promise<{ status: number | n
   p.stderr.on('data', (d) => { stderr += d; });
   p.on('close', (status) => res({ status, stderr }));
 });
+const CLI = new URL('../src/server/cli.ts', import.meta.url).pathname;
+const cli = (cwd: string, ...args: string[]) => new Promise<{ status: number | null; stdout: string; stderr: string }>((res) => {
+  const p = spawn(process.execPath, [CLI, ...args], { cwd });
+  let stdout = '', stderr = '';
+  p.stdout.on('data', (d) => { stdout += d; });
+  p.stderr.on('data', (d) => { stderr += d; });
+  p.on('close', (status) => res({ status, stdout, stderr }));
+});
 import { openDb } from '../src/server/db.ts';
 import { ensureDefaults } from '../src/server/flows/store.ts';
 import { ClaudeRunner } from '../src/server/claude.ts';
@@ -55,6 +63,10 @@ test('git push: pre-push scan blocks a secret; a clean push lands and queues the
     const ok = await run(repo, 'push', '-u', 'origin', 'feature');
     assert.equal(ok.status, 0, ok.stderr);
     assert.match(ok.stderr, /feature will be reviewed once the push lands/);
+    const head = sh(repo, 'rev-parse', 'HEAD');
+    assert.ok(ok.stderr.includes(`purr findings --sha ${head.slice(0, 12)} --wait`), 'the hook says how to get the results');
+    // a session asks straight after pushing, before the review exists: --wait covers the gap
+    const waited = cli(repo, 'findings', '--wait', '--json', '--timeout', '30');
 
     // the daemon confirms the remote moved, then runs the post-push flow in the background
     let post;
@@ -68,6 +80,11 @@ test('git push: pre-push scan blocks a secret; a clean push lands and queues the
     assert.equal(post!.headSha, sh(repo, 'rev-parse', 'HEAD'));
     const findings = db.getRunFindings(post!.id);
     assert.ok(Array.isArray(findings));
+    const w = await waited;
+    const out = JSON.parse(w.stdout);
+    assert.equal(out.run.id, post!.id);
+    assert.equal(out.findings.length, findings.length);
+    assert.equal(w.status, findings.some((f) => f.severity === 'must_fix') ? 1 : 0, 'exit 1 on a must-fix, like purr run');
     const prePush = db.listRuns(50).filter((r) => r.trigger === 'pre-push');
     assert.deepEqual(prePush.map((r) => r.status).sort(), ['blocked', 'passed']);
   } finally {

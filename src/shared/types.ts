@@ -108,7 +108,7 @@ export interface Finding {
   alsoFoundBy?: string[];     // block ids of merged duplicates
   verified?: { real: boolean; note: string } | null;
   fingerprint?: string;
-  ledger?: 'new' | 'open' | 'regression' | 'dismissed' | 'tracked';
+  ledger?: 'new' | 'open' | 'regression' | 'dismissed' | 'tracked' | 'fixed';   // 'fixed' only when read back later
 }
 
 export interface SessionUse {

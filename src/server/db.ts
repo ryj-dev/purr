@@ -44,6 +44,15 @@ const EMPTY_USAGE: Usage = {
 
 export type DB = ReturnType<typeof openDb>;
 
+export interface RunQuery {
+  repoIds?: string[];
+  branch?: string | null;
+  pr?: number | null;
+  sha?: string | null;
+  triggers?: TriggerKind[];
+  limit?: number;
+}
+
 export function openDb(file = paths.db) {
   const db = new DatabaseSync(file);
   db.exec(`
@@ -168,6 +177,20 @@ export function openDb(file = paths.db) {
       return (rows as { data: string }[]).map((r) => {
         const run = JSON.parse(r.data) as Run;
         return { ...run, flow: { ...run.flow, blocks: [], edges: [] } }; // list view doesn't need the snapshot
+      });
+    },
+    /** Newest first. Every filter is optional; `sha` matches a prefix of the head commit. */
+    findRuns: (q: RunQuery): Run[] => {
+      const where: string[] = [], args: (string | number)[] = [];
+      if (q.repoIds) { where.push(`repo_id IN (${q.repoIds.map(() => '?').join(', ') || 'NULL'})`); args.push(...q.repoIds); }
+      if (q.branch) { where.push("json_extract(data, '$.branch') = ?"); args.push(q.branch); }
+      if (q.pr != null) { where.push("json_extract(data, '$.pr.number') = ?"); args.push(q.pr); }
+      if (q.sha) { where.push("json_extract(data, '$.headSha') LIKE ?"); args.push(`${q.sha.replace(/[^0-9a-f]/gi, '')}%`); }
+      if (q.triggers?.length) { where.push(`json_extract(data, '$.trigger') IN (${q.triggers.map(() => '?').join(', ')})`); args.push(...q.triggers); }
+      const sql = `SELECT data FROM runs ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY queued_at DESC LIMIT ?`;
+      return (db.prepare(sql).all(...args, q.limit ?? 50) as { data: string }[]).map((r) => {
+        const run = JSON.parse(r.data) as Run;
+        return { ...run, flow: { ...run.flow, blocks: [], edges: [] } };
       });
     },
     setRunFindings: (id: string, findings: Finding[]) => db.prepare('UPDATE runs SET findings = ? WHERE id = ?').run(JSON.stringify(findings), id),
