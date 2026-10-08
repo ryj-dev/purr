@@ -4,7 +4,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
-import { runScanner } from '../src/server/scanners.ts';
+import { limits, runScanner } from '../src/server/scanners.ts';
 import { changedFiles, type ChangeSpec } from '../src/server/git.ts';
 import { fingerprint } from '../src/server/engine/findings.ts';
 import { DEFAULT_FLOWS } from '../src/server/flows/defaults.ts';
@@ -293,4 +293,77 @@ test("a PR comment says which tool found a scanner finding, and nothing of the k
   assert.match(lines[at('From hadolint') + 1], /^  _?Found by \*\*hadolint\*\*/);
   assert.doesNotMatch(lines[at('From Claude') + 1] ?? '', /Found by/);
   assert.equal(text.match(/Found by/g)?.length, 1);
+});
+
+test("hadolint and actionlint use the repo's own config from the reviewed commit; none, no flag", async () => {
+  const wf = '.github/workflows/ci.yml';
+  const { change, files } = await staged({
+    [wf]: 'on: push\njobs:\n  a:\n    runs-on: [self-hosted, gpu]\n',
+    'Dockerfile': 'FROM node:20\n',
+    '.github/actionlint.yaml': 'self-hosted-runner:\n  labels: [gpu]\n',
+    '.hadolint.yaml': 'ignored: [DL3006]\n',
+  });
+  // each fake notes its arguments and keeps a copy of the config it was pointed at
+  const RECORD = (tool: string, flag: string) => `printf '%s\\n' "$@" > "$D/${tool}.args"
+prev=""; for a; do [ "$prev" = "${flag}" ] && cp "$a" "$D/${tool}.config"; prev="$a"; done
+echo '[]'`;
+  const t = fakeTools({ actionlint: RECORD('actionlint', '-config-file'), hadolint: RECORD('hadolint', '--config') });
+  try {
+    assert.equal((await runScanner('actionlint', 'a', files, change)).state.state, 'ran');
+    assert.match(readFileSync(join(t.dir, 'actionlint.args'), 'utf8'), /-config-file\n.*\.github\/actionlint\.yaml\n/);
+    assert.match(readFileSync(join(t.dir, 'actionlint.config'), 'utf8'), /labels: \[gpu\]/, "the repo's runner labels");
+    assert.equal((await runScanner('hadolint', 'h', files, change)).state.state, 'ran');
+    assert.match(readFileSync(join(t.dir, 'hadolint.config'), 'utf8'), /DL3006/);
+  } finally { t.restore(); }
+
+  const bare = await staged({ [wf]: 'on: push\n' });
+  const t2 = fakeTools({ actionlint: RECORD('actionlint', '-config-file') });
+  try {
+    await runScanner('actionlint', 'a', bare.files, bare.change);
+    assert.doesNotMatch(readFileSync(join(t2.dir, 'actionlint.args'), 'utf8'), /-config-file/, 'no config in the repo: no flag');
+  } finally { t2.restore(); }
+});
+
+test('two different actionlint errors of one kind in a file stay two findings; repeats of one error group', async () => {
+  const wf = '.github/workflows/ci.yml';
+  const body = Array.from({ length: 45 }, (_, i) => `k${i + 1}: v${i + 1}`).join('\n') + '\n';
+  const { change, files } = await staged({ [wf]: body });
+  const t = fakeTools({ actionlint: FROM_FIXTURE('actionlint', 1) });
+  const err = (line: number, message: string) => ({ line, column: 1, kind: 'expression', message, filepath: wf });
+  writeFileSync(join(t.dir, `actionlint-${wf.replace(/\//g, '_')}.json`), JSON.stringify([
+    err(10, 'property "foo" is not defined in object type'), err(40, 'undefined variable "secretz"'),
+    err(42, 'undefined variable "secretz"'),
+  ]));
+  try {
+    const r = await runScanner('actionlint', 'scan-actionlint', files, change);
+    const got = r.findings.map((f) => [f.line, f.lines, f.scenario]);
+    assert.deepEqual(got, [
+      [10, [10], 'property "foo" is not defined in object type'],
+      [40, [40, 42], 'undefined variable "secretz"'],
+    ]);
+    const content = readFileSync(join(change.cwd, wf), 'utf8');
+    assert.notEqual(fingerprint(r.findings[0], content), fingerprint(r.findings[1], content), 'each its own identity');
+  } finally { t.restore(); }
+});
+
+test('a hadolint / actionlint call that runs past its time: that file unchecked (partial); every file, failed', async () => {
+  const { change, files } = await staged({ 'Dockerfile': 'FROM a\n', 'svc/Dockerfile': 'FROM b\n' });
+  const SLOW_ON = (match: string) => `for a; do f="$a"; done
+case "$f" in *${match}*) sleep 5;; esac
+echo '[]'`;
+  const before = limits.fileMs;
+  limits.fileMs = 2000;
+  const t = fakeTools({ hadolint: SLOW_ON('svc/') });
+  try {
+    const r = await runScanner('hadolint', 'h', files, change);
+    assert.equal(r.state.state, 'partial', JSON.stringify(r.state));
+    assert.deepEqual(r.state.incomplete!.map((i) => i.file), ['svc/Dockerfile']);
+    assert.match(r.state.incomplete![0].reason, /timed out/);
+  } finally { t.restore(); }
+  const t2 = fakeTools({ hadolint: SLOW_ON('Dockerfile') });
+  try {
+    const r = await runScanner('hadolint', 'h', files, change);
+    assert.equal(r.state.state, 'failed');
+    assert.match(r.state.error ?? '', /timed out/);
+  } finally { t2.restore(); limits.fileMs = before; }
 });

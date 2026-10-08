@@ -23,7 +23,8 @@ const LOCKS = /(^|\/)(package-lock\.json|npm-shrinkwrap\.json|yarn\.lock|pnpm-lo
 // is still a secret: it's scanned under a name the scanner doesn't load as config, and reported under its own
 const SCAN_CONFIG = new Set(['.betterleaks.toml', '.gitleaks.toml', '.betterleaksignore', '.gitleaksignore']);
 const AS_DATA = '.purr-scan';
-const FILE_MS = 60_000;   // one hadolint / actionlint call (one file)
+/** One hadolint / actionlint call (one file). A setting so the tests can make it short. */
+export const limits = { fileMs: 60_000 };
 
 // zizmor rule -> [headline, what goes wrong, fix]
 const ZIZMOR: Record<string, [string, string, string]> = {
@@ -61,11 +62,16 @@ function hit(blockId: string, scanner: ScannerName, file: string, line: number |
   };
 }
 
-/** One finding per (scanner, rule, file): the first line is the anchor, `lines` lists them all. */
+/**
+ * One finding per (scanner, rule, file): the first line is the anchor, `lines` lists them all. actionlint's "rule" is a
+ * broad kind (expression, syntax-check...) covering unrelated errors, so its findings are also told apart by message:
+ * repeats of one error still group, two different ones don't hide each other.
+ */
 export function group(hits: Finding[]): Finding[] {
   const out = new Map<string, Finding>();
   for (const h of hits) {
-    const k = `${h.source.scanner}|${h.source.rule}|${h.file}`;
+    const own = h.source.scanner === 'actionlint' ? `|${h.scenario.toLowerCase().replace(/\s+/g, ' ').trim()}` : '';
+    const k = `${h.source.scanner}|${h.source.rule}|${h.file}${own}`;
     const prev = out.get(k);
     if (prev) prev.lines!.push(...(h.line != null ? [h.line] : []));
     else out.set(k, { ...h, lines: h.line != null ? [h.line] : [] });
@@ -260,14 +266,31 @@ async function writeChanged(files: ChangedFile[], rx: RegExp, change: ChangeSpec
 }
 
 /**
+ * The repo's own config for an advice-only linter (hadolint, actionlint), from the reviewed commit, written into the
+ * scratch root -> its path there, or null. Unlike the secrets scanner's, a change's own edit to it is honoured: at
+ * worst it hides some advice, it can't hide a must-fix.
+ */
+async function repoConfig(change: ChangeSpec, root: string, names: string[]): Promise<string | null> {
+  for (const name of names) {
+    const txt = await fileAt(change, name);
+    if (txt == null) continue;
+    const p = join(root, name);
+    mkdirSync(dirname(p), { recursive: true });
+    writeFileSync(p, txt);
+    return p;
+  }
+  return null;
+}
+
+/**
  * Runs `args(path)` once per file, each with its own timeout -> [(file, parsed JSON list)]. A file whose run fails is
  * listed in `incomplete` (state partial); every file failing throws (state failed). Never a silent pass.
  */
 async function eachFile(tool: string, picked: ChangedFile[], args: (path: string) => string[], cwd: string, ok: number[], incomplete: Incomplete) {
   const out: Array<[ChangedFile, Array<Record<string, any>>]> = [];
   for (const f of picked) {
-    const r = await exec(tool, args(f.path), { cwd, timeoutMs: FILE_MS });   // a missing tool throws ENOENT: not installed
-    if (r.timedOut) { incomplete.push({ file: f.path, reason: `timed out after ${FILE_MS / 1000}s` }); continue; }
+    const r = await exec(tool, args(f.path), { cwd, timeoutMs: limits.fileMs });   // a missing tool throws ENOENT: not installed
+    if (r.timedOut) { incomplete.push({ file: f.path, reason: `timed out after ${limits.fileMs / 1000}s` }); continue; }
     if (!ok.includes(r.code)) { incomplete.push({ file: f.path, reason: `${tool} exited ${r.code}: ${clean(r.stderr)}` }); continue; }
     let got: unknown = null;
     try { got = JSON.parse(r.stdout || 'null'); } catch { /* below */ }
@@ -288,8 +311,10 @@ async function hadolint(blockId: string, files: ChangedFile[], change: ChangeSpe
   const root = join(work, 'hadolint');
   const picked = await writeChanged(files, DOCKERFILE, change, root);
   if (!picked.length) return null;
+  const config = await repoConfig(change, root, ['.hadolint.yaml', '.hadolint.yml']);
   const out: Finding[] = [];
-  for (const [f, res] of await eachFile('hadolint', picked, (p) => ['--no-fail', '--no-color', '-f', 'json', p], root, [0], incomplete)) {
+  const args = (p: string) => ['--no-fail', '--no-color', '-f', 'json', ...(config ? ['--config', config] : []), p];
+  for (const [f, res] of await eachFile('hadolint', picked, args, root, [0], incomplete)) {
     for (const h of res) {
       if (h.level !== 'error' || !f.added.has(h.line)) continue;
       out.push(hit(blockId, 'hadolint', f.path, h.line, h.code, 'lint', `Dockerfile problem: ${clean(h.message).slice(0, 120)}`,
@@ -305,8 +330,11 @@ async function actionlint(blockId: string, files: ChangedFile[], change: ChangeS
   const root = join(work, 'actionlint');
   const picked = await writeChanged(files, WF, change, root);
   if (!picked.length) return null;
+  // its own runner labels and config variables: without them, every `runs-on: [self-hosted, gpu]` is an error
+  const config = await repoConfig(change, root, ['.github/actionlint.yaml', '.github/actionlint.yml']);
   const out: Finding[] = [];
-  for (const [f, res] of await eachFile('actionlint', picked, (p) => ['-no-color', '-format', '{{json .}}', p], root, [0, 1], incomplete)) {
+  const args = (p: string) => ['-no-color', '-format', '{{json .}}', ...(config ? ['-config-file', config] : []), p];
+  for (const [f, res] of await eachFile('actionlint', picked, args, root, [0, 1], incomplete)) {
     for (const h of res) {
       if (!f.added.has(h.line)) continue;
       out.push(hit(blockId, 'actionlint', f.path, h.line, h.kind, 'lint', `Workflow problem: ${clean(h.message).slice(0, 120)}`,
