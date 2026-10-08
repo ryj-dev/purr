@@ -34,8 +34,7 @@ test('typing in a number box, step by step: never saves an empty box, and 4 -> 6
     }
     return { text: s.text, value: s.value, saved };
   };
-  assert.deepEqual(run(4, [{ type: 'type', text: '' }, { type: 'type', text: '6' }, { type: 'blur' }]), { text: '6', value: 6, saved: [6] });
-  assert.deepEqual(run(4, [{ type: 'type', text: '' }, { type: 'blur' }]), { text: '4', value: 4, saved: [] }, 'left empty: back to 4, nothing saved');
+  assert.deepEqual(run(4, [{ type: 'type', text: '' }, { type: 'type', text: '6' }]), { text: '6', value: 6, saved: [6] });
   assert.deepEqual(run(4, [{ type: 'type', text: '' }, { type: 'value', value: 9 }]), { text: '9', value: 9, saved: [] }, 'reset from outside');
   assert.deepEqual(run(6, [{ type: 'type', text: '06' }]), { text: '06', value: 6, saved: [6] }, 'the same number: the box keeps what was typed');
 });
@@ -82,4 +81,7 @@ test("NumField's own handlers: clear 4, type 6, leave; clear and leave; '06' ove
   b.h.type('');
   b.outside(9);
   assert.equal(b.s.text, '9', 'even over a box someone had cleared');
+  b.h.type('');
+  b.h.blur();
+  assert.deepEqual([b.s.text, b.s.value, b.s.saved], ['9', 9, []], 'cleared again and left: the new value, not the stale 4, and nothing saved');
 });

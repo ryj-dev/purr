@@ -25,3 +25,8 @@ export function cliAction(s: CliStatus): { kind: 'done' | 'install' | 'blocked';
   }
   return { kind: 'install', button: 'Install purr', tray: 'Install command line tool…', note: '' };
 }
+
+/** The tray's menu item for it: clickable (to install) only when there's something it can do. */
+export function cliTrayItem(a: ReturnType<typeof cliAction>, install: () => void): { label: string; enabled: boolean; click?: () => void } {
+  return a.kind === 'install' ? { label: a.tray, enabled: true, click: install } : { label: a.tray, enabled: false };
+}

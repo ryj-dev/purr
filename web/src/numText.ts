@@ -11,7 +11,7 @@ export function parseNumText(text: string): number | null {
 /** What a box shows once you leave it: what you typed if it's a number, else the setting's value. */
 export const settledText = (text: string, value: number) => (parseNumText(text) === null ? String(value) : text);
 
-export type NumEvent = { type: 'type'; text: string } | { type: 'blur' } | { type: 'value'; value: number };
+export type NumEvent = { type: 'type'; text: string } | { type: 'value'; value: number };   // leaving the box: numFieldHandlers.blur
 
 /**
  * One step of a number box. `value` is the setting; the result is the box's new text, the setting after it, and the
@@ -22,7 +22,6 @@ export function numFieldStep(s: { text: string; value: number }, e: NumEvent): {
     const v = parseNumText(e.text);
     return { text: e.text, value: v ?? s.value, emit: v };
   }
-  if (e.type === 'blur') return { text: settledText(s.text, s.value), value: s.value, emit: null };
   return { text: String(e.value), value: e.value, emit: null };   // loaded, saved or reset from outside
 }
 
@@ -31,7 +30,7 @@ export function numFieldStep(s: { text: string; value: number }, e: NumEvent): {
  * changing from outside (NumField calls `value` from an effect on the setting, so only when it actually changes).
  */
 export function numFieldHandlers(get: () => { text: string; value: number }, setText: (t: string) => void, save: (v: number) => void,
-  memo: { before: number | null } = { before: null }) {
+  memo: { before: number | null; saved?: number | null } = { before: null }) {
   return {
     /** Remembers the value from before this edit: backspacing 7878 away saves 787, 78 and 7 on the way. */
     focus: () => { memo.before = get().value; },
@@ -39,7 +38,7 @@ export function numFieldHandlers(get: () => { text: string; value: number }, set
       if (memo.before === null) memo.before = get().value;
       const r = numFieldStep(get(), { type: 'type', text });
       setText(r.text);
-      if (r.emit !== null) save(r.emit);
+      if (r.emit !== null) { memo.saved = r.emit; save(r.emit); }
     },
     /** Left empty (or not a number): back to the value from before the edit, saved again if typing changed it. */
     blur: () => {
@@ -48,9 +47,14 @@ export function numFieldHandlers(get: () => { text: string; value: number }, set
       memo.before = null;
       if (parseNumText(text) !== null) return;
       setText(String(before));
-      if (before !== value) save(before);
+      if (before !== value) { memo.saved = before; save(before); }
     },
-    value: (value: number) => setText(numFieldStep(get(), { type: 'value', value }).text),
+    value: (value: number) => {
+      // changed elsewhere mid-edit (a reload, another window): that is the value to go back to now, not the old one.
+      // The box's own saves come back here too (787, 78, 7 while backspacing 7878): those don't count
+      if (memo.before !== null && value !== memo.saved) memo.before = value;
+      setText(numFieldStep(get(), { type: 'value', value }).text);
+    },
   };
 }
 

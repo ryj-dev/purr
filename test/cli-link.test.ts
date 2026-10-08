@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, readFileSync, readlinkSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { cliStatusOf, installCliAt } from '../desktop/cliLink.ts';
-import { cliAction } from '../src/shared/cliLink.ts';
+import { cliAction, cliTrayItem } from '../src/shared/cliLink.ts';
 
 test("the command line tool's link: missing, something in the way, this app's, another PuRR's, something else's", () => {
   const dir = mkdtempSync(join(process.env.TMPDIR!, 'purr-cli-'));
@@ -71,4 +71,15 @@ test("installing the link creates or replaces a link, and never touches a file i
   assert.equal(readFileSync(file, 'utf8'), 'my own script\n', 'a real file is left alone');
   assert.doesNotMatch(installCliAt(join(dir, 'p', 'purr'), shim, join(dir, 'p') + '/').message, /PATH/, 'on PATH (trailing slash): no PATH hint');
   assert.match(installCliAt(join(dir, 'q', 'purr'), shim, '/usr/bin').message, /Add .* to your PATH/);
+});
+
+test('the tray item is clickable only when it can install', () => {
+  const base = { link: '/Users/me/.local/bin/purr', target: null, purrCopy: false, onPath: true };
+  let installed = 0;
+  for (const [state, enabled] of [['missing', true], ['other', true], ['installed', false], ['blocked', false]] as const) {
+    const item = cliTrayItem(cliAction({ ...base, state } as any), () => { installed++; });
+    assert.equal(item.enabled, enabled, state);
+    item.click?.();
+  }
+  assert.equal(installed, 2, 'only missing and other install');
 });

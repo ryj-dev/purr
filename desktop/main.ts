@@ -14,7 +14,7 @@ import {
 } from 'electron';
 import type { AppState, Run, ServerEvent } from '../src/shared/types.ts';
 import { cliStatusOf, installCliAt } from './cliLink.ts';
-import { cliAction } from '../src/shared/cliLink.ts';
+import { cliAction, cliTrayItem } from '../src/shared/cliLink.ts';
 
 const PURR_HOME = process.env.PURR_HOME || join(homedir(), '.purr');
 const LOG = join(PURR_HOME, 'logs', 'daemon.log');
@@ -340,9 +340,8 @@ function updateTray() {
       click: (item) => { setLoginItem(item.checked); updateTray(); },
     },
     { type: 'separator' },
-    cli.kind !== 'install'
-      ? { label: cli.tray, enabled: false }   // installed, or something in the way that only you can move
-      : { label: cli.tray, click: async () => { const r = installCli(); updateTray(); dialog.showMessageBox({ message: r.ok ? 'The purr command line tool is installed' : 'Couldn\'t install the command line tool', detail: r.message }); } },
+    // installed, or something in the way that only you can move: shown, not clickable
+    cliTrayItem(cli, () => { const r = installCli(); updateTray(); void dialog.showMessageBox({ message: r.ok ? 'The purr command line tool is installed' : 'Couldn\'t install the command line tool', detail: r.message }); }),
     { label: mode === 'external' ? 'Service: started outside the app' : 'Restart service', enabled: mode !== 'external', click: () => restartService() },
     { label: 'Open service log', click: () => shell.openPath(LOG) },
     { type: 'separator' },
