@@ -17,6 +17,10 @@ import { exec, newId, paths } from './util.ts';
 
 const WF = /(^|\/)\.github\/workflows\/[^/]+\.ya?ml$/;
 const DOCKERFILE = /(^|\/)(Dockerfile(\.[^/]+)?|[^/]+\.Dockerfile)$/;
+// docs and templates named after a Dockerfile (docs/Dockerfile.md, Dockerfile.j2) aren't Dockerfiles hadolint can read
+const NOT_DOCKERFILE = /\.(md|markdown|txt|rst|adoc|html|j2|jinja2?|tpl|tmpl|template|erb|mustache|hbs|example|sample|bak|orig|swp)$/i;
+/** Dockerfile, Dockerfile.<variant> and *.Dockerfile, not a doc or template named after one. */
+export const isDockerfile = (path: string) => DOCKERFILE.test(path) && !NOT_DOCKERFILE.test(path);
 // full pinned trees osv-scanner reads as they are (go.mod lists every module the build uses; osv can't parse go.sum)
 const LOCKS = /(^|\/)(package-lock\.json|npm-shrinkwrap\.json|yarn\.lock|pnpm-lock\.yaml|composer\.lock|uv\.lock|poetry\.lock|pdm\.lock|Pipfile\.lock|requirements[^/]*\.txt|Gemfile\.lock|go\.mod|Cargo\.lock)$/;
 // a change's own scanner config or ignore file must never steer the scan of that change, but a secret pasted into one
@@ -196,11 +200,16 @@ const cmpVer = (a: string, b: string) => {
 const normPkg = (n: string) => n.replace(/[-_.]+/g, '-').toLowerCase();
 const escRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
-async function osv(blockId: string, files: ChangedFile[], change: ChangeSpec, work: string): Promise<Finding[] | null> {
+/**
+ * A lockfile osv-scanner can't read is listed in `incomplete` (state partial) and the others are still checked, so a
+ * vulnerable lockfile beside it still blocks; every lockfile failing throws (state failed). Never a silent pass.
+ */
+async function osv(blockId: string, files: ChangedFile[], change: ChangeSpec, work: string, incomplete: Incomplete): Promise<Finding[] | null> {
   const locks = files.filter((f) => LOCKS.test(f.path) && f.status !== 'deleted');
   if (!locks.length) return null;
   const out: Finding[] = [];
-  for (const f of locks) {
+  let failed = 0;
+  locks: for (const [i, f] of locks.entries()) {
     const found: Record<'base' | 'head', Map<string, Vuln>> = { base: new Map(), head: new Map() };
     let headTxt = '';
     for (const tag of ['base', 'head'] as const) {
@@ -208,10 +217,18 @@ async function osv(blockId: string, files: ChangedFile[], change: ChangeSpec, wo
         : f.status === 'added' ? '' : await fileAtBase(change, f.oldPath ?? f.path);
       if (tag === 'head') headTxt = txt ?? '';
       if (!txt) continue;
-      const p = join(work, 'osv', tag, basename(f.path));
+      const p = join(work, 'osv', String(i), tag, basename(f.path));
       mkdirSync(dirname(p), { recursive: true });
       writeFileSync(p, txt);
-      found[tag] = await osvScan(p);
+      try {
+        found[tag] = await osvScan(p);
+      } catch (e: any) {
+        if (isMissing(e)) throw e;   // osv-scanner itself is missing: the whole scanner is "not installed"
+        // either side unread means new can't be told from old: this file's check didn't finish
+        incomplete.push({ file: f.path, reason: `${tag === 'base' ? "the base branch's version: " : ''}${String(e?.message ?? e)}` });
+        failed++;
+        continue locks;
+      }
     }
     type Pkg = { ver: string; sev: number; ids: string[]; summ: string[]; fixed: string[] };
     const by = new Map<string, Pkg>();
@@ -250,14 +267,15 @@ async function osv(blockId: string, files: ChangedFile[], change: ChangeSpec, wo
         'Upgrading the packages that depend on them usually brings fixed versions; otherwise pin them.'));
     }
   }
+  if (failed === locks.length) throw new Error(incomplete[incomplete.length - 1].reason);
   return out;
 }
 
 type Incomplete = Array<{ file: string; reason: string }>;
 
 /** Changed files matching `rx` that still exist, with their contents written under `root`. */
-async function writeChanged(files: ChangedFile[], rx: RegExp, change: ChangeSpec, root: string) {
-  const picked = files.filter((f) => rx.test(f.path) && f.status !== 'deleted' && safePath(f.path) && !f.path.endsWith('.dockerignore'));
+async function writeChanged(files: ChangedFile[], pick: (path: string) => boolean, change: ChangeSpec, root: string) {
+  const picked = files.filter((f) => pick(f.path) && f.status !== 'deleted' && safePath(f.path) && !f.path.endsWith('.dockerignore'));
   for (const f of picked) {
     mkdirSync(dirname(join(root, f.path)), { recursive: true });
     writeFileSync(join(root, f.path), (await fileAt(change, f.path)) ?? '');
@@ -309,7 +327,7 @@ async function eachFile(tool: string, picked: ChangedFile[], args: (path: string
  */
 async function hadolint(blockId: string, files: ChangedFile[], change: ChangeSpec, work: string, incomplete: Incomplete): Promise<Finding[] | null> {
   const root = join(work, 'hadolint');
-  const picked = await writeChanged(files, DOCKERFILE, change, root);
+  const picked = await writeChanged(files, isDockerfile, change, root);
   if (!picked.length) return null;
   const config = await repoConfig(change, root, ['.hadolint.yaml', '.hadolint.yml']);
   const out: Finding[] = [];
@@ -328,7 +346,7 @@ async function hadolint(blockId: string, files: ChangedFile[], change: ChangeSpe
  * when those tools are installed. */
 async function actionlint(blockId: string, files: ChangedFile[], change: ChangeSpec, work: string, incomplete: Incomplete): Promise<Finding[] | null> {
   const root = join(work, 'actionlint');
-  const picked = await writeChanged(files, WF, change, root);
+  const picked = await writeChanged(files, (p) => WF.test(p), change, root);
   if (!picked.length) return null;
   // its own runner labels and config variables: without them, every `runs-on: [self-hosted, gpu]` is an error
   const config = await repoConfig(change, root, ['.github/actionlint.yaml', '.github/actionlint.yml']);
@@ -357,7 +375,7 @@ export async function runScanner(name: ScannerName, blockId: string, files: Chan
       : name === 'zizmor' ? await zizmor(blockId, files, change, work)
       : name === 'hadolint' ? await hadolint(blockId, files, change, work, incomplete)
       : name === 'actionlint' ? await actionlint(blockId, files, change, work, incomplete)
-      : await osv(blockId, files, change, work);
+      : await osv(blockId, files, change, work, incomplete);
     const findings = got ? group(got) : [];
     if (got === null) return { findings, state: { state: 'n/a', secs: secs() } };
     return { findings, state: incomplete.length ? { state: 'partial', hits: findings.length, incomplete, secs: secs() } : { state: 'ran', hits: findings.length, secs: secs() } };

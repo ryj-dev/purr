@@ -4,7 +4,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
-import { limits, runScanner } from '../src/server/scanners.ts';
+import { isDockerfile, limits, runScanner } from '../src/server/scanners.ts';
 import { changedFiles, type ChangeSpec } from '../src/server/git.ts';
 import { fingerprint } from '../src/server/engine/findings.ts';
 import { DEFAULT_FLOWS } from '../src/server/flows/defaults.ts';
@@ -39,11 +39,19 @@ x="$D/${tool}-$(echo "$f" | tr / _).json"
 cat "$x"; exit ${failCode}`;
 
 async function staged(files: Record<string, string>, base: Record<string, string> = {}) {
-  const repo = tempRepo({ 'README.md': '# demo\n', ...base });
-  for (const [p, body] of Object.entries(files)) {
-    mkdirSync(join(repo, p, '..'), { recursive: true });
-    writeFileSync(join(repo, p), body);
+  const repo = tempRepo({ 'README.md': '# demo\n' });
+  const write = (set: Record<string, string>) => {
+    for (const [p, body] of Object.entries(set)) {
+      mkdirSync(join(repo, p, '..'), { recursive: true });
+      writeFileSync(join(repo, p), body);
+    }
+  };
+  if (Object.keys(base).length) {   // the base version, committed (folders and all)
+    write(base);
+    sh(repo, 'add', '-A');
+    sh(repo, 'commit', '-qm', 'base', '--no-verify');
   }
+  write(files);
   sh(repo, 'add', '-A');
   const change: ChangeSpec = { mode: 'staged', cwd: repo, base: null, head: null };
   return { repo, change, files: await changedFiles(change) };
@@ -147,15 +155,18 @@ test('hadolint: errors on added lines only, as consider; a file it couldn\'t rea
 
 test('actionlint: workflow errors on added lines, as consider; nothing to check is n/a', async () => {
   const wf = '.github/workflows/ci.yml';
-  const { change, files } = await staged({ [wf]: 'on: push\njobs:\n  x:\n    runs-on: ubuntu-latest\n' });
+  // the workflow already had its first two lines; this change adds the job
+  const { change, files } = await staged({ [wf]: 'on: push\njobs:\n  x:\n    runs-on: ubuntu-latest\n' }, { [wf]: 'on: push\njobs:\n' });
   const t = fakeTools({ actionlint: FROM_FIXTURE('actionlint', 1) });
   writeFileSync(join(t.dir, `actionlint-${wf.replace(/\//g, '_')}.json`), JSON.stringify([
+    { message: 'unexpected key "on" in workflow', filepath: wf, line: 1, column: 1, kind: 'syntax-check' },   // unchanged line
     { message: '"steps" section is missing in job "x"', filepath: wf, line: 3, column: 3, kind: 'syntax-check' },
   ]));
   try {
     const r = await runScanner('actionlint', 'scan-actionlint', files, change);
     assert.equal(r.state.state, 'ran', r.state.error ?? '');
-    assert.deepEqual(r.findings.map((f) => [f.file, f.line, f.source.rule, f.severity]), [[wf, 3, 'syntax-check', 'consider']]);
+    assert.deepEqual(r.findings.map((f) => [f.file, f.line, f.source.rule, f.severity]), [[wf, 3, 'syntax-check', 'consider']],
+      'only the error on a line this change adds');
     // a clean workflow: actionlint prints nothing and exits 0
     writeFileSync(join(t.dir, `actionlint-${wf.replace(/\//g, '_')}.json`), '');
     writeFileSync(join(t.dir, 'actionlint'), `#!/bin/sh\nexit 0\n`);
@@ -217,7 +228,8 @@ test('a scanner finding says which tool found it and what that tool is', () => {
 });
 
 // osv-scanner: answers from what's in the file it's given (the last argument), and notes what it was asked to read
-const OSV = `for a; do f="$a"; done
+const OSV = `printf '%s\\n' "$@" > "$D/osv.args"
+for a; do f="$a"; done
 echo "$f" >> "$D/osv.files"
 case "$(cat "$f")" in *EXIT128*) exit 128;; *EXIT2*) echo boom >&2; exit 2;; *GARBAGE*) echo not json; exit 0;; esac
 vulns=""
@@ -241,6 +253,8 @@ test('osv-scanner: only vulnerabilities new on this change, an empty file is fin
     assert.deepEqual(r.findings.map((f) => [f.file, f.line, f.source.rule, f.severity]), [['package-lock.json', 4, 'GHSA-VULN-B', 'must_fix']]);
     assert.match(r.findings[0].title, /`lodash` 4\.17\.0 has 1 known vulnerability \(worst: critical\)/);
     assert.match(r.findings[0].fix!, /4\.17\.21/);
+    const args = readFileSync(join(t.dir, 'osv.args'), 'utf8').split('\n');
+    assert.ok(args.includes('--no-resolve') && args.includes('--all-packages'), 'the lockfile is read as the full pinned tree it is');
     // the same vulnerabilities on both sides: nothing new
     const same = await staged({ 'package-lock.json': lock('VULN-A x') }, { 'package-lock.json': lock('VULN-A') });
     assert.deepEqual((await runScanner('osv', 'o', same.files, same.change)).findings, []);
@@ -253,6 +267,14 @@ test('osv-scanner: only vulnerabilities new on this change, an empty file is fin
       assert.equal(x.state.state, 'failed', bad);
       assert.match(x.state.error!, /osv-scanner failed/);
     }
+    // one lockfile osv can't read beside one with a new critical vulnerability: partial, and the vulnerability is raised
+    const mixed = await staged({ 'package-lock.json': lock('VULN-B'), 'go.mod': 'EXIT2\n' });
+    const m = await runScanner('osv', 'scan-osv', mixed.files, mixed.change);
+    assert.equal(m.state.state, 'partial');
+    assert.deepEqual(m.state.incomplete?.map((x) => x.file), ['go.mod']);
+    assert.match(m.state.incomplete![0].reason, /osv-scanner failed \(exit 2\)/);
+    assert.deepEqual(m.findings.map((f) => [f.file, f.source.rule, f.severity]), [['package-lock.json', 'GHSA-VULN-B', 'must_fix']],
+      'still a must-fix, so the pre-push gate still blocks');
     const go = await staged({ 'go.mod': 'module x\n\nrequire example.com/y v1.0.0\n' });
     assert.equal((await runScanner('osv', 'o', go.files, go.change)).state.state, 'ran');
     assert.ok(readFileSync(join(t.dir, 'osv.files'), 'utf8').split('\n').some((l) => l.endsWith('/go.mod')), 'go.mod is read (osv can\'t parse go.sum)');
@@ -266,9 +288,9 @@ test("a scanner that couldn't check a file can't call its findings there fixed; 
   const br = (state: string | null, incomplete: string[] = []) => ({ runId: 'r', blockId: 'x', status: 'done', startedAt: null, finishedAt: null, error: null,
     output: state ? { scanner: { state, secs: 1, incomplete: incomplete.map((file) => ({ file, reason: 'timed out' })) } } : {} }) as any;
   const runs = new Map([['scan-hadolint', br('partial', ['api/Dockerfile'])], ['scan-actionlint', br('failed')], ['scan-osv', br('n/a')],
-    ['context', br(null)], ['scan-zizmor', { ...br('ran'), status: 'skipped' }]]);
-  const got = completeBlocks(['scan-hadolint', 'scan-actionlint', 'scan-osv', 'context', 'scan-zizmor'].map((id) => ({ id })), runs);
-  assert.deepEqual([...got.complete].sort(), ['context', 'scan-hadolint', 'scan-osv'], 'not the failed one, nor one that never ran');
+    ['context', br(null)], ['scan-zizmor', { ...br('ran'), status: 'skipped' }], ['scan-betterleaks', br('not installed')]]);
+  const got = completeBlocks(['scan-hadolint', 'scan-actionlint', 'scan-osv', 'context', 'scan-zizmor', 'scan-betterleaks'].map((id) => ({ id })), runs);
+  assert.deepEqual([...got.complete].sort(), ['context', 'scan-hadolint', 'scan-osv'], 'not the failed one, one that never ran, nor one not installed');
   assert.deepEqual([...got.unchecked.get('scan-hadolint')!], ['api/Dockerfile']);
 
   const db = openDb(join(mkdtempSync(join(process.env.TMPDIR!, 'purr-db-')), 'purr.db'));
@@ -278,8 +300,10 @@ test("a scanner that couldn't check a file can't call its findings there fixed; 
   open('checked', 'Dockerfile', 'scan-hadolint');
   open('unchecked', 'api/Dockerfile', 'scan-hadolint');
   open('failed', '.github/workflows/ci.yml', 'scan-actionlint');
+  open('secret', 'app.js', 'scan-betterleaks');
   applyLedger(db, { id: 'r1run', repoId: 'r1', branch: 'feat', flowId: 'default-review', trigger: 'post-push', mode: 'range' } as any, [], got.complete, got.unchecked);
-  assert.deepEqual(['checked', 'unchecked', 'failed'].map((fp) => db.getLedger(fp, 'r1')?.state), ['fixed', 'open', 'open']);
+  assert.deepEqual(['checked', 'unchecked', 'failed', 'secret'].map((fp) => db.getLedger(fp, 'r1')?.state), ['fixed', 'open', 'open', 'open'],
+    'betterleaks missing this time: its open secret stays open');
   db.close();
 });
 
@@ -366,4 +390,14 @@ echo '[]'`;
     assert.equal(r.state.state, 'failed');
     assert.match(r.state.error ?? '', /timed out/);
   } finally { t2.restore(); limits.fileMs = before; }
+});
+
+test('Dockerfiles for hadolint: Dockerfile, Dockerfile.<variant> and *.Dockerfile, not docs or templates named after one', () => {
+  for (const p of ['Dockerfile', 'api/Dockerfile', 'Dockerfile.dev', 'docker/Dockerfile.prod', 'web.Dockerfile', 'ci/test.Dockerfile']) {
+    assert.equal(isDockerfile(p), true, p);
+  }
+  for (const p of ['docs/Dockerfile.md', 'Dockerfile.txt', 'Dockerfile.j2', 'Dockerfile.tpl', 'Dockerfile.tmpl', 'Dockerfile.jinja',
+    'templates/Dockerfile.erb', 'Dockerfile.example', 'Dockerfile.sample', 'Dockerfile.dev.md', 'README.md', 'Dockerfile/notes', '.dockerignore']) {
+    assert.equal(isDockerfile(p), false, p);
+  }
 });
