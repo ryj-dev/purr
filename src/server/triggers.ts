@@ -22,6 +22,9 @@ export interface WatcherDeps {
   prForBranch: (repoPath: string, branch: string) => Promise<PrInfo | null>;
 }
 
+/** How often the poller looks for repos cloned since (ones PuRR's hooks never ran in, like a husky repo). */
+const DISCOVERY_MS = 10 * 60_000;
+
 export class PostPushWatcher {
   db: DB;
   mgr: RunManager;
@@ -38,6 +41,7 @@ export class PostPushWatcher {
   /** gh accounts listed at the first poll */
   private startAccounts: Set<string> | null = null;
   private answeredOnce = false;
+  private lastPoll = 0;
   private deps: WatcherDeps;
   /** push confirmations still waiting for the remote */
   private confirming = new Set<Promise<void>>();
@@ -133,11 +137,13 @@ export class PostPushWatcher {
    * lose a PR opened in between.
    */
   async poll() {
-    if (Date.now() - this.lastDiscovery > 10 * 60_000) {
+    if (Date.now() - this.lastDiscovery > DISCOVERY_MS) {
       this.lastDiscovery = Date.now();
       await discoverRepos(this.db).catch(() => 0);
     }
     const asked = Date.now();
+    const prevPoll = this.lastPoll;
+    this.lastPoll = Date.now();
     const fetched = await this.deps.fetchPrs();
     // gh unusable at the first poll: an account that turns up within the first quarter hour was most likely there all
     // along (gh offline at login, before the network was up); one that turns up later was signed in later
@@ -177,7 +183,12 @@ export class PostPushWatcher {
       if (this.lastSeen.get(handled) === pr.headRefOid) continue;   // the push hook (from any clone) has it
       if (seen === undefined) {
         const opened = pr.createdAt ? Date.parse(pr.createdAt) : 0;
-        if (!(opened >= (marks.get(pr.account) ?? this.startedAt))) continue;
+        // or opened shortly before its clone was first registered here: a repo with its own git hooks is only found by
+        // discovery, up to ten minutes after it was cloned, pushed and proposed. Not before PuRR started, though
+        // (only for a clone registered since the last poll: one the poller couldn't have seen the PR through before)
+        const cloned = Math.max(...local.map((c) => Date.parse(c.addedAt) || 0));
+        const justCloned = cloned > prevPoll && opened >= this.startedAt && opened >= cloned - DISCOVERY_MS;
+        if (!(opened >= (marks.get(pr.account) ?? this.startedAt)) && !justCloned) continue;
       }
       this.lastSeen.set(handled, pr.headRefOid);
       this.mgr.schedulePostPush({
