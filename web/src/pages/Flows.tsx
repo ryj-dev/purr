@@ -93,7 +93,7 @@ export function FlowsPage() {
   return (
     <div className="page">
       <PageHeader title="Flows"
-        sub={<>A flow is a graph of scanners, Claude sessions and gates. Assign flows to triggers on the <a href="#/triggers">Triggers</a> page.</>}
+        sub={<>A flow is a graph of scanners, Claude sessions and gates. Assign flows to triggers on the <a href="#/triggers">Repos &amp; triggers</a> page.</>}
         actions={<button className="primary" onClick={() => setShowNew(true)}><Plus size={14} />New flow</button>} />
       {error && <ErrorCard>{error}</ErrorCard>}
       {!flows && !error && (

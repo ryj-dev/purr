@@ -1,23 +1,61 @@
-# PuRR: Pull Request Reviewer
+<p align="center">
+  <img src="build/icon.png" width="128" height="128" alt="PuRR logo: a cat whose whiskers are >/<">
+</p>
 
-PuRR is a local background app that reviews your own changes on a trigger:
-- **pre-commit:** blocks a secret before it's committed.
-- **pre-push:** blocks a risky push.
-- **post-push:** after a push lands, runs an in-depth review that starts one Claude session to gather context, then branches it into specialist reviewers.
+<h1 align="center">PuRR</h1>
 
-Reviews are built as **flows** in a visual editor and assigned to triggers.
+<p align="center">
+  <b>Pull Request Reviewer</b><br>
+  A macOS menu-bar app that reviews every commit and push you make, with code scanners and a team of Claude Code reviewers.
+</p>
 
-It drives the **unmodified `claude` CLI** headlessly, signed in with your own account. PuRR never reads `~/.claude`, the keychain or OAuth tokens, and never calls the Anthropic API itself. All Claude access goes through `src/server/claude.ts`.
+<p align="center">
+  <img alt="macOS" src="https://img.shields.io/badge/macOS-Apple%20Silicon-111?logo=apple&logoColor=white">
+  <img alt="Electron 44" src="https://img.shields.io/badge/Electron-44-47848F?logo=electron&logoColor=white">
+  <img alt="Node 24" src="https://img.shields.io/badge/Node-24-5FA04E?logo=nodedotjs&logoColor=white">
+  <img alt="Runs Claude Code" src="https://img.shields.io/badge/runs-Claude%20Code-D97757?logo=claude&logoColor=white">
+</p>
+
+<p align="center">
+  <a href="#quick-start">Quick start</a> ·
+  <a href="#covers-every-repo-while-its-running">How it hooks in</a> ·
+  <a href="#how-a-review-works-default--full-review">How a review works</a> ·
+  <a href="#flows-and-triggers">Flows</a> ·
+  <a href="#cli">CLI</a>
+</p>
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/hero-dark.png">
+    <img alt="PuRR's Flows page: three review flows drawn as colour-coded route diagrams" src="docs/assets/hero-light.png" width="900">
+  </picture>
+</p>
+
+## Why PuRR
+
+- **Every repo, automatically.** While PuRR runs, git's global hooks route every commit and push through it. Nothing to set up per repo, and quitting the app turns it off.
+- **Blocks the obvious, reviews the subtle.** gitleaks, zizmor and osv-scanner stop secrets and risky changes at commit and push time. After a push to an open PR, a Claude review digs into logic, contracts, security, data and tests.
+- **One context, many reviewers.** A seed session reads the change once, then forks into six specialist lenses that share its context through the prompt cache. Severity and skeptic-verify passes cut the noise.
+- **Reviews you can design.** Flows are graphs you edit visually: scanners, sessions, branches, prompts, merges, gates. Assign a different flow to each trigger, globally or per repo.
+- **Your own account, nothing more.** PuRR drives the unmodified `claude` CLI headlessly, signed in with your own account. It never reads `~/.claude`, the keychain or OAuth tokens, and never calls the Anthropic API itself. All Claude access goes through `src/server/claude.ts`.
 
 ## Quick start
 
+**Install the app:**
+
 ```bash
-cd ~/Documents/github/purr
-npm install && npm run build          # build the UI (the daemon runs from TypeScript, no build step)
-./bin/purr daemon                      # http://127.0.0.1:7878  (or: ./bin/purr agent install, to start at login)
+git clone https://github.com/ryj-dev/purr && cd purr
+npm install && npm run dist           # builds release/PuRR-<version>-arm64.dmg
 ```
 
-Optional: `ln -s ~/Documents/github/purr/bin/purr ~/.local/bin/purr`.
+Open the `.dmg` and drag **PuRR** to Applications. (If you were given a `.dmg` instead of building it, macOS blocks the first launch because PuRR isn't notarised: allow it under System Settings → Privacy & Security → **Open Anyway**.) PuRR then runs in the menu bar, starts at login, and covers every repo. To use the command line too, choose **Install command line tool** from the menu-bar icon.
+
+**Or run from source** (for development):
+
+```bash
+npm install && npm run build          # build the UI (the service runs from TypeScript, no build step)
+./bin/purr daemon                     # http://127.0.0.1:7878
+```
 
 **Requirements:**
 - Node ≥ 23.6 (developed on 26)
