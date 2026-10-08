@@ -478,15 +478,14 @@ test("two quick pushes: the older one's slow PR lookup doesn't schedule it over 
   let tip = 'c5';
   const watcher = new PostPushWatcher(db, mgr, {
     fetchPrs: async () => ({ prs: [], answered: ['me'] }), lsRemote: async () => tip, ghAuthed: async () => true,
-    prForBranch: async () => {   // c6 lands while gh is asked about c5's PR, reported by its own hook
-      tip = 'c6';
-      db.setPushOutcome({ sha: 'c6', kind: 'pending', reason: 'its hook reported it', repoPath: db.getRepoByPath(a)!.path, branch: 'feat' });
+    prForBranch: async () => {   // c6 lands while gh is asked about c5's PR, and its own hook here reports it
+      if (tip === 'c5') { tip = 'c6'; void watcher.pushIntent({ repoPath: a, branch: 'feat', sha: 'c6' }); }
       return null;
     },
   });
   await watcher.pushIntent({ repoPath: a, branch: 'feat', sha: 'c5' });
   await watcher.settled();
-  assert.deepEqual(scheduled, [], 'c5 is not scheduled: c6 is the push to review');
+  assert.deepEqual(scheduled, ['c6'], 'c5 is not scheduled over c6: c6, reviewed through its own hook');
   db.close();
 });
 
@@ -536,4 +535,23 @@ test("a just-discovered clone's PR is still new if gh failed in the poll that fo
     await watcher.poll();
     assert.deepEqual(scheduled, ['n1']);
   } finally { t.mock.timers.reset(); db.close(); }
+});
+
+test("a push overtaken during the PR lookup by one nothing else reviews (a bot's, no PR): the newer push is reviewed", async () => {
+  const db = openDb(); ensureDefaults(db);
+  const mgr = new RunManager(db, new ClaudeRunner(db));
+  const scheduled: string[] = [];
+  mgr.schedulePostPush = (req: RunRequest) => { scheduled.push(req.head!); };
+  const { root, a } = projectsFolder();
+  sh(a, 'remote', 'add', 'origin', 'https://github.com/work-org/app-o.git');
+  db.setSettings({ ...db.getSettings(), projectFolders: [root], postPushPrsOnly: false });
+  let tip = 'b5';
+  const watcher = new PostPushWatcher(db, mgr, {
+    fetchPrs: async () => ({ prs: [], answered: ['me'] }), lsRemote: async () => tip, ghAuthed: async () => true,
+    prForBranch: async () => { tip = 'b6'; return null; },   // a bot pushes b6 on top, through no hook here
+  });
+  await watcher.pushIntent({ repoPath: a, branch: 'feat', sha: 'b5' });
+  await watcher.settled();
+  assert.deepEqual(scheduled, ['b6'], "b6, which includes b5: not neither");
+  db.close();
 });

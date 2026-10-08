@@ -40,6 +40,8 @@ test('findRuns filters by repo, branch, PR, sha prefix and trigger, newest first
   assert.deepEqual(ids({ repoIds: ['r1'], triggers: ['pre-push'] }), ['hook']);
   assert.deepEqual(ids({ repoIds: [] }), [], 'no known repo matches nothing');
   assert.deepEqual(ids({ sha: "a%' OR 1=1 --" }), [], 'sha is a hex prefix, nothing else');
+  assert.deepEqual(ids({ repoIds: ['r1'], sha: 'a_c1' }), [], "'_' isn't a wildcard: it would have matched abc111");
+  assert.deepEqual(ids({ repoIds: ['r1'], sha: 'abc1%' }), ['old'], "nor is '%': only the true prefix abc1 matches");
   assert.deepEqual(ids({ sha: '--zz' }), [], 'no hex at all matches nothing, not everything');
   db.close();
 });
@@ -372,7 +374,8 @@ test('pushes that get no review of their own say why: superseded in the debounce
   sched.length = 0;
   await bot.pushIntent({ repoPath, branch: 'feat', sha: 'bbb1', from: 'bbb0' });
   await bot.settled();
-  assert.deepEqual(sched, ['bbb1'], "the bot's push has no review coming, so this one isn't left out");
+  assert.deepEqual(sched, ['bbb9'], "the bot's push had no review coming: it's reviewed here, which covers this one");
+  assert.deepEqual(kind('bbb1'), ['superseded', 'bbb9'], '--wait on this push follows it there');
 
   // an older hook (no `from`) and no answer at the first look: the old tip is what the next answer shows, not "moved"
   line = 'no';
@@ -388,8 +391,24 @@ test('pushes that get no review of their own say why: superseded in the debounce
   pr = null;
   sched.length = 0;
   await push('cab1', 'cab0', ['cab0', 'cab9']);
-  assert.deepEqual(sched, ['cab1'], "not taken as covered by cab9's note on another branch");
+  assert.deepEqual(sched, ['cab9'], "cab9's old note on another branch promises nothing: it's reviewed here, covering cab1");
   db.setSettings({ ...db.getSettings(), postPushPrsOnly: true });
+
+  // a remote that isn't on GitHub, reviews PR-only: no PR can come, so it says so rather than wait for one
+  const plain = await addRepo(db, tempRepo());
+  sh(plain.path, 'remote', 'add', 'origin', 'https://gitlab.example.com/org/app.git');
+  const gl = new PostPushWatcher(db, mgr, { lsRemote: async () => 'abe1', ghAuthed: async () => true, prForBranch: async () => null, confirmEveryMs: 5 });
+  db.setSettings({ ...db.getSettings(), postPushPrsOnly: true });
+  await gl.pushIntent({ repoPath: plain.path, branch: 'feat', sha: 'abe1', from: null });
+  await gl.settled();
+  assert.match(one(db, 'abe1', [plain.path])?.reason ?? '', /isn't on GitHub/);
+
+  // an open PR covers a newer push only if some clone has post-push on (the poller reviews it through one)
+  db.setTrigger({ trigger: 'post-push', repoId: repo.id, flowId: null });
+  pr = { number: 3, title: 't', body: '', url: 'u', baseRefName: 'main', headRefName: 'feat', headRefOid: 'x', isDraft: false };
+  await push('ace1', 'ace0', ['ace0', 'ace2']);
+  assert.notEqual(kindOf('ace1'), 'superseded', "post-push off everywhere: the PR won't be reviewed, so it doesn't cover this push");
+  db.deleteTrigger('post-push', repo.id);
 
   // the branch moved to something that doesn't include the push (rejected: a teammate's went in instead)
   line = 'no';

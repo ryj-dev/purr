@@ -65,6 +65,7 @@ test('purr findings: exit codes, usage errors, --json and purr runs', async (tc)
   seed('aaaa000002', { status: 'failed', error: 'boom' });
   seed('aaaa000003', { status: 'superseded' });
   seed('aaaa000004', { status: 'running' });
+  seed('aaaa000007', { status: 'cancelled' });
   seed('aaaa000005', {}, [mustFix('m5')]);
   db.putLedger({ fingerprint: 'm5', repoId: repo.id, branch: 'feat', state: 'dismissed', flowId: 'full', finding: mustFix('m5'),
     firstRunId: 'x', lastRunId: 'x', updatedAt: 'x' });
@@ -76,6 +77,7 @@ test('purr findings: exit codes, usage errors, --json and purr runs', async (tc)
   assert.equal(code('--sha', 'aaaa000002'), 2, 'failed');
   assert.equal(code('--sha', 'aaaa000003'), 2, 'superseded');
   assert.equal(code('--sha', 'aaaa000004'), 3, 'still running, not waiting');
+  assert.equal(code('--sha', 'aaaa000007'), 2, 'cancelled');
   assert.equal(code('--sha', 'aaaa000005'), 0, 'its must-fix was dismissed since');
   assert.equal(code('--sha', 'bbbb'), 3, 'no such review');
   assert.equal(code('--run', 'run-nope'), 3);
@@ -273,7 +275,7 @@ test('purr findings: exit codes, usage errors, --json and purr runs', async (tc)
 
   const runs = purr(repoPath, 'runs', '--branch', 'feat');
   assert.equal(runs.status, 0);
-  assert.equal(runs.stdout.trim().split('\n').length, 5, runs.stdout);
+  assert.equal(runs.stdout.trim().split('\n').length, 6, runs.stdout);
   assert.equal(purr(repoPath, 'runs', '--limit', 'x').status, 4);
 });
 
@@ -364,6 +366,12 @@ test("--wait doesn't wait on a PuRR service that isn't running, or that stops wh
   assert.equal(down.status, 3);
   assert.match(down.stderr, /service isn't running, so no review will come/);
   assert.ok(Date.now() - t0 < 15_000, 'at once, not after the 30-minute timeout');
+
+  // --run on a running review, the service down: the same, at once
+  const byRun = spawnSync(process.execPath, [CLI, 'findings', '--run', openDb(join(home, 'purr.db')).findRuns({ sha: 'beef0001', limit: 1 })[0].id, '--wait'],
+    { cwd: repoPath, encoding: 'utf8', env });
+  assert.equal(byRun.status, 3);
+  assert.match(byRun.stderr, /service isn't running/);
 
   const svc = await service(home);
   const stopped = await new Promise<{ status: number | null; stderr: string }>((res) => {

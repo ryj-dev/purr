@@ -131,6 +131,7 @@ export async function prLookup(repoPath: string, branch: string): Promise<PrInfo
       } catch { unknown = true; continue; }   // garbled output says nothing either way
     }
     if (/no (open )?pull requests? found/i.test(r.stderr)) continue;   // this account sees no PR for it
+    if (/known GitHub host/i.test(r.stderr)) return null;   // not a GitHub remote at all: there's no PR to find
     if (!/could not resolve to a repository/i.test(r.stderr)) unknown = true;   // (one that can't see the repo says nothing)
   }
   // an account that couldn't answer might be the one that sees the PR: "none" only when every one that could see said so

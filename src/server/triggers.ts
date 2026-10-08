@@ -48,6 +48,8 @@ export class PostPushWatcher {
   private deps: WatcherDeps;
   /** push confirmations still waiting for the remote */
   private confirming = new Set<Promise<void>>();
+  /** shas a hook here has reported and that are still being confirmed: their own review is on its way */
+  private reporting = new Set<string>();
 
   private handledKey(repo: Repo, branch: string) { return `${githubRepo(repo.remoteUrl) ?? repo.path}:${branch}`; }
 
@@ -92,6 +94,7 @@ export class PostPushWatcher {
       this.mgr.emit({ type: 'push', sha: body.sha });   // wakes a `purr findings --wait` on this commit
     };
     note('pending', 'waiting for the push to land');
+    this.reporting.add(body.sha);
     const confirm = (async () => {
       const deadline = Date.now() + this.deps.confirmMs;
       // the branch's tip before this push (null: a new branch); the hook says, else it's what's there at first look
@@ -120,14 +123,23 @@ export class PostPushWatcher {
           const gh = await this.deps.ghAuthed();
           const pr = gh ? await this.deps.prForBranch(body.repoPath, body.branch) : null;
           // gh can be slow: if a newer push landed meanwhile, it's the one to review, and this older push mustn't take
-          // its place in the debounce. No answer from ls-remote is no news: it landed
+          // its place in the debounce. It's left to the newer push's own review if something will give one (a hook
+          // here reported it, or an open PR the poller sees); otherwise (another machine's or a bot's push, no PR)
+          // this hook reviews the newer push, which covers this one, and --wait follows it there. No answer from
+          // ls-remote is no news: it landed
+          let head = body.sha;
           const again = await this.deps.lsRemote(body.repoPath, remote, body.branch);
-          if (again && again !== body.sha && await this.reviewed(repo, body.repoPath, body.branch, again, pr)) {
-            return note('superseded', 'a newer push to the branch took its place', again);
+          if (again && again !== body.sha) {
+            if (await this.reviewed(repo, body.repoPath, body.branch, again, pr)) {
+              return note('superseded', 'a newer push to the branch took its place', again);
+            }
+            note('superseded', 'a newer push nothing else reviews landed on top; reviewed in its place', again);
+            head = again;
           }
-          // (a newer push nothing will review, a bot's with no PR the poller sees: this push is reviewed after all)
           // no open PR (a push to main, or a branch not yet proposed): no review, and nothing marked as handled, so
           // the poller reviews this commit when its PR is opened
+          // not a GitHub remote (GitLab, a bare repo): it can't have a PR here, so with reviews PR-only none will come
+          if (prOnly && repo.remoteUrl && !githubRepo(repo.remoteUrl)) return note('skipped', `${remote} isn't on GitHub, and PuRR reviews only PRs (turn that off in Settings)`);
           if (prOnly && gh && !pr) return note('no-pr', `${body.branch} has no open PR; it's reviewed once one is opened`);
           if (!this.mgr.resolveFlow('post-push', repo.id)) {
             // post-push off for this clone: left to the poller, through another clone of the repo that has it on
@@ -139,10 +151,10 @@ export class PostPushWatcher {
           }
           const key = this.handledKey(repo, body.branch);
           // already scheduled from another clone: its review covers this push, and its creation clears the notes
-          if (this.lastSeen.get(key) === body.sha) return this.db.deletePushOutcome(body.sha, body.repoPath, body.branch);
-          this.lastSeen.set(key, body.sha);
+          if (this.lastSeen.get(key) === head) return head === body.sha ? this.db.deletePushOutcome(body.sha, body.repoPath, body.branch) : undefined;
+          this.lastSeen.set(key, head);
           this.mgr.schedulePostPush({
-            trigger: 'post-push', repoPath: body.repoPath, mode: 'range', head: body.sha, branch: body.branch, pr,
+            trigger: 'post-push', repoPath: body.repoPath, mode: 'range', head, branch: body.branch, pr,
             base: pr ? pr.baseRefName : null,
           });
           return;
@@ -156,7 +168,7 @@ export class PostPushWatcher {
       try { note('skipped', `PuRR couldn't confirm the push: ${e?.message ?? e}`); } catch { /* nothing more to do */ }
     });
     this.confirming.add(confirm);
-    void confirm.finally(() => this.confirming.delete(confirm));
+    void confirm.finally(() => { this.confirming.delete(confirm); this.reporting.delete(body.sha); });
     return { queued: true, prOnly };
   }
 
@@ -166,8 +178,10 @@ export class PostPushWatcher {
    * (any clone of the repo) that reported it.
    */
   private async reviewed(repo: Repo, repoPath: string, branch: string, sha: string, pr: PrInfo | null): Promise<boolean> {
-    if (pr && !pr.isDraft) return true;
     const key = githubRepo(repo.remoteUrl);
+    // the poller reviews an open PR only through a clone with post-push on
+    const clones = key ? this.db.listRepos().filter((r) => githubRepo(r.remoteUrl) === key) : [repo];
+    if (pr && !pr.isDraft && clones.some((c) => this.mgr.resolveFlow('post-push', c.id))) return true;
     const paths = [repoPath, ...(key ? this.db.listRepos().filter((r) => githubRepo(r.remoteUrl) === key).map((r) => r.path) : [])];
     // a note for this branch that still promises a review: one pushed to another branch long ago says nothing here
     return this.db.getPushOutcomes(sha, paths).some((o) => o.branch === branch && (o.kind === 'pending' || !!o.nextSha));
