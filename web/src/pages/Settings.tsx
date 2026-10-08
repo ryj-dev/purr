@@ -6,7 +6,7 @@ import { useToast } from '../components/Toast.tsx';
 import { UsageMeter } from '../components/UsageMeter.tsx';
 import { fmtTime } from '../util.ts';
 import { PageHeader } from '../components/ui.tsx';
-import { parseNumText, settledText } from '../numText.ts';
+import { numFieldStep } from '../numText.ts';
 import { Check, Save, SquareTerminal } from 'lucide-react';
 
 function DesktopCard() {
@@ -46,7 +46,7 @@ function DesktopCard() {
         <div>
           <div className="t">Command line tool</div>
           <div className="d">Links <code>~/.local/bin/purr</code> to this app, so you can use <code>purr run</code> and <code>purr hooks</code> from a terminal.
-            {cliState?.state === 'other' && <> It points at another copy of PuRR now.</>}
+            {cliState?.state === 'other' && <> It points at {cliState.purrCopy ? 'another copy of PuRR' : 'something else'} now: <code>{cliState.target}</code>.</>}
             {cliState?.state === 'installed' && !cliState.onPath && <> Add <code>~/.local/bin</code> to your PATH to use it.</>}</div>
         </div>
         {cliState?.state === 'installed' ? (
@@ -55,7 +55,7 @@ function DesktopCard() {
           <span className="chip warn" title={`${cliState.link} is a file, not a link: remove it to install`}>Blocked by a file</span>
         ) : (
           <button onClick={cli} title={cliState?.state === 'other' ? `${cliState.link} points at ${cliState.target}` : undefined}>
-            <SquareTerminal size={13} />{cliState?.state === 'other' ? <>Point <code>purr</code> at this app</> : <>Install <code>purr</code></>}
+            <SquareTerminal size={13} />{cliState?.state === 'other' ? (cliState.purrCopy ? <>Point <code>purr</code> at this app</> : 'Replace the link') : <>Install <code>purr</code></>}
           </button>
         )}
       </div>
@@ -69,17 +69,17 @@ function DesktopCard() {
  */
 function NumField({ label, hint, value, onChange }: { label: string; hint?: string; value: number; onChange: (v: number) => void }) {
   const [text, setText] = useState(String(value));
-  useEffect(() => { setText(String(value)); }, [value]);   // loaded, saved or reset from outside
+  useEffect(() => { setText((t) => numFieldStep({ text: t, value }, { type: 'value', value }).text); }, [value]);
   return (
     <label className="field">
       <span>{label}</span>
       <input type="number" min={0} value={text}
         onChange={(e) => {
-          setText(e.target.value);
-          const v = parseNumText(e.target.value);
-          if (v !== null) onChange(v);
+          const r = numFieldStep({ text, value }, { type: 'type', text: e.target.value });
+          setText(r.text);
+          if (r.emit !== null) onChange(r.emit);
         }}
-        onBlur={() => setText(settledText(text, value))} />
+        onBlur={() => setText(numFieldStep({ text, value }, { type: 'blur' }).text)} />
       {hint && <span className="hint">{hint}</span>}
     </label>
   );

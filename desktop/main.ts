@@ -13,6 +13,7 @@ import {
   BrowserWindow, Menu, Notification, Tray, app, dialog, ipcMain, nativeImage, shell, type MenuItemConstructorOptions,
 } from 'electron';
 import type { AppState, Run, ServerEvent } from '../src/shared/types.ts';
+import { cliStatusOf } from './cliLink.ts';
 
 const PURR_HOME = process.env.PURR_HOME || join(homedir(), '.purr');
 const LOG = join(PURR_HOME, 'logs', 'daemon.log');
@@ -363,16 +364,7 @@ function setLoginItem(enabled: boolean): boolean {
 const CLI_DIR = join(homedir(), '.local', 'bin');
 const CLI_LINK = join(CLI_DIR, 'purr');
 
-/** Whether ~/.local/bin/purr is this app's: installed, missing, a link to somewhere else (another copy), or a file. */
-function cliStatus(): { state: 'installed' | 'missing' | 'other' | 'blocked'; link: string; target: string | null; onPath: boolean } {
-  const onPath = (userPath || '').split(':').includes(CLI_DIR);
-  let st;
-  try { st = lstatSync(CLI_LINK); } catch { return { state: 'missing', link: CLI_LINK, target: null, onPath }; }
-  if (!st.isSymbolicLink()) return { state: 'blocked', link: CLI_LINK, target: null, onPath };
-  let target: string;
-  try { target = readlinkSync(CLI_LINK); } catch { return { state: 'missing', link: CLI_LINK, target: null, onPath }; }   // removed meanwhile
-  return { state: target === SHIM ? 'installed' : 'other', link: CLI_LINK, target, onPath };
-}
+const cliStatus = () => cliStatusOf(CLI_LINK, SHIM, userPath || '');
 
 function installCli(): { ok: boolean; message: string } {
   const dir = CLI_DIR;
