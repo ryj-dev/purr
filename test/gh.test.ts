@@ -21,7 +21,7 @@ test('gh auth status: one or several accounts (active first), older gh, and noth
 });
 
 /** A fake gh on PATH: accounts from `status`, a token per account, a PR per token, comments logged with their token. */
-function fakeGh(status: string, prs: Record<string, object>, statusExit = 0) {
+function fakeGh(status: string, prs: Record<string, object>, statusExit = 0, commentExit = 0) {
   const dir = mkdtempSync(join(process.env.TMPDIR!, 'purr-fake-gh-'));
   writeFileSync(join(dir, 'status'), status);
   for (const [token, pr] of Object.entries(prs)) writeFileSync(join(dir, `pr-${token}.json`), JSON.stringify(pr));
@@ -31,7 +31,7 @@ case "$1 $2" in
   "auth status") cat "$D/status"; exit ${statusExit} ;;
   "auth token") [ "$6" = "no-token" ] && exit 1; echo "tok-$6" ;;
   "pr view") f="$D/pr-\${GH_TOKEN:-none}.json"; [ -f "$f" ] || exit 1; cat "$f" ;;
-  "pr comment") cat > /dev/null; echo "\${GH_TOKEN:-none} $3" >> "$D/comments" ;;
+  "pr comment") cat > /dev/null; echo "\${GH_TOKEN:-none} $3" >> "$D/comments"; exit ${commentExit} ;;
   *) exit 2 ;;
 esac
 `);
@@ -103,5 +103,25 @@ test("a gh status that fails says nothing about which gh this is: comments still
     assert.deepEqual(await ghAccounts(), []);
     await commentOnPr(process.cwd(), 7, 'b', 'work-me');
     assert.deepEqual(gh.comments(), ['tok-work-me 7'], 'still multi-account: a token for that account');
+  } finally { gh.restore(); }
+});
+
+test('a comment that fails (it may have been posted anyway) is not tried again as another account', async () => {
+  const gh = fakeGh(TWO, {}, 0, 1);
+  try {
+    assert.equal(await commentOnPr(process.cwd(), 7, 'b', 'work-me'), false);
+    assert.deepEqual(gh.comments(), ['tok-work-me 7'], 'one attempt, as the account that found the PR');
+  } finally { gh.restore(); }
+});
+
+test('a signed-in gh in words PuRR can\'t parse is used through its own login, even after a multi-account gh', async () => {
+  let gh = fakeGh(TWO, {});
+  try { await ghAccounts(); } finally { gh.restore(); }    // PuRR has seen a multi-account gh
+  gh = fakeGh('Signed in, in words from a future gh\n', { none: pr('OPEN') });
+  try {
+    assert.equal((await ghAccounts()).length, 1);
+    assert.equal((await prForBranch(process.cwd(), 'feat'))?.number, 7, 'no token asked for the placeholder');
+    await commentOnPr(process.cwd(), 7, 'b');
+    assert.deepEqual(gh.comments(), ['none 7']);
   } finally { gh.restore(); }
 });
