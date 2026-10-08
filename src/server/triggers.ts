@@ -3,7 +3,7 @@
 //  2. source of truth: a `gh` poller over the user's open PRs in registered repos (catches pushes from other machines).
 import { existsSync, realpathSync } from 'node:fs';
 import type { DB } from './db.ts';
-import { lsRemote } from './git.ts';
+import { lsRemote, remoteUrl } from './git.ts';
 import { addRepo } from './http.ts';
 import { ghAuthed, myOpenPrs, prForBranch } from './gh.ts';
 import type { RunManager } from './manager.ts';
@@ -64,6 +64,11 @@ export class PostPushWatcher {
   async poll() {
     if (!(await ghAuthed())) return;
     for (const repo of this.db.listRepos()) {
+      if (!repo.remoteUrl) {
+        // registered before it had a remote: look again rather than skipping it forever
+        const url = existsSync(repo.path) ? await remoteUrl(repo.path) : null;
+        if (url) { repo.remoteUrl = url; this.db.putRepo(repo); }
+      }
       if (!repo.remoteUrl || !/github\.com/.test(repo.remoteUrl)) continue;
       const prs = await myOpenPrs(repo.path);
       if (!prs) continue;

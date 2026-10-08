@@ -107,6 +107,19 @@ test('pre-commit default flow blocks a staged secret and passes clean changes; d
   db.close();
 });
 
+test('a repo registered before it had a remote picks the remote up later', async () => {
+  const db = openDb();
+  const repo = tempRepo();
+  const r = await addRepo(db, repo);
+  assert.equal(r.remoteUrl, null);
+  sh(repo, 'remote', 'add', 'origin', 'https://github.com/example/demo.git');
+  const again = await addRepo(db, repo);
+  assert.equal(again.id, r.id);
+  assert.equal(again.remoteUrl, 'https://github.com/example/demo.git');
+  assert.equal(db.getRepo(r.id)!.remoteUrl, 'https://github.com/example/demo.git');
+  db.close();
+});
+
 test('disabled trigger returns no run; repo override beats global', async () => {
   const { db, mgr } = setup();
   const repo = tempRepo();

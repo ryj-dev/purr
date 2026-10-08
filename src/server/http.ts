@@ -55,7 +55,12 @@ export async function addRepo(db: DB, path: string): Promise<Repo> {
   const root = top ? realpathSync(top) : null;
   if (!root) throw new HttpError(400, `${abs} is not inside a git repository`);
   const existing = db.getRepoByPath(root);
-  if (existing) return existing;
+  if (existing) {
+    // remotes get added or changed after a repo is first seen (e.g. a new project pushed to GitHub later)
+    const url = await remoteUrl(root);
+    if (url !== existing.remoteUrl) { existing.remoteUrl = url; db.putRepo(existing); }
+    return existing;
+  }
   const repo: Repo = {
     id: newId('repo-'), path: root, name: basename(root), remoteUrl: await remoteUrl(root), addedAt: now(),
   };
