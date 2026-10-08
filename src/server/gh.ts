@@ -69,11 +69,14 @@ export async function ghAccounts(): Promise<string[]> {
     if (r.code === 0 && !parsed.accounts.length) multiAccount = false;   // that placeholder has no token: use gh's own login
   } catch { /* gh missing */ }
   // an account not in the last list was signed in since that list was read: not before it
-  for (const a of list) if (!signedInSince.has(a)) signedInSince.set(a, accountsCache?.at ?? Date.now());
+  for (const a of list) if (!signedInSince.has(a)) signedInSince.set(a, lastAccountsRead ?? Date.now());
   accountsCache = { at: Date.now(), list };
+  lastAccountsRead = Date.now();
   return list;
 }
 
+/** When PuRR last read gh's account list. Kept apart from the cache, which a refresh clears: the read still happened. */
+let lastAccountsRead: number | null = null;
 /** Per account, the earliest it can have been signed in: when PuRR last read an account list without it. */
 const signedInSince = new Map<string, number>();
 export const accountSignedInSince = (account: string) => signedInSince.get(account) ?? null;

@@ -152,11 +152,20 @@ test('a signed-in gh in words PuRR can\'t parse is used through its own login, e
 test('the Toolchain popup shows gh signed in, but no made-up account name, when it can\'t read who', async () => {
   const { refreshToolchain, toolchainStatus } = await import('../src/server/toolchain.ts');
   const gh = fakeGh('Signed in, in words from a future gh\n', {});
+  // only the fake gh and the system's own tools: not this machine's claude or scanners
+  const path = process.env.PATH;
+  process.env.PATH = `${gh.dir}:/usr/bin:/bin:/usr/sbin:/sbin`;
+  const brew = process.env.PURR_BREW;
+  process.env.PURR_BREW = '';
   try {
     refreshToolchain();
     const auth = (await toolchainStatus()).tools.find((t) => t.name === 'gh')!.auth;
     assert.deepEqual(auth, { signedIn: true, accounts: [], detail: 'signed in' });
-  } finally { gh.restore(); refreshToolchain(); }
+  } finally {
+    process.env.PATH = path;
+    if (brew === undefined) delete process.env.PURR_BREW; else process.env.PURR_BREW = brew;
+    gh.restore(); refreshToolchain();
+  }
 });
 
 test("the PR fetch says which accounts answered, when each was asked, and since when a newly listed one can have been signed in", async (t) => {
@@ -176,6 +185,12 @@ test("the PR fetch says which accounts answered, when each was asked, and since 
     assert.deepEqual(f.prs.map((p) => [p.repo, p.account, p.body]), [['org/app', 'early-me', '']]);
     assert.equal(f.askedAt!['early-me'], 1_000_000 + 6 * 60_000);
     assert.equal(accountSignedInSince('late-me'), 1_000_000, 'not listed at the read before: signed in since then');
+    // a refresh (say an install finishing) clears the cache, but not when the last list was read
+    gh.setStatus(one('early-me') + one('later-me').replace('true', 'false'));
+    t.mock.timers.tick(60_000);
+    forgetGhAccounts();
+    await ghAccounts();
+    assert.equal(accountSignedInSince('later-me'), 1_000_000 + 6 * 60_000);
   } finally { t.mock.timers.reset(); gh.restore(); }
 });
 
