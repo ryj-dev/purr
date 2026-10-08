@@ -410,6 +410,14 @@ test('pushes that get no review of their own say why: superseded in the debounce
   assert.notEqual(kindOf('ace1'), 'superseded', "post-push off everywhere: the PR won't be reviewed, so it doesn't cover this push");
   db.deleteTrigger('post-push', repo.id);
 
+  // amended and force-pushed before the first push was even seen: the amend's own hook reported it, so its review
+  // replaces this one's, not "rejected"
+  line = 'no';
+  db.setPushOutcome({ sha: 'cad2', kind: 'pending', reason: 'its hook reported it', repoPath, branch: 'feat' });
+  await push('cad1', 'cad0', ['cad0', 'cad2']);
+  assert.deepEqual(kind('cad1'), ['superseded', 'cad2']);
+  line = 'unknown';
+
   // the branch moved to something that doesn't include the push (rejected: a teammate's went in instead)
   line = 'no';
   await push('eee3', 'eee0', ['eee0', 'eee4']);
@@ -488,7 +496,8 @@ test('pushes across clones: left to the clone with post-push on, one note per re
     lsRemote: async () => pushed, ghAuthed: async () => true, prForBranch: async () => pr, fetchPrs: async () => ({ prs, answered: ['me'] }),
   });
   const note = (sha: string, path: string) => db.getPushOutcomes(sha, [path])[0]?.kind ?? null;
-  db.setSettings({ ...db.getSettings(), postPushPrsOnly: true });
+  // projectFolders []: the poll's discovery mustn't scan this machine's real project folders
+  db.setSettings({ ...db.getSettings(), postPushPrsOnly: true, projectFolders: [] });
   await watcher.poll();
 
   pr = { number: 5, title: 't', body: '', url: 'u', baseRefName: 'main', headRefName: 'feat', headRefOid: 'aa01', isDraft: false };
@@ -579,6 +588,7 @@ test('a push handed to another clone, whose PR the poller first sees late, is st
   mgr.schedulePostPush = (req: any) => { scheduled.push(req.head); };
   let prs: any[] = [];
   const watcher = new PostPushWatcher(db, mgr, { fetchPrs: async () => ({ prs, answered: ['me'] }) });
+  db.setSettings({ ...db.getSettings(), projectFolders: [] });   // no scan of this machine's real project folders
   await watcher.poll();
   db.setPushOutcome({ sha: 'ee01', kind: 'elsewhere', reason: 'elsewhere', repoPath: a.path, branch: 'feat' });
   prs = [{ repo: 'work-org/app-y', number: 3, headRefOid: 'ee01', headRefName: 'feat', baseRefName: 'main', title: 't', body: '', url: 'u',

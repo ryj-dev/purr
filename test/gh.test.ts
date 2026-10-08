@@ -33,6 +33,7 @@ case "$1 $2" in
   "pr view") [ -e "$D/garbled" ] && { echo "<html>rate limited</html>"; exit 0; }
     f="$D/pr-\${GH_TOKEN:-none}.json"; [ -f "$f" ] && { cat "$f"; exit 0; }
     [ -e "$D/offline" ] && { echo "error connecting to api.github.com" >&2; exit 1; }
+    [ -e "$D/notgithub" ] && { echo "none of the git remotes configured for this repository point to a known GitHub host" >&2; exit 1; }
     [ -e "$D/hidden-\${GH_TOKEN:-none}" ] && { echo "GraphQL: Could not resolve to a Repository with the name 'org/app'." >&2; exit 1; }
     echo "no pull requests found for branch \"$3\"" >&2; exit 1 ;;
   "api graphql") f="$D/graphql-\${GH_TOKEN:-none}.json"; [ -f "$f" ] || exit 1; cat "$f" ;;
@@ -281,6 +282,10 @@ test("a branch's PR: found, none, or gh couldn't say, which is not the same as n
   const hidden = fakeGh(TWO, {});
   writeFileSync(join(hidden.dir, 'hidden-tok-me'), '');
   try { assert.equal(await prLookup(process.cwd(), 'feat'), null); } finally { hidden.restore(); }
+  // a remote that isn't on GitHub: there's no PR to find, which is a definite no
+  const plain = fakeGh(TWO, {});
+  writeFileSync(join(plain.dir, 'notgithub'), '');
+  try { assert.equal(await prLookup(process.cwd(), 'feat'), null); } finally { plain.restore(); }
   // gh answers, but not with JSON: that says nothing either way
   const garbled = fakeGh(TWO, {});
   writeFileSync(join(garbled.dir, 'garbled'), '');

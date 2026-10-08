@@ -99,7 +99,6 @@ export class PostPushWatcher {
       const deadline = Date.now() + this.deps.confirmMs;
       // the branch's tip before this push (null: a new branch); the hook says, else it's what's there at first look
       let from = body.from;
-      let landed = false;   // seen on the remote once: whatever happens next, it didn't "never show up"
       while (Date.now() < deadline) {
         const tip = await this.deps.lsRemote(body.repoPath, remote, body.branch);
         // an older hook sends no `from`: the tip at first look stands in, and nothing later does (a quick second
@@ -107,19 +106,18 @@ export class PostPushWatcher {
         // (no answer from ls-remote says nothing about the old tip: wait for one that does)
         if (from === undefined && tip) from = tip === body.sha ? null : tip;
         if (tip && tip !== body.sha && tip !== from) {
-          // the branch moved on before this push was seen. On top of it (a quick second push, CI, another machine):
-          // that push's review covers this commit, including when git can't tell because the tip isn't local. Not
-          // on top (the push was rejected, a teammate's went in instead): nothing will review it
-          // (once seen on the remote it wasn't rejected: replaced by a force-push, say an amend, whose review is next)
-          if (!landed && (await this.deps.ancestry(body.repoPath, body.sha, tip)) === 'no') {
-            return note('skipped', `the branch moved to ${tip.slice(0, 12)}, which doesn't include this push (was it rejected?)`);
-          }
+          // the branch moved on before this push was seen. If something will review that newer push (its own hook here
+          // reported it: a quick second push, or an amend force-pushed straight after; or an open PR the poller
+          // lists), its review covers or replaces this one
           const pr0 = (await this.deps.ghAuthed()) ? await this.deps.prForBranch(body.repoPath, body.branch) : null;
           if (await this.reviewed(repo, body.repoPath, body.branch, tip, pr0)) return note('superseded', 'a newer push to the branch took its place', tip);
-          // overtaken by a push nothing will review (a bot's, with no PR the poller sees): review this one instead
+          // nothing will: not on top of this push (it was rejected, a teammate's went in instead), so nothing reviews it
+          if ((await this.deps.ancestry(body.repoPath, body.sha, tip)) === 'no') {
+            return note('skipped', `the branch moved to ${tip.slice(0, 12)}, which doesn't include this push (was it rejected?)`);
+          }
+          // on top of it (CI, a bot's) with no review coming: the newer push is reviewed here, which covers this one
         }
         if (tip === body.sha || (tip && tip !== from)) {
-          landed = true;
           const gh = await this.deps.ghAuthed();
           const pr = gh ? await this.deps.prForBranch(body.repoPath, body.branch) : null;
           // gh can be slow: if a newer push landed meanwhile, it's the one to review, and this older push mustn't take
@@ -161,8 +159,7 @@ export class PostPushWatcher {
         }
         await new Promise((r) => setTimeout(r, this.deps.confirmEveryMs));
       }
-      note('skipped', landed ? `${remote}/${body.branch} went back to the commit before it after this push landed`
-        : `the push never showed up on ${remote}/${body.branch}`);
+      note('skipped', `the push never showed up on ${remote}/${body.branch}`);
     })().catch((e) => {
       // a waiting `purr findings` must hear that this went wrong, not wait out its timeout on "pending"
       try { note('skipped', `PuRR couldn't confirm the push: ${e?.message ?? e}`); } catch { /* nothing more to do */ }
@@ -179,9 +176,10 @@ export class PostPushWatcher {
    */
   private async reviewed(repo: Repo, repoPath: string, branch: string, sha: string, pr: PrInfo | null): Promise<boolean> {
     const key = githubRepo(repo.remoteUrl);
-    // the poller reviews an open PR only through a clone with post-push on
+    // the poller reviews an open PR only if it lists it (PRs by the signed-in accounts, so not a teammate's), and only
+    // through a clone with post-push on
     const clones = key ? this.db.listRepos().filter((r) => githubRepo(r.remoteUrl) === key) : [repo];
-    if (pr && !pr.isDraft && clones.some((c) => this.mgr.resolveFlow('post-push', c.id))) return true;
+    if (pr && !pr.isDraft && this.seenPr.has(`${key}#${pr.number}`) && clones.some((c) => this.mgr.resolveFlow('post-push', c.id))) return true;
     const paths = [repoPath, ...(key ? this.db.listRepos().filter((r) => githubRepo(r.remoteUrl) === key).map((r) => r.path) : [])];
     // a note for this branch that still promises a review: one pushed to another branch long ago says nothing here
     return this.db.getPushOutcomes(sha, paths).some((o) => o.branch === branch && (o.kind === 'pending' || !!o.nextSha));
