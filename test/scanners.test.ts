@@ -1,5 +1,5 @@
 // The five scanners, with fake tools on PATH: what each is given, and what PuRR makes of what it says.
-import { FAKE_AWS, sh, tempRepo } from './helpers.ts';
+import { FAKE_SECRET, sh, tempRepo } from './helpers.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
@@ -26,12 +26,12 @@ function fakeTools(tools: Record<string, string>) {
   return { dir, restore: () => { process.env.PATH = path; } };
 }
 
-// A secrets scanner: notes its arguments and folder, keeps a copy of what it was shown, and reports each AKIA line.
+// A secrets scanner: notes its arguments and folder, keeps a copy of what it was shown, and reports each GitHub-token line.
 const SECRETS = `printf '%s\\n' "$@" > "$D/$(basename "$0").args"
 pwd -P > "$D/cwd"
 while [ $# -gt 0 ]; do case "$1" in dir) shift; root="$1";; -r) shift; rep="$1";; esac; shift; done
 cp -R "$root" "$D/seen"
-grep -rn AKIA "$root" | awk -F: 'BEGIN { printf "[" } { if (NR > 1) printf ","; printf "{\\"File\\":\\"%s\\",\\"StartLine\\":%s,\\"RuleID\\":\\"aws-access-token\\",\\"Description\\":\\"AWS\\",\\"Secret\\":\\"REDACTED\\"}", $1, $2 } END { printf "]" }' > "$rep"`;
+grep -rn ghp_ "$root" | awk -F: 'BEGIN { printf "[" } { if (NR > 1) printf ","; printf "{\\"File\\":\\"%s\\",\\"StartLine\\":%s,\\"RuleID\\":\\"github-pat\\",\\"Description\\":\\"GitHub token\\",\\"Secret\\":\\"REDACTED\\"}", $1, $2 } END { printf "]" }' > "$rep"`;
 
 // hadolint / actionlint: answer from a fixture named after the file, or fail if there's none
 const FROM_FIXTURE = (tool: string, failCode: number) => `for a; do f="$a"; done
@@ -60,9 +60,9 @@ async function staged(files: Record<string, string>, base: Record<string, string
 
 test('betterleaks sees only the added lines, never validates or redacts nothing, and runs outside the repo', async () => {
   const { repo, change, files } = await staged({
-    'app.js': `const a = 1;\nconst key = "${FAKE_AWS}";\n`,
-    '.betterleaks.toml': `# a change's own config must not steer its scan\n# "${FAKE_AWS}"\n`,
-    '.gitleaks.toml': `[allowlist]\nregexes = ["${FAKE_AWS}"]\n`,
+    'app.js': `const a = 1;\nconst key = "${FAKE_SECRET}";\n`,
+    '.betterleaks.toml': `# a change's own config must not steer its scan\n# "${FAKE_SECRET}"\n`,
+    '.gitleaks.toml': `[allowlist]\nregexes = ["${FAKE_SECRET}"]\n`,
   }, { 'app.js': 'const a = 1;\n' });
   const t = fakeTools({ betterleaks: SECRETS });
   try {
@@ -71,14 +71,14 @@ test('betterleaks sees only the added lines, never validates or redacts nothing,
     // a secret pasted into a scanner config file is still a secret, reported where it really is
     assert.deepEqual(r.findings.map((f) => [f.file, f.line, f.source.scanner, f.source.rule, f.severity, f.category])
       .sort((a, b) => String(a[0]).localeCompare(String(b[0]))),
-      [['.betterleaks.toml', 2, 'betterleaks', 'aws-access-token', 'must_fix', 'secrets'],
-        ['.gitleaks.toml', 2, 'betterleaks', 'aws-access-token', 'must_fix', 'secrets'],
-        ['app.js', 2, 'betterleaks', 'aws-access-token', 'must_fix', 'secrets']]);
-    assert.match(r.findings.find((f) => f.file === 'app.js')!.scenario, /real AWS access token/);
-    assert.ok(!JSON.stringify(r.findings).includes(FAKE_AWS), 'the secret itself is never kept');
+      [['.betterleaks.toml', 2, 'betterleaks', 'github-pat', 'must_fix', 'secrets'],
+        ['.gitleaks.toml', 2, 'betterleaks', 'github-pat', 'must_fix', 'secrets'],
+        ['app.js', 2, 'betterleaks', 'github-pat', 'must_fix', 'secrets']]);
+    assert.match(r.findings.find((f) => f.file === 'app.js')!.scenario, /real github PAT/i);
+    assert.ok(!JSON.stringify(r.findings).includes(FAKE_SECRET), 'the secret itself is never kept');
     const args = readFileSync(join(t.dir, 'betterleaks.args'), 'utf8').split('\n');
     for (const a of ['--validation=false', '--redact', '--no-banner']) assert.ok(args.includes(a), a);
-    assert.equal(readFileSync(join(t.dir, 'seen', 'app.js'), 'utf8'), `\nconst key = "${FAKE_AWS}";\n`, 'line 1 blank: it was already there');
+    assert.equal(readFileSync(join(t.dir, 'seen', 'app.js'), 'utf8'), `\nconst key = "${FAKE_SECRET}";\n`, 'line 1 blank: it was already there');
     for (const c of ['.betterleaks.toml', '.gitleaks.toml']) {
       assert.ok(!existsSync(join(t.dir, 'seen', c)), `${c} is never where the scanner would load it as config`);
       assert.ok(existsSync(join(t.dir, 'seen', c + '.purr-scan')), `${c} is scanned as plain text`);
@@ -91,7 +91,7 @@ test('betterleaks sees only the added lines, never validates or redacts nothing,
 });
 
 test('without betterleaks, gitleaks does the job; with neither, the scanner says betterleaks is missing', async () => {
-  const { change, files } = await staged({ 'app.js': `const key = "${FAKE_AWS}";\n` });
+  const { change, files } = await staged({ 'app.js': `const key = "${FAKE_SECRET}";\n` });
   let t = fakeTools({ gitleaks: SECRETS });
   try {
     const r = await runScanner('betterleaks', 'scan-betterleaks', files, change);
@@ -431,8 +431,9 @@ test("a missing osv-scanner shows as not installed, not failed or partial", asyn
 // The real tools, where installed: PuRR's flags must be ones they accept. Skipped where a tool isn't on PATH.
 const installed = (tool: string) => { try { execFileSync('which', [tool], { stdio: 'pipe' }); return true; } catch { return false; } };
 
-test('the real betterleaks accepts PuRR\'s flags and finds a committed AWS key', { skip: !installed('betterleaks') && 'betterleaks is not installed here' }, async () => {
-  const { change, files } = await staged({ 'app.js': `const k = "${FAKE_AWS}";\n` });
+test('the real betterleaks accepts PuRR\'s flags and finds a committed GitHub token', { skip: !installed('betterleaks') && 'betterleaks is not installed here' }, async () => {
+  // a GitHub token's shape, not a real one: betterleaks (unlike gitleaks) doesn't flag a bare AWS key id like FAKE_SECRET
+  const { change, files } = await staged({ 'app.js': `const k = "${FAKE_SECRET}";\n` });
   const r = await runScanner('betterleaks', 's', files, change);
   assert.equal(r.state.state, 'ran', JSON.stringify(r.state));
   assert.equal(r.findings.length, 1);
@@ -452,5 +453,6 @@ test('the real actionlint accepts PuRR\'s flags and raises a workflow error on a
   const { change, files } = await staged({ '.github/workflows/ci.yml': wf });
   const r = await runScanner('actionlint', 'a', files, change);
   assert.equal(r.state.state, 'ran', JSON.stringify(r.state));
-  assert.ok(r.findings.some((f) => f.line === 5), JSON.stringify(r.findings));
+  // actionlint puts a `needs:` error on the job's own line
+  assert.ok(r.findings.some((f) => f.source.rule === 'job-needs' && f.line === 3), JSON.stringify(r.findings));
 });

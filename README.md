@@ -219,6 +219,7 @@ Data lives in `~/.purr/` (`purr.db`, `worktrees/`, `logs/`), or in `$PURR_HOME` 
 - No incremental re-review. Each push reviews the whole branch range; the ledger keeps repeats quiet.
 - De-duplication across lenses is deterministic and conservative; the severity step is asked to drop duplicates. Opus does this well. On Haiku, near-duplicates (the same issue worded three ways) can survive. An LLM same-issue block, like tc-ai-reviewer's `same_issue.md`, is the next thing to add.
 - The pre-push gate scans every commit being pushed, so a secret added and later removed in the same push still blocks it. That matches betterleaks' history semantics.
+- betterleaks flags an AWS access key id together with its secret, but not a bare key id on its own, which gitleaks also flagged. A key id alone can't be used, and tc-ai-reviewer made the same switch.
 - osv-scanner reads lockfiles as they are (and pinned `requirements*.txt`). tc-ai-reviewer also pins the full tree of a manifest without a lockfile (`package.json`, `pyproject.toml`, unpinned requirements) before scanning it, and flags a change that makes dependencies impossible to install; PuRR doesn't yet.
 - The UI loads as a single 700 kB bundle and the editor has no undo/redo.
 - Posting PR comments is off by default (`Output` block → "Post PR comment").

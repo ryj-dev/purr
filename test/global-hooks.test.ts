@@ -1,4 +1,4 @@
-import { FAKE_AWS, sh, tempRepo } from './helpers.ts';
+import { FAKE_SECRET, sh, tempRepo } from './helpers.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -34,7 +34,7 @@ test('global hooks: every repo gets purr while it runs, existing hooks keep runn
 
   // purr not running (no live pid file): the secret goes through, other hooks still run
   rmSync(PID_FILE, { force: true });
-  writeFileSync(join(repo, 'a.txt'), `key ${FAKE_AWS}\n`);
+  writeFileSync(join(repo, 'a.txt'), `key ${FAKE_SECRET}\n`);
   git(repo, 'add', '-A');
   let r = git(repo, 'commit', '-m', 'one');
   assert.equal(r.status, 0, r.stderr);
@@ -44,7 +44,7 @@ test('global hooks: every repo gets purr while it runs, existing hooks keep runn
 
   // purr running: the same kind of change is blocked, and the repo is registered automatically
   writeFileSync(PID_FILE, String(process.pid));
-  writeFileSync(join(repo, 'b.txt'), `key2 ${FAKE_AWS}\n`);
+  writeFileSync(join(repo, 'b.txt'), `key2 ${FAKE_SECRET}\n`);
   git(repo, 'add', '-A');
   r = git(repo, 'commit', '-m', 'two');
   assert.notEqual(r.status, 0, 'blocked while PuRR runs');

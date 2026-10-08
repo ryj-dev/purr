@@ -1,4 +1,4 @@
-import { FAKE_AWS, FAKE_CLAUDE, sh, tempRepo } from './helpers.ts';
+import { FAKE_SECRET, FAKE_CLAUDE, sh, tempRepo } from './helpers.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, writeFileSync, existsSync, chmodSync, mkdtempSync } from 'node:fs';
@@ -25,7 +25,7 @@ function setup() {
 function featureRepo() {
   const repo = tempRepo({ 'app.js': 'export const x = 1;\n' });
   sh(repo, 'checkout', '-q', '-b', 'feature');
-  writeFileSync(join(repo, 'app.js'), `export const x = 1;\nexport const awsKey = "${FAKE_AWS}";\n\nexport function avg(total, count) {\n  return total / count;\n}\n`);
+  writeFileSync(join(repo, 'app.js'), `export const x = 1;\nexport const awsKey = "${FAKE_SECRET}";\n\nexport function avg(total, count) {\n  return total / count;\n}\n`);
   sh(repo, 'commit', '-qam', 'add avg', '--no-verify');
   return repo;
 }
@@ -93,7 +93,7 @@ test('pre-commit default flow blocks a staged secret and passes clean changes; d
   const { db, mgr } = setup();
   const repo = tempRepo();
   await addRepo(db, repo);
-  writeFileSync(join(repo, 'config.js'), `module.exports = { key: "${FAKE_AWS}" };\n`);
+  writeFileSync(join(repo, 'config.js'), `module.exports = { key: "${FAKE_SECRET}" };\n`);
   sh(repo, 'add', 'config.js');
   const req = { trigger: 'pre-commit' as const, repoPath: repo, mode: 'staged' as const };
   const r1 = await mgr.execute(req, mgr.createRun(req)!);
