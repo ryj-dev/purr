@@ -88,6 +88,10 @@ export class PostPushWatcher {
         if ((await this.deps.lsRemote(body.repoPath, remote, body.branch)) === body.sha) {
           const gh = await this.deps.ghAuthed();
           const pr = gh ? await this.deps.prForBranch(body.repoPath, body.branch) : null;
+          // gh can be slow: if a newer push landed meanwhile, it's the one to review (its own hook, or the poller,
+          // schedules it), and this older push mustn't take its place in the debounce. No answer is no news
+          const again = await this.deps.lsRemote(body.repoPath, remote, body.branch);
+          if (again && again !== body.sha) return;
           // no open PR (a push to main, or a branch not yet proposed): no review, and nothing marked as handled, so
           // the poller reviews this commit when its PR is opened
           if (prOnly && gh && !pr) return;
