@@ -555,3 +555,75 @@ test("a push overtaken during the PR lookup by one nothing else reviews (a bot's
   assert.deepEqual(scheduled, ['b6'], "b6, which includes b5: not neither");
   db.close();
 });
+
+test('overtaken pushes: a PR the poller lists is left to it, a draft or a teammate\'s PR is reviewed here, and so is a push the hook never sees land', async () => {
+  const db = openDb(); ensureDefaults(db);
+  const mgr = new RunManager(db, new ClaudeRunner(db));
+  const scheduled: string[] = [];
+  mgr.schedulePostPush = (req: RunRequest) => { scheduled.push(req.head!); };
+  const { root, a } = projectsFolder();
+  sh(a, 'remote', 'add', 'origin', 'https://github.com/work-org/app-p.git');
+  db.setSettings({ ...db.getSettings(), projectFolders: [root], postPushPrsOnly: false });
+  let tips: string[] = [];
+  let pr: any = null;
+  let prs: OpenPr[] = [];
+  const watcher = new PostPushWatcher(db, mgr, {
+    fetchPrs: async () => ({ prs, answered: ['me'] }), lsRemote: async () => (tips.length > 1 ? tips.shift()! : tips[0]) ?? null,
+    ghAuthed: async () => true, prForBranch: async () => { tips = [`${pr.headRefOid}`]; return pr; },
+  });
+  const open = (n: number, head: string, draft = false): OpenPr => ({ repo: 'work-org/app-p', number: n, headRefOid: head, headRefName: 'feat',
+    baseRefName: 'main', title: 't', body: '', url: 'u', isDraft: draft, account: 'me', createdAt: new Date(Date.now() - 86_400_000).toISOString() });
+  const push = async (sha: string) => { tips = [sha]; await watcher.pushIntent({ repoPath: a, branch: 'feat', sha }); await watcher.settled(); };
+
+  // the poller lists this PR (one of my accounts opened it): a bot's push on top is left to the poller's next look
+  prs = [open(1, 'p0')];
+  await watcher.poll();
+  pr = { ...open(1, 'p2'), headRefOid: 'p2' };
+  await push('p1');
+  assert.deepEqual(scheduled, [], 'left to the poller');
+  prs = [open(1, 'p2')];
+  await watcher.poll();
+  assert.deepEqual(scheduled, ['p2'], 'which reviews the newer head');
+
+  // a teammate's PR (not one the poller lists): reviewed here
+  scheduled.length = 0;
+  pr = { ...open(9, 't2'), headRefOid: 't2' };
+  await push('t1');
+  assert.deepEqual(scheduled, ['t2']);
+
+  // a draft: the poller never reviews it, so this hook does
+  scheduled.length = 0;
+  pr = { ...open(1, 'd2', true), headRefOid: 'd2' };
+  await push('d1');
+  assert.deepEqual(scheduled, ['d2']);
+
+  // two quick pushes, then a bot's: the newer hook never sees its own push land, and reviews the bot's tip
+  scheduled.length = 0;
+  pr = null;
+  const quick = new PostPushWatcher(db, mgr, {
+    fetchPrs: async () => ({ prs: [], answered: ['me'] }), lsRemote: async () => (tips.length > 1 ? tips.shift()! : tips[0]) ?? null,
+    ghAuthed: async () => true, prForBranch: async () => null,
+  });
+  tips = ['q5', 'q7'];   // the tip before this push (q5), then the bot's (q7) on top of it
+  await quick.pushIntent({ repoPath: a, branch: 'feat', sha: 'q6' });
+  await quick.settled();
+  assert.deepEqual(scheduled, ['q7']);
+  db.close();
+});
+
+test('a push to a remote not on GitHub (every push reviewed) is reviewed once, however many times it is reported', async () => {
+  const db = openDb(); ensureDefaults(db);
+  const mgr = new RunManager(db, new ClaudeRunner(db));
+  const scheduled: string[] = [];
+  mgr.schedulePostPush = (req: RunRequest) => { scheduled.push(req.head!); };
+  const { root, a } = projectsFolder();
+  sh(a, 'remote', 'add', 'origin', 'https://gitlab.example.com/org/app.git');
+  db.setSettings({ ...db.getSettings(), projectFolders: [root], postPushPrsOnly: false });
+  const watcher = new PostPushWatcher(db, mgr, { fetchPrs: async () => ({ prs: [], answered: [] }), lsRemote: async () => 'g1', ghAuthed: async () => false });
+  await watcher.pushIntent({ repoPath: a, branch: 'feat', sha: 'g1' });
+  await watcher.settled();
+  await watcher.pushIntent({ repoPath: a, branch: 'feat', sha: 'g1' });
+  await watcher.settled();
+  assert.deepEqual(scheduled, ['g1']);
+  db.close();
+});
