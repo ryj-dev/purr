@@ -41,7 +41,6 @@ export class PostPushWatcher {
   /** gh accounts listed at the first poll */
   private startAccounts: Set<string> | null = null;
   private answeredOnce = false;
-  private lastPoll = 0;
   private deps: WatcherDeps;
   /** push confirmations still waiting for the remote */
   private confirming = new Set<Promise<void>>();
@@ -146,8 +145,6 @@ export class PostPushWatcher {
       await discoverRepos(this.db).catch(() => 0);
     }
     const asked = Date.now();
-    const prevPoll = this.lastPoll;
-    this.lastPoll = Date.now();
     const fetched = await this.deps.fetchPrs();
     // gh unusable at the first poll: an account that turns up within the first quarter hour was most likely there all
     // along (gh offline at login, before the network was up); one that turns up later was signed in later
@@ -169,6 +166,9 @@ export class PostPushWatcher {
       return Math.max(this.startedAt, last - 2 * 60_000);
     };
     const marks = new Map(prs.map((pr) => [pr.account, since(pr.account)]));
+    // when each account last answered before this poll: a clone registered after that is new to that account's PRs
+    const before = new Map(this.lastFetch);
+    const anyBefore = Math.max(0, ...before.values());   // for an account answering for the first time
     for (const a of fetched.answered) this.lastFetch.set(a, fetched.askedAt?.[a] ?? asked);
     const clones = await this.clonesByRepo();
     for (const pr of prs) {
@@ -189,9 +189,10 @@ export class PostPushWatcher {
         const opened = pr.createdAt ? Date.parse(pr.createdAt) : 0;
         // or opened shortly before its clone was first registered here: a repo with its own git hooks is only found by
         // discovery, up to ten minutes after it was cloned, pushed and proposed. Not before PuRR started, though
-        // (only for a clone registered since the last poll: one the poller couldn't have seen the PR through before)
+        // (only for a clone registered since this PR's account last answered: before that, the poller couldn't have
+        // seen the PR through it, even if gh failed in the poll that found the clone)
         const cloned = Math.max(...local.map((c) => Date.parse(c.addedAt) || 0));
-        const justCloned = cloned > prevPoll && opened >= this.startedAt && opened >= cloned - DISCOVERY_MS;
+        const justCloned = cloned > (before.get(pr.account) ?? anyBefore) && opened >= this.startedAt && opened >= cloned - DISCOVERY_MS;
         if (!(opened >= (marks.get(pr.account) ?? this.startedAt)) && !justCloned) continue;
       }
       this.lastSeen.set(handled, pr.headRefOid);
