@@ -364,21 +364,53 @@ test('signing in to gh after startup brings no old PRs; a slow multi-account pol
     baseRefName: 'main', title: 't', body: '', url: 'u', isDraft: false, account: 'me', createdAt: new Date(opened).toISOString() });
   try {
     await watcher.poll();
-    // registered with no remote: the hook adds origin's owner/name before marking the push, so the poller agrees
+    t.mock.timers.tick(3 * 86_400_000);            // days later, signed in from the Toolchain popup
+    fetched = { prs: [pr(2, 'old', t0 + 60_000)], answered: ['me'], askedAt: { me: Date.now() } };
+    await watcher.poll();
+    assert.deepEqual(scheduled, [], 'PR 2 was open before signing in');
+
+    // registered with no remote, and its PR already known at k0: the hook adds origin's owner/name before marking
+    // its push of k1, so the poller, seeing the PR move to k1, knows the hook has it
+    t.mock.timers.tick(60_000);
+    fetched = { ...fetched, prs: [pr(2, 'old', t0 + 60_000), pr(1, 'k0', Date.now())], askedAt: { me: Date.now() } };
+    db.setSettings({ ...db.getSettings(), postPushPrsOnly: true });
+    db.putRepo({ ...db.getRepoByPath(a)!, remoteUrl: null });
+    await watcher.poll();                          // no clone matches work-org/app-h yet
     sh(a, 'remote', 'add', 'origin', 'https://github.com/work-org/app-h.git');
+    db.setSettings({ ...db.getSettings(), postPushPrsOnly: false });
     pushed = 'k1';
     await watcher.pushIntent({ repoPath: a, branch: 'feat', sha: 'k1' });
     await watcher.settled();
     assert.deepEqual(scheduled, ['k1']);
-
-    t.mock.timers.tick(3 * 86_400_000);            // days later, signed in from the Toolchain popup
-    fetched = { prs: [pr(1, 'k1', t0 + 60_000), pr(2, 'old', t0 + 60_000)], answered: ['me'], askedAt: { me: Date.now() - 5 * 60_000 } };
+    fetched = { ...fetched, prs: [pr(2, 'old', t0 + 60_000), pr(1, 'k1', Date.now() - 60_000)], askedAt: { me: Date.now() - 5 * 60_000 } };
     await watcher.poll();
-    assert.deepEqual(scheduled, ['k1'], 'k1 already reviewed by the hook; PR 2 was open before signing in');
+    assert.deepEqual(scheduled, ['k1'], 'k1 reviewed once');
 
     // that poll asked "me" five minutes before it finished: a PR opened four minutes ago wasn't in its answer
     fetched = { ...fetched, prs: [...fetched.prs, pr(3, 'new', Date.now() - 4 * 60_000)], askedAt: { me: Date.now() } };
     await watcher.poll();
     assert.deepEqual(scheduled, ['k1', 'new']);
+  } finally { t.mock.timers.reset(); db.close(); }
+});
+
+test('gh offline at login: accounts that turn up in the first quarter hour were there all along', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
+  const db = openDb(); ensureDefaults(db);
+  const mgr = new RunManager(db, new ClaudeRunner(db));
+  const scheduled: string[] = [];
+  mgr.schedulePostPush = (req: RunRequest) => { scheduled.push(req.head!); };
+  const { root, a } = projectsFolder();
+  sh(a, 'remote', 'add', 'origin', 'https://github.com/work-org/app-i.git');
+  db.setSettings({ ...db.getSettings(), projectFolders: [root] });
+  let fetched: any = null;                         // no network yet
+  const watcher = new PostPushWatcher(db, mgr, { fetchPrs: async () => fetched });
+  const t0 = Date.now();
+  try {
+    await watcher.poll();
+    t.mock.timers.tick(8 * 60_000);                // network up eight minutes later; a PR was opened from the web meanwhile
+    fetched = { prs: [{ repo: 'work-org/app-i', number: 1, headRefOid: 'n1', headRefName: 'x', baseRefName: 'main', title: 't', body: '', url: 'u',
+      isDraft: false, account: 'me', createdAt: new Date(t0 + 4 * 60_000).toISOString() }], answered: ['me'] };
+    await watcher.poll();
+    assert.deepEqual(scheduled, ['n1']);
   } finally { t.mock.timers.reset(); db.close(); }
 });

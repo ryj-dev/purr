@@ -37,6 +37,7 @@ export class PostPushWatcher {
   private lastFetch = new Map<string, number>();
   /** gh accounts listed at the first poll */
   private startAccounts: Set<string> | null = null;
+  private answeredOnce = false;
   private deps: WatcherDeps;
   /** push confirmations still waiting for the remote */
   private confirming = new Set<Promise<void>>();
@@ -138,8 +139,13 @@ export class PostPushWatcher {
     }
     const asked = Date.now();
     const fetched = await this.deps.fetchPrs();
-    // gh unusable at the first poll (signed out): an account that turns up later is signed in later
+    // gh unusable at the first poll: an account that turns up within the first quarter hour was most likely there all
+    // along (gh offline at login, before the network was up); one that turns up later was signed in later
     if (!fetched) { this.startAccounts ??= new Set(); return; }
+    if (!this.answeredOnce) {
+      this.answeredOnce = true;
+      if (!this.startAccounts?.size && Date.now() - this.startedAt < 15 * 60_000) this.startAccounts = new Set(fetched.accounts ?? fetched.answered);
+    }
     const { prs } = fetched;
     // PRs opened before their account's last answered poll were there to be seen then (two minutes' slack for
     // GitHub's clock). Per account: one whose query failed (asleep, offline, token expired) keeps its old mark
