@@ -274,8 +274,6 @@ export interface ToolStatus {
   version: string | null;
   /** how it was installed, from its path */
   source: 'homebrew' | 'claude-installer' | 'other' | null;
-  /** how the Install button would install it */
-  installVia: 'homebrew' | 'claude-installer';
   /** claude and gh only: null for the scanners, and while not installed */
   auth: { signedIn: boolean; accounts: string[]; detail?: string } | null;
   job: { state: 'running' | 'failed'; step: string; error?: string } | null;

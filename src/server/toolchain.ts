@@ -1,9 +1,7 @@
 // The tools PuRR uses but doesn't ship: the three scanners, claude (reviews) and gh (PR detection and comments).
 // The Toolchain popup shows each one's state and installs what's missing:
-//  - claude: with Claude Code's own installer (https://claude.ai/install.sh), which needs no admin rights and keeps
-//    claude up to date by itself;
-//  - the rest: with Homebrew. Without Homebrew, the popup offers to install it, in Terminal, since its installer
-//    asks for the Mac's password.
+// all with Homebrew (claude as the claude-code cask). Without Homebrew, the popup offers to install it, in Terminal,
+// since its installer asks for the Mac's password.
 // Signing in also opens Terminal, on the tool's own login command: PuRR never sees a password or token.
 import { existsSync, realpathSync } from 'node:fs';
 import type { AppState, ToolName, ToolStatus, Toolchain } from '../shared/types.ts';
@@ -20,11 +18,10 @@ const PURPOSE: Record<ToolName, string> = {
   gh: 'Finds your PRs and posts review comments',
 };
 
-const BREW_FORMULA: Record<Exclude<ToolName, 'claude'>, string> = {
-  gitleaks: 'gitleaks', zizmor: 'zizmor', 'osv-scanner': 'osv-scanner', gh: 'gh',
+/** `brew install` arguments for each tool. */
+export const BREW_INSTALL: Record<ToolName, string[]> = {
+  gitleaks: ['gitleaks'], zizmor: ['zizmor'], 'osv-scanner': ['osv-scanner'], gh: ['gh'], claude: ['--cask', 'claude-code'],
 };
-
-const CLAUDE_INSTALLER = 'https://claude.ai/install.sh';
 
 // ---- status ----
 
@@ -36,6 +33,8 @@ async function locate(bin: string): Promise<string | null> {
 }
 
 async function brewPath(): Promise<string | null> {
+  // PURR_BREW names Homebrew's brew explicitly (empty: act as if there's none); the tests use it
+  if (process.env.PURR_BREW !== undefined) return process.env.PURR_BREW && existsSync(process.env.PURR_BREW) ? process.env.PURR_BREW : null;
   for (const p of ['/opt/homebrew/bin/brew', '/usr/local/bin/brew']) if (existsSync(p)) return p;
   return locate('brew');
 }
@@ -79,7 +78,6 @@ export function refreshToolchain() { statusCache = null; forgetGhAccounts(); }
 
 async function statusOf(name: ToolName): Promise<ToolStatus> {
   const path = await locate(name);
-  const installVia: ToolStatus['installVia'] = name === 'claude' ? 'claude-installer' : 'homebrew';
   let auth: ToolStatus['auth'] = null;
   if (path && name === 'claude') auth = await claudeAuth(path);
   if (path && name === 'gh') {
@@ -88,7 +86,7 @@ async function statusOf(name: ToolName): Promise<ToolStatus> {
   }
   return {
     name, purpose: PURPOSE[name], installed: !!path, path, version: path ? await versionOf(path) : null,
-    source: path ? sourceOf(path) : null, installVia, auth, job: jobs.get(name) ?? null,
+    source: path ? sourceOf(path) : null, auth, job: jobs.get(name) ?? null,
   };
 }
 
@@ -120,22 +118,29 @@ function lastLine(s: string): string {
 }
 
 async function runInstall(name: ToolName, step: (s: string) => void): Promise<void> {
-  if (name === 'claude') {
-    step('Running Claude Code’s installer');
-    const r = await exec('/bin/bash', ['-c', `set -o pipefail; /usr/bin/curl -fsSL ${CLAUDE_INSTALLER} | /bin/bash`], {
-      timeoutMs: 10 * 60_000, onStdoutLine: (l) => { if (l.trim()) step(l.trim().slice(0, 200)); },
-    });
-    if (r.code !== 0) throw new Error(lastLine(r.stderr) || lastLine(r.stdout) || `The installer stopped (exit ${r.code})`);
-    return;
-  }
   const brew = await brewPath();
   if (!brew) throw new Error(`Install Homebrew first, then ${name}`);
-  step(`brew install ${BREW_FORMULA[name]}`);
-  const r = await exec(brew, ['install', BREW_FORMULA[name]], {
+  const cmd = `brew install ${BREW_INSTALL[name].join(' ')}`;
+  step(cmd);
+  const r = await exec(brew, ['install', ...BREW_INSTALL[name]], {
     timeoutMs: 15 * 60_000, env: { ...process.env, HOMEBREW_NO_ENV_HINTS: '1', NONINTERACTIVE: '1' },
     onStdoutLine: (l) => { if (l.trim()) step(l.replace(/^==> /, '').trim().slice(0, 200)); },
   });
-  if (r.code !== 0) throw new Error(lastLine(r.stderr) || `brew install ${BREW_FORMULA[name]} failed (exit ${r.code})`);
+  if (r.code !== 0) throw new Error(lastLine(r.stderr) || `${cmd} failed (exit ${r.code})`);
+}
+
+function runJob(name: ToolName, job: NonNullable<ToolStatus['job']>): Promise<void> {
+  job.step = 'Starting';
+  changed();
+  let last = 0;
+  const step = (s: string) => {
+    job.step = s;
+    if (Date.now() - last > 500) { last = Date.now(); changed(); }   // brew is chatty
+  };
+  return runInstall(name, step).then(
+    () => { jobs.delete(name); refreshToolchain(); changed(true); },
+    (e) => { jobs.set(name, { state: 'failed', step: job.step, error: String(e?.message ?? e) }); changed(true); },
+  );
 }
 
 /** Starts installing a tool in the background. Returns at once; progress shows in the tool's `job`. */
@@ -143,28 +148,20 @@ export function installTool(name: ToolName): void {
   if (jobs.get(name)?.state === 'running') return;
   const job: NonNullable<ToolStatus['job']> = { state: 'running', step: 'Starting' };
   jobs.set(name, job);
-  changed();
-  let last = 0;
-  const step = (s: string) => {
-    job.step = s;
-    if (Date.now() - last > 500) { last = Date.now(); changed(); }   // brew is chatty
-  };
-  runInstall(name, step).then(
-    () => { jobs.delete(name); refreshToolchain(); changed(true); },
-    (e) => { jobs.set(name, { state: 'failed', step: job.step, error: String(e?.message ?? e) }); changed(true); },
-  );
+  void runJob(name, job);
 }
 
-/** Installs every missing tool, one at a time (Homebrew doesn't like running twice at once). */
+/** Installs every missing tool, one at a time (Homebrew doesn't like running twice at once); the rest show as queued. */
 export async function installMissing(): Promise<ToolName[]> {
   const { homebrew, tools } = await toolchainStatus();
-  const missing = tools.filter((t) => !t.installed && t.job?.state !== 'running' && (homebrew.installed || t.installVia !== 'homebrew')).map((t) => t.name);
-  void (async () => {
-    for (const n of missing) {
-      installTool(n);
-      while (jobs.get(n)?.state === 'running') await new Promise((r) => setTimeout(r, 500));
-    }
-  })();
+  const missing = tools.filter((t) => !t.installed && t.job?.state !== 'running' && homebrew.installed).map((t) => t.name);
+  const queued = missing.map((n) => {
+    const job: NonNullable<ToolStatus['job']> = { state: 'running', step: 'Queued' };
+    jobs.set(n, job);
+    return [n, job] as const;
+  });
+  changed();
+  void (async () => { for (const [n, job] of queued) await runJob(n, job); })();
   return missing;
 }
 

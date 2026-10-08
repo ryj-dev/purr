@@ -66,6 +66,8 @@ npm install && npm run build          # build the UI (the service runs from Type
 - gitleaks, zizmor and osv-scanner: `brew install gitleaks zizmor osv-scanner`. A missing scanner shows as "not installed"; it doesn't fail the run.
 - `gh`, optional: adds PR title/description and the open-PR poller.
 
+Click **Toolchain** in the sidebar to install any of these and sign in, without the terminal. Everything installs with Homebrew (claude as the `claude-code` cask; update it with `brew upgrade`). If Homebrew is missing, the popup offers to install it in Terminal, because its installer asks for your Mac's password. Sign in and Add account (gh) open Terminal on the tool's own login (`claude auth login`, `gh auth login --web`), so PuRR never sees a password or token.
+
 ## Covers every repo while it's running
 
 PuRR isn't opt-in per repo. While the service runs (PuRR.app, or `purr daemon`):
@@ -192,6 +194,7 @@ purr flow list | export <id> [--json] | import [file|-] [--yes]
 | `src/server/claude.ts` | the only code that launches `claude`; quota, rate-limit parsing, semaphore |
 | `src/server/engine/` | flow executor, findings (normalise / dedupe / fingerprint), PR material |
 | `src/server/flows/` | block types, default flows and prompts, validation, CRUD |
+| `src/server/toolchain.ts` | the Toolchain popup: tool status, sign-in state, Homebrew / Claude Code installs, Terminal sign-in |
 | `src/server/scanners.ts` | gitleaks / zizmor / osv (port of tc-ai-reviewer's `scanners.py`) |
 | `src/server/manager.ts` | runs: prepare change + worktree, execute, ledger, notifications, supersede, debounce, pause |
 | `src/server/triggers.ts` | post-push: push-intent confirmation + gh poller |
