@@ -183,9 +183,23 @@ From a terminal: `purr flow export <id>` prints the text (`--json` for the JSON)
 purr daemon | open | run [--repo P] [--flow ID] [--base REF] [--head REF] [--json]
 purr repo add [PATH] | hooks install|uninstall | agent install|uninstall
 purr flow list | export <id> [--json] | import [file|-] [--yes]
+purr findings [--pr N | --branch B | --sha S | --run ID] [--wait [--timeout SECS]] [--all] [--json]
+purr runs [--pr N | --branch B | --sha S] [--limit N] [--json]
 ```
 
 `purr run` exits with 0 when the review is clean, 1 when there's a must-fix, and 2 when the run failed.
+
+### Reading reviews from a Claude session (or a script)
+
+A review after a push runs in the background, after `git push` has returned. When the pre-push hook queues one it says how to get the results:
+
+```
+purr: feat/x will be reviewed once the push lands (if it has an open PR). For the results: purr findings --sha 3f9c2a1b7d04 --wait
+```
+
+`purr findings` prints the latest full review (post-push or manual) of the current branch, or of `--pr`, `--branch`, `--sha` or `--run`. It covers every clone and worktree of the same GitHub repo, so it finds a PR review even when the poller ran it in another checkout. Each finding comes with its scenario and fix, and its ledger state as it is now: dismissed and tracked findings are hidden unless you pass `--all`, and one a later review found fixed is marked `[fixed since]`. A section headed "Resolved by this review" lists the findings an earlier review of the branch raised that this one no longer does, which the ledger now counts as fixed. The output also lists the reviewer sessions you can `claude --resume` to ask about a finding. `--wait` blocks until the review finishes. It listens to the PuRR service's event stream rather than polling, and stops at once (exit 3) if the service isn't running or stops while it waits, since then no review will come. On its own it waits for the review of the commit checked out here, so a session can push and then wait for that commit's review. If a newer push took the commit's place, it follows on to that push's review, which covers the commit. It stops straight away when PuRR has decided the commit won't be reviewed: reviews are paused, the post-push trigger is off, PuRR restarted before reviewing it, the PR is a draft, or the branch has no open PR (once one is opened, PuRR reviews it within a minute, so wait again). `--json` prints `{ run, findings, resolved, sessions }`. The exit code is 0 when the review is clean, 1 when there's a must-fix, 2 when the review failed, was cancelled or was superseded, 3 when there's no finished review (none found, an unknown repo, still running, won't be reviewed, or the wait timed out), 4 for a usage error, and 5 when PuRR itself failed (say, its database couldn't be read).
+
+`purr runs` lists recent reviews of the repo with their must-fix/consider/minor counts. Both commands take `--repo P` and `--trigger post-push|manual|pre-push|pre-commit|all`.
 
 ## Layout
 

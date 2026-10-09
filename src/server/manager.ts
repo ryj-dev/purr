@@ -15,7 +15,7 @@ import {
   type ChangeSpec, branchNamed, changedFiles, currentBranch, defaultBaseRef, ensureWorktree, git, headSha, isAncestor, mergeBase,
   pruneWorktrees, resolveBase, resolveRef,
 } from './git.ts';
-import { type PrInfo, commentOnPr, ghAuthed, prForBranch } from './gh.ts';
+import { type PrInfo, commentOnPr, ghAuthed, githubRepo, prForBranch } from './gh.ts';
 import { active, applyLedger, fingerprintAll } from './ledger.ts';
 import { notify } from './notify.ts';
 import { APP_MANAGED } from './runtime.ts';
@@ -32,7 +32,7 @@ export interface RunRequest {
   pr?: PrInfo | null;
 }
 
-const TERMINAL = new Set(['passed', 'blocked', 'failed', 'cancelled', 'superseded']);
+export const TERMINAL = new Set<string>(['passed', 'blocked', 'failed', 'cancelled', 'superseded']);
 const SESSION_BLOCKS = new Set(['context', 'prompt', 'verify', 'command']);
 
 /** What a run keeps of its PR, including the account that found it: the one PuRR comments as. */
@@ -44,7 +44,7 @@ export class RunManager {
   bus = new EventEmitter();
   private controllers = new Map<string, AbortController>();
   private pending = new Map<string, { req: RunRequest; run: Run }>();   // queued while paused
-  private debounces = new Map<string, NodeJS.Timeout>();
+  private debounces = new Map<string, { timer: NodeJS.Timeout; head: string | null }>();
   private pauseTimer: NodeJS.Timeout | null = null;
 
   constructor(db: DB, claude: ClaudeRunner) {
@@ -144,22 +144,44 @@ export class RunManager {
     }
   }
 
+  /** The repo at `repoPath` and every other clone of the same GitHub repo (only itself if it has no GitHub remote). */
+  private clonePaths(repoPath: string): string[] {
+    const key = githubRepo(this.db.getRepoByPath(repoPath)?.remoteUrl);
+    return [...new Set([repoPath, ...(key ? this.db.listRepos().filter((r) => githubRepo(r.remoteUrl) === key).map((r) => r.path) : [])])];
+  }
+
   /** Debounced post-push: a burst of pushes to one branch produces one review of the latest. */
   schedulePostPush(req: RunRequest) {
-    if (this.db.getSettings().reviewsPaused) return; // paused from the tray or Settings
+    const outcome = (sha: string | null | undefined, kind: 'superseded' | 'skipped', reason: string, nextSha: string | null = null) => {
+      if (!sha) return;
+      this.db.setPushOutcome({ sha, kind, reason, repoPath: req.repoPath, branch: req.branch ?? null, nextSha });
+      this.emit({ type: 'push', sha });
+    };
+    const skip = (reason: string) => outcome(req.head, 'skipped', reason);
+    // pushed again (back to it, say): a note that another push took its place no longer holds
+    if (req.head) {
+      for (const o of this.db.getPushOutcomes(req.head, [req.repoPath])) {
+        if (o.kind === 'superseded' && o.branch === (req.branch ?? null) && o.sha === req.head.toLowerCase()) this.db.deletePushOutcome(o.sha, o.repoPath, o.branch);
+      }
+    }
+    if (this.db.getSettings().reviewsPaused) return skip('reviews are paused'); // paused from the tray or Settings
     const key = `${req.repoPath}\u0000${req.branch}`;
     const prev = this.debounces.get(key);
-    if (prev) clearTimeout(prev);
+    if (prev) {
+      clearTimeout(prev.timer);
+      if (prev.head && req.head && prev.head !== req.head) outcome(prev.head, 'superseded', 'a newer push to the branch took its place', req.head);
+    }
     const delay = this.db.getSettings().debounceSec * 1000;
     const t = setTimeout(() => {
       this.debounces.delete(key);
       const run = this.createRun(req);
-      if (!run) return;
+      if (!run) return skip('the post-push trigger is off for this repo');
+      if (req.head) this.db.clearPushOutcome(req.head, req.branch ?? null, this.clonePaths(req.repoPath));   // its push to this branch has its review now
       this.supersede(req.repoPath, req.branch ?? null, run.id);
       this.start(req, run);
     }, delay);
     t.unref();
-    this.debounces.set(key, t);
+    this.debounces.set(key, { timer: t, head: req.head ?? null });
   }
 
   /** Prepares the change, runs the flow, applies the ledger and side effects. Resolves with the final run. */

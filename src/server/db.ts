@@ -53,6 +53,30 @@ export function diffFromDefaults(s: Settings): Partial<Settings> {
 
 export type DB = ReturnType<typeof openDb>;
 
+export interface RunQuery {
+  repoIds?: string[];
+  branch?: string | null;
+  pr?: number | null;
+  sha?: string | null;
+  triggers?: TriggerKind[];
+  limit?: number;
+}
+
+/**
+ * Why a pushed commit got no review of its own: its branch had no open PR (it gets one once a PR is opened), a newer
+ * push to the branch took its place (`nextSha`, whose review covers it), or reviews were off. 'pending' while that
+ * isn't known yet.
+ */
+export interface PushOutcome {
+  sha: string;
+  kind: 'pending' | 'no-pr' | 'elsewhere' | 'superseded' | 'skipped';   // elsewhere: left to another clone's review of its PR
+  reason: string;
+  repoPath: string;
+  branch: string | null;
+  nextSha?: string | null;
+  at: string;
+}
+
 export function openDb(file = paths.db) {
   const db = new DatabaseSync(file);
   db.exec(`
@@ -72,6 +96,11 @@ export function openDb(file = paths.db) {
       data TEXT NOT NULL, first_run_id TEXT NOT NULL, last_run_id TEXT NOT NULL, updated_at TEXT NOT NULL,
       PRIMARY KEY (fingerprint, repo_id));
   `);
+  // one row per commit, repo and branch: the same commit can go to two branches with different fates
+  const cols = (db.prepare('PRAGMA table_info(push_outcomes)').all() as { name: string }[]).map((c) => c.name);
+  if (cols.length && !cols.includes('branch')) db.exec('DROP TABLE push_outcomes');   // an early shape; only notes in flight
+  db.exec(`CREATE TABLE IF NOT EXISTS push_outcomes (sha TEXT NOT NULL, repo_path TEXT NOT NULL, branch TEXT NOT NULL, data TEXT NOT NULL,
+    at TEXT NOT NULL, PRIMARY KEY (sha, repo_path, branch))`);
   try { db.exec('ALTER TABLE ledger ADD COLUMN flow_id TEXT'); } catch { /* already there */ }
 
   const kvGet = <T>(key: string, dflt: T): T => {
@@ -191,6 +220,24 @@ export function openDb(file = paths.db) {
         return { ...run, flow: { ...run.flow, blocks: [], edges: [] } }; // list view doesn't need the snapshot
       });
     },
+    /** Newest first. Every filter is optional; `sha` matches a prefix of the head commit. */
+    findRuns: (q: RunQuery): Run[] => {
+      const where: string[] = [], args: (string | number)[] = [];
+      if (q.repoIds) { where.push(`repo_id IN (${q.repoIds.map(() => '?').join(', ') || 'NULL'})`); args.push(...q.repoIds); }
+      if (q.branch) { where.push("json_extract(data, '$.branch') = ?"); args.push(q.branch); }
+      if (q.pr != null) { where.push("json_extract(data, '$.pr.number') = ?"); args.push(q.pr); }
+      if (q.sha != null) {
+        const hex = q.sha.replace(/[^0-9a-f]/gi, '');
+        if (!hex) return [];   // an empty prefix would match every run
+        where.push("json_extract(data, '$.headSha') LIKE ?"); args.push(`${hex}%`);
+      }
+      if (q.triggers?.length) { where.push(`json_extract(data, '$.trigger') IN (${q.triggers.map(() => '?').join(', ')})`); args.push(...q.triggers); }
+      const sql = `SELECT data FROM runs ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY queued_at DESC LIMIT ?`;
+      return (db.prepare(sql).all(...args, q.limit ?? 50) as { data: string }[]).map((r) => {
+        const run = JSON.parse(r.data) as Run;
+        return { ...run, flow: { ...run.flow, blocks: [], edges: [] } };
+      });
+    },
     setRunFindings: (id: string, findings: Finding[]) => db.prepare('UPDATE runs SET findings = ? WHERE id = ?').run(JSON.stringify(findings), id),
     getRunFindings: (id: string): Finding[] => {
       const r = db.prepare('SELECT findings FROM runs WHERE id = ?').get(id) as { findings: string } | undefined;
@@ -212,6 +259,56 @@ export function openDb(file = paths.db) {
         db.prepare('UPDATE runs SET status = ?, data = ? WHERE id = ?').run(r.status, JSON.stringify(r), r.id);
       }
       return rows.length;
+    },
+
+    // pushes the hook reported that PuRR then decided not to review, so `purr findings --wait` can stop waiting
+    /** Best effort: losing the note never costs a review (the callers are mid-way through scheduling one). */
+    setPushOutcome: (o: Omit<PushOutcome, 'at'>) => {
+      try {
+        db.prepare(`INSERT INTO push_outcomes (sha, repo_path, branch, data, at) VALUES (?, ?, ?, ?, ?)
+          ON CONFLICT(sha, repo_path, branch) DO UPDATE SET data = excluded.data, at = excluded.at`)
+          .run(o.sha.toLowerCase(), o.repoPath, o.branch ?? '', JSON.stringify(o), now());
+        db.prepare('DELETE FROM push_outcomes WHERE at < ?').run(new Date(Date.now() - 30 * 86_400_000).toISOString());
+      } catch { /* the database is busy: --wait then waits out its timeout instead of stopping early */ }
+    },
+    deletePushOutcome: (sha: string, repoPath: string, branch: string | null) => {
+      try { db.prepare('DELETE FROM push_outcomes WHERE sha = ? AND repo_path = ? AND branch = ?').run(sha.toLowerCase(), repoPath, branch ?? ''); } catch { /* as above */ }
+    },
+    /** The commit has its review now: whatever was noted about its pushes no longer matters. */
+    /**
+     * On every clone of the reviewed repo (`repoPaths`), for its branch only: pushed to another branch, or to a fork
+     * registered alongside, the same commit may still be owed a review of its own there.
+     */
+    clearPushOutcome: (sha: string, branch: string | null, repoPaths: string[]) => {
+      if (!repoPaths.length) return;
+      try {
+        db.prepare(`DELETE FROM push_outcomes WHERE sha = ? AND branch = ? AND repo_path IN (${repoPaths.map(() => '?').join(', ')})`)
+          .run(sha.toLowerCase(), branch ?? '', ...repoPaths);
+      } catch { /* as above */ }
+    },
+    /**
+     * What was noted about a commit's pushes (by sha prefix), newest first, from `repoPaths` only: another repo's
+     * commit can share a short prefix. One per branch it went to.
+     */
+    getPushOutcomes: (shaPrefix: string, repoPaths: string[]): PushOutcome[] => {
+      const hex = shaPrefix.replace(/[^0-9a-f]/gi, '').toLowerCase();
+      if (!hex || !repoPaths.length) return [];
+      // a range on the key rather than LIKE, so the primary key index is used ('g' sorts after every hex digit)
+      const rows = db.prepare(`SELECT data, at FROM push_outcomes WHERE sha >= ? AND sha < ? AND repo_path IN (${repoPaths.map(() => '?').join(', ')})
+        ORDER BY at DESC LIMIT 50`).all(hex, `${hex}g`, ...repoPaths) as { data: string; at: string }[];
+      return rows.map((r) => ({ ...JSON.parse(r.data), at: r.at }));
+    },
+    /** On start: pushes still pending lost their review when the service stopped. */
+    expirePendingPushes: () => {
+      try {
+        const rows = db.prepare('SELECT sha, repo_path, branch, data FROM push_outcomes').all() as { sha: string; repo_path: string; branch: string; data: string }[];
+        for (const r of rows) {
+          const o = JSON.parse(r.data) as PushOutcome;
+          if (o.kind !== 'pending') continue;
+          db.prepare('UPDATE push_outcomes SET data = ? WHERE sha = ? AND repo_path = ? AND branch = ?')
+            .run(JSON.stringify({ ...o, kind: 'skipped', reason: 'PuRR stopped before reviewing it; push again or run purr run' }), r.sha, r.repo_path, r.branch);
+        }
+      } catch { /* as above */ }
     },
 
     // sessions (for the daily cap and audit)
@@ -237,6 +334,10 @@ export function openDb(file = paths.db) {
       const sql = `SELECT * FROM ledger ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY updated_at DESC LIMIT 1000`;
       return (db.prepare(sql).all(...args) as unknown as LedgerRow[]).map(fromLedgerRow);
     },
+    /** Ledger items a run marked fixed (raised before on its branch, not by it). */
+    listFixedBy: (repoId: string, runId: string): LedgerItem[] =>
+      (db.prepare("SELECT * FROM ledger WHERE repo_id = ? AND state = 'fixed' AND last_run_id = ?").all(repoId, runId) as unknown as LedgerRow[])
+        .map(fromLedgerRow),
     findLedgerByFingerprint: (fingerprint: string, repoId?: string): LedgerItem | null => {
       const r = (repoId
         ? db.prepare('SELECT * FROM ledger WHERE fingerprint = ? AND repo_id = ?').get(fingerprint, repoId)
