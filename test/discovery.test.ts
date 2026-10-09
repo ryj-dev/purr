@@ -671,3 +671,94 @@ test('whether a commit is in a remote tip\'s history is asked of git, fetching t
   assert.equal(await inHistoryOf(mine, 'origin', mineSha, tip), 'no');
   assert.equal(sh(mine, 'rev-parse', 'refs/remotes/origin/main'), base, "the user's remote-tracking ref didn't move");
 });
+
+test("gh signed in late on a fresh install: the account's already-open PRs from registered clones aren't reviewed", async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
+  const db = openDb(); ensureDefaults(db);
+  const mgr = new RunManager(db, new ClaudeRunner(db));
+  const scheduled: string[] = [];
+  mgr.schedulePostPush = (req: RunRequest) => { scheduled.push(req.head!); };
+  const { root, a } = projectsFolder();
+  sh(a, 'remote', 'add', 'origin', 'https://github.com/work-org/app-r.git');
+  db.setSettings({ ...db.getSettings(), projectFolders: [root] });
+  let fetched: any = null;                       // gh signed out
+  const watcher = new PostPushWatcher(db, mgr, { fetchPrs: async () => fetched });
+  const t0 = Date.now();
+  try {
+    await watcher.poll();                          // the clone is registered; gh can't answer
+    t.mock.timers.tick(20 * 60_000);
+    fetched = { prs: [{ repo: 'work-org/app-r', number: 1, headRefOid: 'r1', headRefName: 'f', baseRefName: 'main', title: 't', body: '',
+      url: 'u', isDraft: false, account: 'me', createdAt: new Date(t0 + 2 * 60_000).toISOString() }], answered: ['me'] };
+    await watcher.poll();                          // signed in from the popup, 20 minutes on
+    assert.deepEqual(scheduled, [], 'an already-open PR, not a new one');
+  } finally { t.mock.timers.reset(); db.close(); }
+});
+
+test('two quick pushes, the newer from a clone with post-push off: the older hook reviews the newer push', async () => {
+  const db = openDb(); ensureDefaults(db);
+  const mgr = new RunManager(db, new ClaudeRunner(db));
+  const scheduled: string[] = [];
+  mgr.schedulePostPush = (req: RunRequest) => { scheduled.push(`${req.head}@${req.repoPath}`); };
+  const { root, a } = projectsFolder();
+  sh(a, 'remote', 'add', 'origin', 'https://github.com/work-org/app-s.git');
+  const wt = join(root, 'app-a-wt');
+  const { addRepo } = await import('../src/server/http.ts');
+  db.setSettings({ ...db.getSettings(), projectFolders: [root], postPushPrsOnly: false });
+  const w = await addRepo(db, wt);
+  db.setTrigger({ trigger: 'post-push', repoId: w.id, flowId: null });
+  let tip = 's5';
+  const watcher = new PostPushWatcher(db, mgr, {
+    fetchPrs: async () => ({ prs: [], answered: ['me'] }), lsRemote: async () => tip, ghAuthed: async () => true, inHistoryOf: async () => 'yes',
+    prForBranch: async () => {
+      if (tip === 's5') { tip = 's6'; void watcher.pushIntent({ repoPath: wt, branch: 'feat', sha: 's6' }); }   // from the worktree
+      return null;
+    },
+  });
+  await watcher.pushIntent({ repoPath: a, branch: 'feat', sha: 's5' });
+  await watcher.settled();
+  assert.deepEqual(scheduled, [`s6@${db.getRepoByPath(a)!.path}`], "the worktree won't review s6, so the main checkout's hook does");
+  db.close();
+});
+
+test("when git can't tell whether a push is in the newer tip's history (offline), it isn't taken as overtaken", async () => {
+  const db = openDb(); ensureDefaults(db);
+  const mgr = new RunManager(db, new ClaudeRunner(db));
+  const scheduled: string[] = [];
+  mgr.schedulePostPush = (req: RunRequest) => { scheduled.push(req.head!); };
+  const { root, a } = projectsFolder();
+  sh(a, 'remote', 'add', 'origin', 'https://github.com/work-org/app-t.git');
+  db.setSettings({ ...db.getSettings(), projectFolders: [root], postPushPrsOnly: false });
+  const tips = ['u0', 'u9'];
+  const watcher = new PostPushWatcher(db, mgr, {
+    fetchPrs: async () => ({ prs: [], answered: ['me'] }), lsRemote: async () => (tips.length > 1 ? tips.shift()! : tips[0]),
+    ghAuthed: async () => true, prForBranch: async () => null, inHistoryOf: async () => 'unknown', confirmMs: 100, confirmEveryMs: 5,
+  });
+  await watcher.pushIntent({ repoPath: a, branch: 'feat', sha: 'u1' });
+  await watcher.settled();
+  assert.deepEqual(scheduled, [], "it may be a teammate's commit over a rejected push: not reviewed on a guess");
+  db.close();
+});
+
+test('a real push to a local remote, through the real git calls, reaches review', async () => {
+  const db = openDb(); ensureDefaults(db);
+  const mgr = new RunManager(db, new ClaudeRunner(db));
+  const scheduled: string[] = [];
+  mgr.schedulePostPush = (req: RunRequest) => { scheduled.push(req.head!); };
+  const remote = mkdtempSync(join(process.env.TMPDIR!, 'purr-test-remote-'));
+  execFileSync('git', ['init', '-q', '--bare', '-b', 'main', remote]);
+  const repo = tempRepo();
+  sh(repo, 'remote', 'add', 'origin', remote);
+  sh(repo, 'push', '-q', 'origin', 'main', '--no-verify');
+  const from = sh(repo, 'rev-parse', 'HEAD');
+  db.setSettings({ ...db.getSettings(), projectFolders: [], postPushPrsOnly: false });
+  const watcher = new PostPushWatcher(db, mgr, { ghAuthed: async () => false, confirmMs: 10_000, confirmEveryMs: 50 });
+  sh(repo, 'commit', '-q', '--allow-empty', '-m', 'two', '--no-verify');
+  const sha = sh(repo, 'rev-parse', 'HEAD');
+  const intent = watcher.pushIntent({ repoPath: repo, branch: 'main', sha });   // as the pre-push hook reports it, before the push
+  sh(repo, 'push', '-q', 'origin', 'main', '--no-verify');
+  await intent;
+  await watcher.settled();
+  assert.deepEqual(scheduled, [sha]);
+  assert.notEqual(sha, from);
+  db.close();
+});
