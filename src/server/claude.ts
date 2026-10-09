@@ -29,6 +29,8 @@ export class QuotaError extends Error {}
 export class ClaudeRunner {
   db: DB;
   sem: Semaphore;
+  /** sessions started and not yet finished (not yet in the day's count) */
+  running = 0;
   onUsage: (u: Usage) => void;
   constructor(db: DB, onUsage: (u: Usage) => void = () => {}) {
     this.db = db;
@@ -43,7 +45,8 @@ export class ClaudeRunner {
     if (usage.pausedUntil && new Date(usage.pausedUntil) > new Date()) {
       throw new QuotaError(`Paused until ${usage.pausedUntil}: the Claude usage limit was reached`);
     }
-    if (usage.sessionsToday >= s.dailySessionCap) {
+    // sessions running now count too: they're recorded only when they finish, and several start at once
+    if (usage.sessionsToday + this.running >= s.dailySessionCap) {
       throw new QuotaError(`Daily session cap reached (${s.dailySessionCap}); raise it in Settings`);
     }
   }
@@ -54,7 +57,8 @@ export class ClaudeRunner {
     const release = await this.sem.acquire(call.signal);
     try {
       this.checkQuota();
-      return await this.spawn(call, settings.claudeBin, settings.claudeExtraArgs);
+      this.running++;
+      try { return await this.spawn(call, settings.claudeBin, settings.claudeExtraArgs); } finally { this.running--; }
     } finally {
       release();
     }
