@@ -289,7 +289,7 @@ test('pushes that get no review of their own say why: superseded in the debounce
   let line: 'yes' | 'no' | 'unknown' = 'unknown';
   const watcher = new PostPushWatcher(db, mgr, {
     lsRemote: async () => (tips.length > 1 ? tips.shift()! : tips[0]) ?? null, ghAuthed: async () => true, prForBranch: async () => pr,
-    ancestry: async () => line, confirmEveryMs: 5,
+    inHistoryOf: async () => line, confirmEveryMs: 5,
   });
   const push = async (sha: string, from: string | null | undefined, seen: (string | null)[]) => {
     tips = seen;
@@ -307,20 +307,23 @@ test('pushes that get no review of their own say why: superseded in the debounce
   await push('eee1', 'eee0', ['eee0', 'eee2']);
   assert.deepEqual(kind('eee1'), ['superseded', 'eee2']);
   // ...and when nothing will (a bot's push, no PR), this push isn't left out: here PR-only, so it waits for a PR
+  line = 'yes';   // the bot's push is on top of this one
   await push('efe1', 'efe0', ['efe0', 'efe2']);
   assert.equal(kindOf('efe1'), 'no-pr');
+  line = 'unknown';
 
   // A lands, but while gh is asked about its PR, B is pushed on top: A mustn't take B's place in the debounce
   pr = { number: 3, title: 't', body: '', url: 'u', baseRefName: 'main', headRefName: 'feat', headRefOid: 'aba1', isDraft: false };
   db.setSettings({ ...db.getSettings(), debounceSec: 3600 });
   const slow = new PostPushWatcher(db, mgr, {
     lsRemote: async () => (tips.length > 1 ? tips.shift()! : tips[0]) ?? null, ghAuthed: async () => true,
-    prForBranch: async () => { tips = ['aba2']; return pr; }, ancestry: async () => 'yes', confirmEveryMs: 5,
+    prForBranch: async () => { tips = ['aba2']; return pr; }, inHistoryOf: async () => 'yes', confirmEveryMs: 5,
   });
   tips = ['aba0', 'aba1'];
   await slow.pushIntent({ repoPath, branch: 'feat', sha: 'aba1', from: 'aba0' });
   await slow.settled();
-  assert.deepEqual(kind('aba1'), ['superseded', 'aba2'], 'covered by B, not scheduled over it');
+  assert.deepEqual(kind('aba1'), ['superseded', 'aba2'], 'covered by B');
+  assert.ok(!sched.includes('aba1'), 'A is not scheduled over B');
 
   // seen on the remote, then ls-remote has no answer after asking gh: it still landed, so it's scheduled
   const blip = new PostPushWatcher(db, mgr, {
@@ -333,11 +336,13 @@ test('pushes that get no review of their own say why: superseded in the debounce
   assert.equal(kindOf('bcd1'), 'pending', 'scheduled, not "never showed up"');
   assert.ok(sched.includes('bcd1'));
 
-  // landed, then amended and force-pushed before it was scheduled: the amend's review covers it
+  // landed, then amended and force-pushed before it was scheduled: the amend's own hook reported it, so its review
+  // replaces this one's
   line = 'no';
+  db.setPushOutcome({ sha: 'cde2', kind: 'pending', reason: 'its hook reported it', repoPath, branch: 'feat' });
   const amend = new PostPushWatcher(db, mgr, {
     lsRemote: async () => (tips.length > 1 ? tips.shift()! : tips[0]) ?? null, ghAuthed: async () => true,
-    prForBranch: async () => { tips = ['cde2']; return pr; }, ancestry: async () => line, confirmEveryMs: 5,
+    prForBranch: async () => { tips = ['cde2']; return pr; }, inHistoryOf: async () => line, confirmEveryMs: 5,
   });
   tips = ['cde0', 'cde1'];
   await amend.pushIntent({ repoPath, branch: 'feat', sha: 'cde1', from: 'cde0' });
@@ -348,7 +353,7 @@ test('pushes that get no review of their own say why: superseded in the debounce
   // an older hook (no `from`), and a quick second push landing while gh is asked about this one: covered by it
   const older = new PostPushWatcher(db, mgr, {
     lsRemote: async () => (tips.length > 1 ? tips.shift()! : tips[0]) ?? null, ghAuthed: async () => true,
-    prForBranch: async () => { tips = ['dcd2']; return pr; }, ancestry: async () => 'unknown', confirmEveryMs: 5,
+    prForBranch: async () => { tips = ['dcd2']; return pr; }, inHistoryOf: async () => 'yes', confirmEveryMs: 5,   // on top of this one
   });
   tips = ['dcd1'];
   await older.pushIntent({ repoPath, branch: 'feat', sha: 'dcd1' });
@@ -368,7 +373,7 @@ test('pushes that get no review of their own say why: superseded in the debounce
   pr = null;
   const bot = new PostPushWatcher(db, mgr, {
     lsRemote: async () => (tips.length > 1 ? tips.shift()! : tips[0]) ?? null, ghAuthed: async () => true,
-    prForBranch: async () => { tips = ['bbb9']; return null; }, ancestry: async () => 'yes', confirmEveryMs: 5,
+    prForBranch: async () => { tips = ['bbb9']; return null; }, inHistoryOf: async () => 'yes', confirmEveryMs: 5,
   });
   tips = ['bbb0', 'bbb1'];
   sched.length = 0;
@@ -390,8 +395,10 @@ test('pushes that get no review of their own say why: superseded in the debounce
   db.setPushOutcome({ sha: 'cab9', kind: 'no-pr', reason: 'old', repoPath, branch: 'elsewhere' });
   pr = null;
   sched.length = 0;
+  line = 'yes';   // CI's push is on top of this one
   await push('cab1', 'cab0', ['cab0', 'cab9']);
   assert.deepEqual(sched, ['cab9'], "cab9's old note on another branch promises nothing: it's reviewed here, covering cab1");
+  line = 'unknown';
   db.setSettings({ ...db.getSettings(), postPushPrsOnly: true });
 
   // a remote that isn't on GitHub, reviews PR-only: no PR can come, so it says so rather than wait for one
@@ -635,4 +642,50 @@ test("the service's events wake a waiting --wait at once, even one that came whi
     await ev.wait(60_000);
     assert.equal(ev.down, true, 'the stream ending says the service stopped');
   } finally { ev.close(); server.close(); db.close(); }
+});
+
+test("a newer push covered by an open PR the poller lists, or by a review already created, supersedes; with post-push off everywhere it doesn't", async () => {
+  const { ClaudeRunner } = await import('../src/server/claude.ts');
+  const { RunManager } = await import('../src/server/manager.ts');
+  const { PostPushWatcher } = await import('../src/server/triggers.ts');
+  const { ensureDefaults } = await import('../src/server/flows/store.ts');
+  const db = openDb(join(mkdtempSync(join(process.env.TMPDIR!, 'purr-db-')), 'purr.db'));
+  ensureDefaults(db);
+  db.setSettings({ ...db.getSettings(), projectFolders: [], postPushPrsOnly: true });
+  const main = tempRepo();
+  sh(main, 'remote', 'add', 'origin', 'https://github.com/work-org/app-w.git');
+  const a = await addRepo(db, main);
+  const mgr = new RunManager(db, new ClaudeRunner(db));
+  const sched: string[] = [];
+  mgr.schedulePostPush = (r: any) => { sched.push(r.head); };
+  let tips: string[] = [];
+  const pr = { number: 4, title: 't', body: '', url: 'u', baseRefName: 'main', headRefName: 'feat', headRefOid: 'x', isDraft: false };
+  const watcher = new PostPushWatcher(db, mgr, {
+    fetchPrs: async () => ({ prs: [{ ...pr, repo: 'work-org/app-w', account: 'me', createdAt: new Date(Date.now() - 86_400_000).toISOString() }], answered: ['me'] }),
+    lsRemote: async () => (tips.length > 1 ? tips.shift()! : tips[0]) ?? null, ghAuthed: async () => true, prForBranch: async () => pr,
+    inHistoryOf: async () => 'yes', confirmEveryMs: 5,
+  });
+  const kind = (sha: string) => db.getPushOutcomes(sha, [a.path])[0]?.kind ?? null;
+  await watcher.poll();                             // the poller lists PR 4 (an old PR: recorded, not reviewed)
+  tips = ['fa0', 'fa2'];
+  await watcher.pushIntent({ repoPath: main, branch: 'feat', sha: 'fa1', from: 'fa0' });
+  await watcher.settled();
+  assert.equal(kind('fa1'), 'superseded', 'the poller reviews the PR at wa2');
+  assert.deepEqual(sched, [], 'and this hook schedules nothing');
+
+  // a newer push whose review is already created (its notes cleared): it covers this one
+  db.putRun({ ...fakeRun({ id: 'rw', repoId: a.id, branch: 'feat', headSha: 'fb2' }) });
+  tips = ['fb0', 'fb2'];
+  await watcher.pushIntent({ repoPath: main, branch: 'feat', sha: 'fb1', from: 'fb0' });
+  await watcher.settled();
+  assert.equal(kind('fb1'), 'superseded');
+
+  // post-push off in every clone: the PR won't be reviewed, so it covers nothing, and nothing here reviews either
+  db.setTrigger({ trigger: 'post-push', repoId: a.id, flowId: null });
+  tips = ['fc0', 'fc2'];
+  await watcher.pushIntent({ repoPath: main, branch: 'feat', sha: 'fc1', from: 'fc0' });
+  await watcher.settled();
+  assert.equal(kind('fc1'), 'skipped');
+  assert.deepEqual(sched, []);
+  db.close();
 });

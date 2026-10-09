@@ -5,7 +5,7 @@
 //     repos git's hooks can't reach. Repos in the project folders are discovered and registered every 10 minutes.
 import { existsSync, realpathSync } from 'node:fs';
 import type { DB, PushOutcome } from './db.ts';
-import { ancestry, lsRemote, remoteUrl } from './git.ts';
+import { inHistoryOf, lsRemote, remoteUrl } from './git.ts';
 import { addRepo } from './http.ts';
 import { type PrFetch, type PrInfo, ghAuthed, githubRepo, openPrsForAllAccounts, prForBranch } from './gh.ts';
 import { discoverRepos } from './discovery.ts';
@@ -20,7 +20,7 @@ export interface WatcherDeps {
   lsRemote: (cwd: string, remote: string, branch: string) => Promise<string | null>;
   ghAuthed: () => Promise<boolean>;
   prForBranch: (repoPath: string, branch: string) => Promise<PrInfo | null>;
-  ancestry: (cwd: string, a: string, b: string) => Promise<'yes' | 'no' | 'unknown'>;
+  inHistoryOf: (cwd: string, remote: string, a: string, b: string) => Promise<'yes' | 'no' | 'unknown'>;
   /** how long the hook's push gets to show up on the remote, and how often to look */
   confirmMs: number;
   confirmEveryMs: number;
@@ -55,7 +55,7 @@ export class PostPushWatcher {
 
   constructor(db: DB, mgr: RunManager, deps: Partial<WatcherDeps> = {}) {
     this.db = db; this.mgr = mgr;
-    this.deps = { fetchPrs: openPrsForAllAccounts, lsRemote, ghAuthed, prForBranch, ancestry, confirmMs: 90_000, confirmEveryMs: 3000, ...deps };
+    this.deps = { fetchPrs: openPrsForAllAccounts, lsRemote, ghAuthed, prForBranch, inHistoryOf, confirmMs: 90_000, confirmEveryMs: 3000, ...deps };
   }
 
   start() {
@@ -111,10 +111,11 @@ export class PostPushWatcher {
           // lists), its review covers or replaces this one
           const pr0 = (await this.deps.ghAuthed()) ? await this.deps.prForBranch(body.repoPath, body.branch) : null;
           if (await this.reviewed(repo, body.repoPath, body.branch, tip, pr0)) return note('superseded', 'a newer push to the branch took its place', tip);
-          // nothing will: not on top of this push (it was rejected, a teammate's went in instead), so nothing reviews it
-          if ((await this.deps.ancestry(body.repoPath, body.sha, tip)) === 'no') {
-            return note('skipped', `the branch moved to ${tip.slice(0, 12)}, which doesn't include this push (was it rejected?)`);
-          }
+          // nothing will. Not on top of this push (it was rejected, a teammate's went in instead): nothing reviews it;
+          // a teammate's commit isn't this hook's to review. git fetches the tip if it hasn't got it, to tell
+          const line = await this.deps.inHistoryOf(body.repoPath, remote, body.sha, tip);
+          if (line === 'no') return note('skipped', `the branch moved to ${tip.slice(0, 12)}, which doesn't include this push (was it rejected?)`);
+          if (line === 'unknown') { await new Promise((r) => setTimeout(r, this.deps.confirmEveryMs)); continue; }   // look again
           // on top of it (CI, a bot's) with no review coming: the newer push is reviewed here, which covers this one
         }
         if (tip === body.sha || (tip && tip !== from)) {
@@ -127,10 +128,12 @@ export class PostPushWatcher {
           // ls-remote is no news: it landed
           let head = body.sha;
           const again = await this.deps.lsRemote(body.repoPath, remote, body.branch);
-          if (again && again !== body.sha) {
-            if (await this.reviewed(repo, body.repoPath, body.branch, again, pr)) {
-              return note('superseded', 'a newer push to the branch took its place', again);
-            }
+          if (again && again !== body.sha && await this.reviewed(repo, body.repoPath, body.branch, again, pr)) {
+            return note('superseded', 'a newer push to the branch took its place', again);
+          }
+          // nothing will review the newer push: on top of this one (a bot's), it's reviewed here instead, covering this
+          // one; not on top (a force-push nobody here reported, a teammate's), this push, which did land, is reviewed
+          if (again && again !== body.sha && (await this.deps.inHistoryOf(body.repoPath, remote, body.sha, again)) === 'yes') {
             note('superseded', 'a newer push nothing else reviews landed on top; reviewed in its place', again);
             head = again;
           }
@@ -181,6 +184,10 @@ export class PostPushWatcher {
     const clones = key ? this.db.listRepos().filter((r) => githubRepo(r.remoteUrl) === key) : [repo];
     if (pr && !pr.isDraft && this.seenPr.has(`${key}#${pr.number}`) && clones.some((c) => this.mgr.resolveFlow('post-push', c.id))) return true;
     const paths = [repoPath, ...(key ? this.db.listRepos().filter((r) => githubRepo(r.remoteUrl) === key).map((r) => r.path) : [])];
+    // already scheduled here, or its review already created (which clears its notes): a quick debounce, slow gh calls
+    if (this.lastSeen.get(this.handledKey(repo, branch)) === sha) return true;
+    const ids = clones.map((c) => c.id);
+    if (this.db.findRuns({ repoIds: ids, branch, sha, triggers: ['post-push', 'manual'], limit: 1 }).length) return true;
     // a note for this branch that still promises a review: one pushed to another branch long ago says nothing here
     return this.db.getPushOutcomes(sha, paths).some((o) => o.branch === branch && (o.kind === 'pending' || !!o.nextSha));
   }

@@ -1,4 +1,5 @@
 import { sh, tempRepo } from './helpers.ts';
+import { execFileSync } from 'node:child_process';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, renameSync } from 'node:fs';
@@ -478,6 +479,7 @@ test("two quick pushes: the older one's slow PR lookup doesn't schedule it over 
   let tip = 'c5';
   const watcher = new PostPushWatcher(db, mgr, {
     fetchPrs: async () => ({ prs: [], answered: ['me'] }), lsRemote: async () => tip, ghAuthed: async () => true,
+    inHistoryOf: async () => 'yes',
     prForBranch: async () => {   // c6 lands while gh is asked about c5's PR, and its own hook here reports it
       if (tip === 'c5') { tip = 'c6'; void watcher.pushIntent({ repoPath: a, branch: 'feat', sha: 'c6' }); }
       return null;
@@ -548,6 +550,7 @@ test("a push overtaken during the PR lookup by one nothing else reviews (a bot's
   let tip = 'b5';
   const watcher = new PostPushWatcher(db, mgr, {
     fetchPrs: async () => ({ prs: [], answered: ['me'] }), lsRemote: async () => tip, ghAuthed: async () => true,
+    inHistoryOf: async () => 'yes',
     prForBranch: async () => { tip = 'b6'; return null; },   // a bot pushes b6 on top, through no hook here
   });
   await watcher.pushIntent({ repoPath: a, branch: 'feat', sha: 'b5' });
@@ -569,7 +572,7 @@ test('overtaken pushes: a PR the poller lists is left to it, a draft or a teamma
   let prs: OpenPr[] = [];
   const watcher = new PostPushWatcher(db, mgr, {
     fetchPrs: async () => ({ prs, answered: ['me'] }), lsRemote: async () => (tips.length > 1 ? tips.shift()! : tips[0]) ?? null,
-    ghAuthed: async () => true, prForBranch: async () => { tips = [`${pr.headRefOid}`]; return pr; },
+    ghAuthed: async () => true, prForBranch: async () => { tips = [`${pr.headRefOid}`]; return pr; }, inHistoryOf: async () => 'yes',
   });
   const open = (n: number, head: string, draft = false): OpenPr => ({ repo: 'work-org/app-p', number: n, headRefOid: head, headRefName: 'feat',
     baseRefName: 'main', title: 't', body: '', url: 'u', isDraft: draft, account: 'me', createdAt: new Date(Date.now() - 86_400_000).toISOString() });
@@ -602,7 +605,7 @@ test('overtaken pushes: a PR the poller lists is left to it, a draft or a teamma
   pr = null;
   const quick = new PostPushWatcher(db, mgr, {
     fetchPrs: async () => ({ prs: [], answered: ['me'] }), lsRemote: async () => (tips.length > 1 ? tips.shift()! : tips[0]) ?? null,
-    ghAuthed: async () => true, prForBranch: async () => null,
+    ghAuthed: async () => true, prForBranch: async () => null, inHistoryOf: async () => 'yes',
   });
   tips = ['q5', 'q7'];   // the tip before this push (q5), then the bot's (q7) on top of it
   await quick.pushIntent({ repoPath: a, branch: 'feat', sha: 'q6' });
@@ -626,4 +629,45 @@ test('a push to a remote not on GitHub (every push reviewed) is reviewed once, h
   await watcher.settled();
   assert.deepEqual(scheduled, ['g1']);
   db.close();
+});
+
+test("a rejected push (a teammate's went in instead) doesn't get the teammate's commit reviewed", async () => {
+  const db = openDb(); ensureDefaults(db);
+  const mgr = new RunManager(db, new ClaudeRunner(db));
+  const scheduled: string[] = [];
+  mgr.schedulePostPush = (req: RunRequest) => { scheduled.push(req.head!); };
+  const { root, a } = projectsFolder();
+  sh(a, 'remote', 'add', 'origin', 'https://github.com/work-org/app-q.git');
+  db.setSettings({ ...db.getSettings(), projectFolders: [root], postPushPrsOnly: false });
+  const tips = ['r0', 'teammate'];
+  const watcher = new PostPushWatcher(db, mgr, {
+    fetchPrs: async () => ({ prs: [], answered: ['me'] }), lsRemote: async () => (tips.length > 1 ? tips.shift()! : tips[0]),
+    ghAuthed: async () => true, prForBranch: async () => null, inHistoryOf: async () => 'no', confirmMs: 100, confirmEveryMs: 5,
+  });
+  await watcher.pushIntent({ repoPath: a, branch: 'feat', sha: 'mine' });
+  await watcher.settled();
+  assert.deepEqual(scheduled, [], "my push never landed, and the teammate's commit isn't mine to review");
+  db.close();
+});
+
+test('whether a commit is in a remote tip\'s history is asked of git, fetching the tip if needed', async () => {
+  const { inHistoryOf } = await import('../src/server/git.ts');
+  const remote = mkdtempSync(join(process.env.TMPDIR!, 'purr-test-remote-'));
+  execFileSync('git', ['init', '-q', '--bare', '-b', 'main', remote]);
+  const mine = tempRepo(), theirs = tempRepo();
+  sh(mine, 'remote', 'add', 'origin', remote);
+  sh(mine, 'push', '-q', 'origin', 'main', '--no-verify');
+  const base = sh(mine, 'rev-parse', 'HEAD');
+  // a teammate's commit on top, which isn't in this clone yet
+  sh(theirs, 'remote', 'add', 'origin', remote);
+  sh(theirs, 'fetch', '-q', 'origin');
+  sh(theirs, 'reset', '-q', '--hard', 'origin/main');
+  sh(theirs, 'commit', '-q', '--allow-empty', '-m', 'theirs', '--no-verify');
+  sh(theirs, 'push', '-q', 'origin', 'main', '--no-verify');
+  const tip = sh(theirs, 'rev-parse', 'HEAD');
+  sh(mine, 'commit', '-q', '--allow-empty', '-m', 'mine', '--no-verify');
+  const mineSha = sh(mine, 'rev-parse', 'HEAD');
+  assert.equal(await inHistoryOf(mine, 'origin', base, tip), 'yes', 'fetched, then answered');
+  assert.equal(await inHistoryOf(mine, 'origin', mineSha, tip), 'no');
+  assert.equal(sh(mine, 'rev-parse', 'refs/remotes/origin/main'), base, "the user's remote-tracking ref didn't move");
 });
