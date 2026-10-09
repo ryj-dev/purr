@@ -153,7 +153,8 @@ export class ReviewWatch {
     const left = this.leftUntil - Date.now();
     const lookup = this.findPr(repoPath, branch).catch(() => undefined);
     const pr = Number.isFinite(left)
-      ? await Promise.race([lookup, new Promise<undefined>((r) => setTimeout(() => r(undefined), Math.max(0, left)).unref())])
+      // (setTimeout can't wait past 2^31 - 1 ms: a longer delay would fire at once)
+      ? await Promise.race([lookup, new Promise<undefined>((r) => setTimeout(() => r(undefined), Math.min(2_147_483_647, Math.max(0, left))).unref())])
       : await lookup;
     if (pr !== undefined) this.prChecked.set(branch, { at: Date.now(), pr });
     return pr;

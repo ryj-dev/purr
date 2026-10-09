@@ -48,8 +48,6 @@ export class PostPushWatcher {
   private deps: WatcherDeps;
   /** push confirmations still waiting for the remote */
   private confirming = new Set<Promise<void>>();
-  /** shas a hook here has reported and that are still being confirmed: their own review is on its way */
-  private reporting = new Set<string>();
 
   private handledKey(repo: Repo, branch: string) { return `${githubRepo(repo.remoteUrl) ?? repo.path}:${branch}`; }
 
@@ -94,13 +92,11 @@ export class PostPushWatcher {
       this.mgr.emit({ type: 'push', sha: body.sha });   // wakes a `purr findings --wait` on this commit
     };
     note('pending', 'waiting for the push to land');
-    // a hook here that will review its push, if it's the newer one: one in a clone with post-push off won't, so it
-    // mustn't make an older push's hook stand aside for it
-    if (this.mgr.resolveFlow('post-push', repo.id)) this.reporting.add(body.sha);
     const confirm = (async () => {
       const deadline = Date.now() + this.deps.confirmMs;
       // the branch's tip before this push (null: a new branch); the hook says, else it's what's there at first look
       let from = body.from;
+      let onTop: string | null = null;   // a newer tip found on top of this push before it was seen, that nothing else reviews
       while (Date.now() < deadline) {
         const tip = await this.deps.lsRemote(body.repoPath, remote, body.branch);
         // an older hook sends no `from`: the tip at first look stands in, and nothing later does (a quick second
@@ -119,6 +115,7 @@ export class PostPushWatcher {
           if (line === 'no') return note('skipped', `the branch moved to ${tip.slice(0, 12)}, which doesn't include this push (was it rejected?)`);
           if (line === 'unknown') { await new Promise((r) => setTimeout(r, this.deps.confirmEveryMs)); continue; }   // look again
           // on top of it (CI, a bot's) with no review coming: the newer push is reviewed here, which covers this one
+          onTop = tip;
         }
         if (tip === body.sha || (tip && tip !== from)) {
           const gh = await this.deps.ghAuthed();
@@ -128,14 +125,16 @@ export class PostPushWatcher {
           // here reported it, or an open PR the poller sees); otherwise (another machine's or a bot's push, no PR)
           // this hook reviews the newer push, which covers this one, and --wait follows it there. No answer from
           // ls-remote is no news: it landed
-          let head = body.sha;
+          // (a tip already found on top of this push is the one to review, even if the next look gets no answer)
+          let head = onTop ?? body.sha;
+          if (onTop) note('superseded', 'a newer push nothing else reviews landed on top; reviewed in its place', onTop);
           const again = await this.deps.lsRemote(body.repoPath, remote, body.branch);
-          if (again && again !== body.sha && await this.reviewed(repo, body.repoPath, body.branch, again, pr)) {
+          if (again && again !== body.sha && again !== onTop && await this.reviewed(repo, body.repoPath, body.branch, again, pr)) {
             return note('superseded', 'a newer push to the branch took its place', again);
           }
           // nothing will review the newer push: on top of this one (a bot's), it's reviewed here instead, covering this
           // one; not on top (a force-push nobody here reported, a teammate's), this push, which did land, is reviewed
-          if (again && again !== body.sha && (await this.deps.inHistoryOf(body.repoPath, remote, body.sha, again)) === 'yes') {
+          if (again && again !== body.sha && again !== onTop && (await this.deps.inHistoryOf(body.repoPath, remote, body.sha, again)) === 'yes') {
             note('superseded', 'a newer push nothing else reviews landed on top; reviewed in its place', again);
             head = again;
           }
@@ -144,7 +143,8 @@ export class PostPushWatcher {
           // not a GitHub remote (GitLab, a bare repo): it can't have a PR here, so with reviews PR-only none will come
           // (the remote pushed to, which needn't be origin)
           const pushedUrl = remote === 'origin' ? repo.remoteUrl : await remoteUrl(body.repoPath, remote);
-          if (prOnly && pushedUrl && !githubRepo(pushedUrl)) return note('skipped', `${remote} isn't on GitHub, and PuRR reviews only PRs (turn that off in Settings)`);
+          // (only with gh signed in: without gh, PR-only can't apply and every push is reviewed)
+          if (prOnly && gh && pushedUrl && !githubRepo(pushedUrl)) return note('skipped', `${remote} isn't on GitHub, and PuRR reviews only PRs (turn that off in Settings)`);
           // post-push off in every clone: nothing will review it, PR or not
           const ghRepo = githubRepo(repo.remoteUrl);
           const clonesHere = ghRepo ? this.db.listRepos().filter((r) => githubRepo(r.remoteUrl) === ghRepo) : [repo];
@@ -176,7 +176,7 @@ export class PostPushWatcher {
       try { note('skipped', `PuRR couldn't confirm the push: ${e?.message ?? e}`); } catch { /* nothing more to do */ }
     });
     this.confirming.add(confirm);
-    void confirm.finally(() => { this.confirming.delete(confirm); this.reporting.delete(body.sha); });
+    void confirm.finally(() => this.confirming.delete(confirm));
     return { queued: true, prOnly };
   }
 
@@ -197,7 +197,10 @@ export class PostPushWatcher {
     const ids = clones.map((c) => c.id);
     if (this.db.findRuns({ repoIds: ids, branch, sha, triggers: ['post-push', 'manual'], limit: 1 }).length) return true;
     // a note for this branch that still promises a review: one pushed to another branch long ago says nothing here
-    return this.db.getPushOutcomes(sha, paths).some((o) => o.branch === branch && (o.kind === 'pending' || !!o.nextSha));
+    // (a pending note from a clone with post-push off promises nothing: that clone's hook won't review it)
+    const willReview = (path: string) => { const r = this.db.getRepoByPath(path); return !!r && !!this.mgr.resolveFlow('post-push', r.id); };
+    return this.db.getPushOutcomes(sha, paths)
+      .some((o) => o.branch === branch && ((o.kind === 'pending' && willReview(o.repoPath)) || !!o.nextSha));
   }
 
   /** Local clones by GitHub repo ("owner/name"), main checkouts before worktrees. */

@@ -410,11 +410,15 @@ test('pushes that get no review of their own say why: superseded in the debounce
   await gl.settled();
   assert.match(one(db, 'abe1', [plain.path])?.reason ?? '', /isn't on GitHub/);
 
-  // an open PR covers a newer push only if some clone has post-push on (the poller reviews it through one)
+  // an open PR covers a newer push only if some clone has post-push on (the poller reviews it through one): with it off
+  // everywhere, nothing will review this push
   db.setTrigger({ trigger: 'post-push', repoId: repo.id, flowId: null });
   pr = { number: 3, title: 't', body: '', url: 'u', baseRefName: 'main', headRefName: 'feat', headRefOid: 'x', isDraft: false };
+  line = 'yes';
   await push('ace1', 'ace0', ['ace0', 'ace2']);
-  assert.notEqual(kindOf('ace1'), 'superseded', "post-push off everywhere: the PR won't be reviewed, so it doesn't cover this push");
+  assert.equal(kindOf('ace1'), 'skipped');
+  assert.match(one(db, 'ace1', [repoPath])!.reason, /post-push trigger is off/);
+  line = 'unknown';
   db.deleteTrigger('post-push', repo.id);
 
   // amended and force-pushed before the first push was even seen: the amend's own hook reported it, so its review
@@ -731,5 +735,58 @@ test('pushes judged by the remote pushed to, and post-push off everywhere; a slo
   const st = await waitForReview(watch, { timeoutMs: 300, intervalMs: 50 });
   assert.equal(st.done, false);
   assert.ok(Date.now() - t0 < 2_000, `stopped near its timeout (${Date.now() - t0}ms)`);
+  db.close();
+});
+
+test("without gh, a push to a remote not on GitHub is reviewed; a bot's commit found on top stays the one reviewed; a post-push-off clone's note promises nothing", async () => {
+  const { ClaudeRunner } = await import('../src/server/claude.ts');
+  const { RunManager } = await import('../src/server/manager.ts');
+  const { PostPushWatcher } = await import('../src/server/triggers.ts');
+  const { ensureDefaults } = await import('../src/server/flows/store.ts');
+  const db = openDb(join(mkdtempSync(join(process.env.TMPDIR!, 'purr-db-')), 'purr.db'));
+  ensureDefaults(db);
+  db.setSettings({ ...db.getSettings(), projectFolders: [], postPushPrsOnly: true });
+  const mgr = new RunManager(db, new ClaudeRunner(db));
+  const sched: string[] = [];
+  mgr.schedulePostPush = (r: any) => { sched.push(r.head); };
+
+  // gh signed out, PR-only on: PR-only can't apply, so every push is reviewed, GitLab included
+  const gl = tempRepo();
+  sh(gl, 'remote', 'add', 'origin', 'https://gitlab.example.com/org/app.git');
+  await addRepo(db, gl);
+  const noGh = new PostPushWatcher(db, mgr, { lsRemote: async () => 'dab1', ghAuthed: async () => false, prForBranch: async () => null, confirmEveryMs: 5 });
+  await noGh.pushIntent({ repoPath: gl, branch: 'feat', sha: 'dab1', from: null });
+  await noGh.settled();
+  assert.deepEqual(sched, ['dab1']);
+
+  // a bot's commit found on top before this push was seen, then no answer from the remote: still the bot's reviewed
+  db.setSettings({ ...db.getSettings(), postPushPrsOnly: false });
+  const hub = tempRepo();
+  sh(hub, 'remote', 'add', 'origin', 'https://github.com/work-org/app-u.git');
+  const h = await addRepo(db, hub);
+  const looks: (string | null)[] = ['dac0', 'dac9', null];
+  const bot = new PostPushWatcher(db, mgr, {
+    lsRemote: async () => (looks.length > 1 ? looks.shift()! : looks[0]) ?? null, ghAuthed: async () => true, prForBranch: async () => null,
+    inHistoryOf: async () => 'yes', confirmEveryMs: 5,
+  });
+  sched.length = 0;
+  await bot.pushIntent({ repoPath: hub, branch: 'feat', sha: 'dac1', from: 'dac0' });
+  await bot.settled();
+  assert.deepEqual(sched, ['dac9'], 'not the older dac1');
+  assert.deepEqual([db.getPushOutcomes('dac1', [h.path])[0]?.kind, db.getPushOutcomes('dac1', [h.path])[0]?.nextSha], ['superseded', 'dac9']);
+
+  // a newer push from a worktree with post-push off: its pending note promises no review, so this push's hook reviews it
+  const wtPath = join(realpathSync(mkdtempSync(join(process.env.TMPDIR!, 'purr-wt-'))), 'wt');
+  sh(hub, 'worktree', 'add', '-q', wtPath, '-b', 'wt');
+  const w = await addRepo(db, wtPath);
+  db.setTrigger({ trigger: 'post-push', repoId: w.id, flowId: null });
+  db.setPushOutcome({ sha: 'dad9', kind: 'pending', reason: 'its hook reported it', repoPath: w.path, branch: 'feat' });
+  const mixed = new PostPushWatcher(db, mgr, {
+    lsRemote: async () => 'dad9', ghAuthed: async () => true, prForBranch: async () => null, inHistoryOf: async () => 'yes', confirmEveryMs: 5,
+  });
+  sched.length = 0;
+  await mixed.pushIntent({ repoPath: hub, branch: 'feat', sha: 'dad1', from: 'dad0' });
+  await mixed.settled();
+  assert.deepEqual(sched, ['dad9']);
   db.close();
 });
