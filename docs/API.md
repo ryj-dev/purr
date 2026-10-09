@@ -32,7 +32,7 @@ interface BlockTypeInfo {
 | POST | `/api/tools/homebrew/install` | | opens Terminal on Homebrew's installer |
 | POST | `/api/tools/:name/signin` | | `claude` or `gh`: opens Terminal on its login (for gh, also adds another account) |
 
-`:name` is `gitleaks`, `zizmor`, `osv-scanner`, `claude` or `gh`. All of them install with Homebrew (`brew install`, claude as `--cask claude-code`). Each change to an install sends a `tools` event, and a finished or failed one also sends `state`.
+`:name` is `betterleaks`, `zizmor`, `osv-scanner`, `hadolint`, `actionlint`, `claude` or `gh`. All of them install with Homebrew (`brew install`, claude as `--cask claude-code`). Each change to an install sends a `tools` event, and a finished or failed one also sends `state`.
 
 ```ts
 interface Toolchain { homebrew: { installed: boolean; path: string | null }; tools: ToolStatus[] }

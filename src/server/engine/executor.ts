@@ -101,7 +101,7 @@ export async function executeFlow(input: ExecInput, deps: ExecDeps): Promise<Exe
     switch (b.type) {
       case 'scanner': {
         const c = b.config as ScannerConfig;
-        const { findings, state: st } = await runScanner(c.scanner, b.id, files, change);
+        const { findings, state: st } = await runScanner(c.scanner, b.id, files, change, deps.signal);
         return { findings, scanner: st, log: st.error ? [st.error] : [] };
       }
       case 'command': {

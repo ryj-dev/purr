@@ -72,15 +72,16 @@ async function settled(name: string) {
 }
 
 test('status: installed or not, version, and who is signed in to claude and gh', async () => {
-  const w = fakeWorld({ brew: true, have: ['gitleaks', 'claude', 'gh'] });
+  const w = fakeWorld({ brew: true, have: ['betterleaks', 'claude', 'gh'] });
   try {
     const s = await toolchainStatus();
     assert.equal(s.homebrew.installed, true);
     const by = Object.fromEntries(s.tools.map((t) => [t.name, t]));
-    assert.deepEqual(s.tools.map((t) => t.name), ['gitleaks', 'zizmor', 'osv-scanner', 'claude', 'gh']);
-    assert.equal(by.gitleaks.installed, true);
-    assert.equal(by.gitleaks.version, '1.2.3');
-    assert.equal(by.gitleaks.auth, null, 'scanners have no sign-in');
+    assert.deepEqual(s.tools.map((t) => t.name), ['betterleaks', 'zizmor', 'osv-scanner', 'hadolint', 'actionlint', 'claude', 'gh']);
+    assert.equal(by.betterleaks.installed, true);
+    assert.equal(by.betterleaks.version, '1.2.3');
+    assert.equal(by.betterleaks.auth, null, 'scanners have no sign-in');
+    assert.equal(by.hadolint.installed, false);
     assert.equal(by.zizmor.installed, false);
     assert.deepEqual(by.claude.auth, { signedIn: true, accounts: ['me@example.com'], detail: 'Example' });
     assert.deepEqual(by.gh.auth, { signedIn: true, accounts: ['me', 'work-me'] }, 'every account, the active one first');
@@ -102,8 +103,8 @@ test('install with Homebrew: progress, then installed; a failing brew leaves a r
 
   const w2 = fakeWorld({ brew: true, brewFails: true, have: [] });
   try {
-    installTool('gitleaks');
-    const g = await settled('gitleaks');
+    installTool('betterleaks');
+    const g = await settled('betterleaks');
     assert.equal(g.installed, false);
     assert.equal(g.job?.state, 'failed');
     assert.match(g.job!.error!, /no bottle available/);
@@ -124,12 +125,12 @@ test('without Homebrew: brew tools ask for it first, and Install missing leaves 
 });
 
 test('Install missing installs each missing tool in turn, claude as the claude-code cask', async () => {
-  const w = fakeWorld({ brew: true, have: ['gh', 'gitleaks'] });
+  const w = fakeWorld({ brew: true, have: ['gh', 'betterleaks'] });
   try {
-    assert.deepEqual(await installMissing(), ['zizmor', 'osv-scanner', 'claude']);
-    for (const n of ['zizmor', 'osv-scanner', 'claude']) assert.equal((await settled(n)).installed, true, `${n} installed`);
+    assert.deepEqual(await installMissing(), ['zizmor', 'osv-scanner', 'hadolint', 'actionlint', 'claude']);
+    for (const n of ['zizmor', 'osv-scanner', 'hadolint', 'actionlint', 'claude']) assert.equal((await settled(n)).installed, true, `${n} installed`);
     assert.deepEqual(readFileSync(join(w.dir, 'brew.log'), 'utf8').trim().split('\n'),
-      ['install zizmor', 'install osv-scanner', 'install --cask claude-code'], 'one at a time, in order');
+      ['install zizmor', 'install osv-scanner', 'install hadolint', 'install actionlint', 'install --cask claude-code'], 'one at a time, in order');
   } finally { w.restore(); }
 });
 
@@ -140,13 +141,13 @@ test('installs never run two brews at once, and a tool is never queued twice', a
     installTool('zizmor');   // a double click
     // Install missing, twice at once, while zizmor is still installing
     const [a, b] = await Promise.all([installMissing(), installMissing()]);
-    assert.deepEqual([...a, ...b].sort(), ['gitleaks', 'osv-scanner'], 'each missing tool queued once, zizmor not again');
+    assert.deepEqual([...a, ...b].sort(), ['actionlint', 'betterleaks', 'hadolint', 'osv-scanner'], 'each missing tool queued once, zizmor not again');
     const st = (await toolchainStatus()).tools;
-    assert.equal(st.find((t) => t.name === 'gitleaks')!.job?.step, 'Queued');
+    assert.equal(st.find((t) => t.name === 'betterleaks')!.job?.step, 'Queued');
     w.release();
-    for (const n of ['zizmor', 'gitleaks', 'osv-scanner']) assert.equal((await settled(n)).installed, true, `${n} installed`);
+    for (const n of ['zizmor', 'betterleaks', 'osv-scanner', 'hadolint', 'actionlint']) assert.equal((await settled(n)).installed, true, `${n} installed`);
     assert.deepEqual(readFileSync(join(w.dir, 'brew.log'), 'utf8').trim().split('\n'),
-      ['install zizmor', 'install gitleaks', 'install osv-scanner'], 'one brew at a time, each once');
+      ['install zizmor', 'install betterleaks', 'install osv-scanner', 'install hadolint', 'install actionlint'], 'one brew at a time, each once');
   } finally { w.restore(); }
 });
 
@@ -208,7 +209,7 @@ test('Sign in for gh opens its login in Terminal, then looks for the new account
 });
 
 test('HTTP: /api/tools, installing, unknown tools, and scanners have nothing to sign in to', async () => {
-  const w = fakeWorld({ brew: true, hold: true, have: ['claude', 'gh', 'gitleaks', 'osv-scanner'] });
+  const w = fakeWorld({ brew: true, hold: true, have: ['claude', 'gh', 'betterleaks', 'osv-scanner', 'hadolint', 'actionlint'] });
   const db = openDb();
   ensureDefaults(db);
   const mgr = new RunManager(db, new ClaudeRunner(db));
@@ -223,7 +224,7 @@ test('HTTP: /api/tools, installing, unknown tools, and scanners have nothing to 
     assert.equal(body.homebrew.installed, true);
     assert.deepEqual(body.tools.filter((t: { installed: boolean }) => !t.installed).map((t: { name: string }) => t.name), ['zizmor']);
     const st = await (await call('GET', '/api/state')).json();
-    assert.deepEqual(st.tools, { gh: true, ghAuthed: true, gitleaks: true, zizmor: false, osv: true, claude: true });
+    assert.deepEqual(st.tools, { gh: true, ghAuthed: true, betterleaks: true, zizmor: false, osv: true, hadolint: true, actionlint: true, claude: true });
 
     const one = await call('POST', '/api/tools/zizmor/install');
     assert.equal(one.status, 202);
@@ -239,7 +240,7 @@ test('HTTP: /api/tools, installing, unknown tools, and scanners have nothing to 
     assert.equal((await settled('zizmor')).installed, true);
 
     assert.equal((await call('POST', '/api/tools/nmap/install')).status, 404);
-    const si = await call('POST', '/api/tools/gitleaks/signin');
+    const si = await call('POST', '/api/tools/betterleaks/signin');
     assert.equal(si.status, 400);
     assert.match((await si.json()).error, /doesn't need signing in/);
     assert.equal((await call('POST', '/api/tools/homebrew/install')).status, 400, 'already installed');

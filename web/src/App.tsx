@@ -111,7 +111,7 @@ export function App() {
                 <button type="button" className="toolchain" onClick={() => setToolchainOpen(true)} title="Install tools and sign in">
                   <h3>Toolchain</h3>
                   <ul className="tools">
-                    {(['gitleaks', 'zizmor', 'osv', 'claude'] as const).map((t) => (
+                    {(['betterleaks', 'zizmor', 'osv', 'hadolint', 'actionlint', 'claude'] as const).map((t) => (
                       <li key={t} className={`tool ${tools[t] ? 'on' : 'off'}`} title={tools[t] ? 'installed' : 'not installed'}><i />{t}</li>
                     ))}
                     <li className={`tool ${tools.gh && tools.ghAuthed ? 'on' : 'off'}`}

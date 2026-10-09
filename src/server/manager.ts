@@ -3,6 +3,7 @@ import { EventEmitter } from 'node:events';
 import { existsSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
 import type { BlockRun, Finding, Flow, OutputConfig, Run, ServerEvent, TriggerKind } from '../shared/types.ts';
+import { foundBy } from '../shared/scanners.ts';
 import type { ClaudeRunner } from './claude.ts';
 import type { DB } from './db.ts';
 import { DEFAULT_TRIGGERS } from './flows/defaults.ts';
@@ -37,6 +38,27 @@ const SESSION_BLOCKS = new Set(['context', 'prompt', 'verify', 'command']);
 
 /** What a run keeps of its PR, including the account that found it: the one PuRR comments as. */
 export const runPr = (pr: PrInfo): NonNullable<Run['pr']> => ({ number: pr.number, title: pr.title, body: pr.body, url: pr.url, account: pr.account });
+
+/**
+ * The blocks whose run can say an earlier finding of theirs is gone: those that finished, except a scanner that failed
+ * or isn't installed (it checked nothing). A scanner that couldn't check some files (partial) counts, but `unchecked`
+ * lists those files, whose findings it can't vouch for.
+ */
+export function completeBlocks(blocks: Array<{ id: string }>, runs: Map<string, BlockRun>) {
+  const complete = new Set<string>();
+  const unchecked = new Map<string, Set<string>>();
+  const tools = new Map<string, string>();   // a secrets block: the tool that actually ran in it
+  for (const b of blocks) {
+    const br = runs.get(b.id);
+    if (br?.status !== 'done') continue;
+    const sc = br.output?.scanner;
+    if (sc && sc.state !== 'ran' && sc.state !== 'n/a' && sc.state !== 'partial') continue;
+    if (sc?.state === 'partial') unchecked.set(b.id, new Set((sc.incomplete ?? []).map((x) => x.file)));
+    if (sc?.tool) tools.set(b.id, sc.tool);
+    complete.add(b.id);
+  }
+  return { complete, unchecked, tools };
+}
 
 export class RunManager {
   db: DB;
@@ -212,9 +234,8 @@ export class RunManager {
         { claude: this.claude, signal: controller.signal, onBlock: this.onBlock, isSuppressed, fingerprint: (fs) => fingerprintAll(fs, material) },
       );
       await fingerprintAll(result.findings, material);
-      const complete = result.failedBlocks.length === 0 && !controller.signal.aborted
-        ? new Set(run.flow.blocks.filter((b) => result.blocks.get(b.id)?.status === 'done').map((b) => b.id)) : null;
-      applyLedger(this.db, run, result.findings, complete);
+      const checked = result.failedBlocks.length === 0 && !controller.signal.aborted ? completeBlocks(run.flow.blocks, result.blocks) : null;
+      applyLedger(this.db, run, result.findings, checked?.complete ?? null, checked?.unchecked, checked?.tools);
       this.db.setRunFindings(run.id, result.findings);
       run.counts = countBySeverity(active(result.findings));
       if (controller.signal.aborted) {
@@ -323,6 +344,8 @@ export function renderComment(run: Run, findings: Finding[]): string {
     lines.push(`**${{ must_fix: 'Must fix', consider: 'Consider', minor: 'Minor' }[sev]}**`, '');
     for (const f of fs) {
       lines.push(`- \`${f.file}${f.line ? `:${f.line}` : ''}\` **${f.title}**. ${f.scenario}${f.fix ? ` Fix: ${f.fix}` : ''}`);
+      const by = f.source.kind === 'scanner' ? foundBy(f) : '';   // which tool, and what it is, for a reader who doesn't know it
+      if (by) lines.push(`  ${by}`);
     }
     lines.push('');
   }

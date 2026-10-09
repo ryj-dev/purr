@@ -67,7 +67,7 @@ const str = (v: unknown) => (typeof v === 'string' ? v : null);
 const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
 
 const ENUMS: Record<string, readonly (string | null)[]> = {
-  scanner: ['gitleaks', 'zizmor', 'osv'],
+  scanner: ['betterleaks', 'zizmor', 'osv', 'hadolint', 'actionlint'],
   effort: [null, 'low', 'medium', 'high', 'xhigh', 'max'],
   output: ['findings', 'text'],
   blockOn: ['must_fix', 'consider', 'minor'],
@@ -86,7 +86,11 @@ function cleanConfig(type: BlockType, raw: unknown, where: string, notes: string
     if (!(k in defaults)) { notes.push(`${where}: dropped unknown setting "${k}"`); continue; }
     const d = defaults[k];
     let ok: unknown = undefined;
-    if (k in ENUMS) ok = ENUMS[k].includes(v as string) ? v : undefined;
+    if (k === 'scanner' && v === 'gitleaks') {
+      // shared before betterleaks replaced gitleaks: the same job, so it's kept, as betterleaks
+      ok = 'betterleaks';
+      notes.push(`${where}: gitleaks is now betterleaks, its successor`);
+    } else if (k in ENUMS) ok = ENUMS[k].includes(v as string) ? v : undefined;
     else if (k === 'forkFrom') ok = v === null || typeof v === 'string' ? v : undefined;
     else if (k === 'appliesTo') ok = Array.isArray(v) && v.every((x) => ENUMS.blockOn.includes(x)) ? [...new Set(v)] : undefined;
     else if (Array.isArray(d)) ok = Array.isArray(v) && v.every((x) => typeof x === 'string') ? [...v] : undefined;

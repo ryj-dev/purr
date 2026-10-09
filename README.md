@@ -36,7 +36,7 @@
 ## Why PuRR
 
 - **Every repo, automatically.** While PuRR runs, git's global hooks route every commit and push through it. Nothing to set up per repo, and quitting the app turns it off.
-- **Blocks the obvious, reviews the subtle.** gitleaks, zizmor and osv-scanner stop secrets and risky changes at commit and push time. After a push to an open PR, a Claude review digs into logic, contracts, security, data and tests.
+- **Blocks the obvious, reviews the subtle.** betterleaks, zizmor and osv-scanner stop secrets and risky changes at commit and push time, and hadolint and actionlint flag Dockerfile and workflow mistakes. After a push to an open PR, a Claude review digs into logic, contracts, security, data and tests.
 - **One context, many reviewers.** A seed session reads the change once, then forks into six specialist lenses that share its context through the prompt cache. Severity and skeptic-verify passes cut the noise.
 - **Reviews you can design and share.** Flows are graphs you edit visually: scanners, sessions, branches, prompts, merges, gates. Assign a different flow to each trigger, globally or per repo, and share a flow as one line of text.
 - **Your own account, nothing more.** PuRR drives the unmodified `claude` CLI headlessly, signed in with your own account. It never reads `~/.claude`, the keychain or OAuth tokens, and never calls the Anthropic API itself. All Claude access goes through `src/server/claude.ts`.
@@ -63,7 +63,7 @@ npm install && npm run build          # build the UI (the service runs from Type
 - Node ≥ 23.6 (developed on 26)
 - git
 - `claude`
-- gitleaks, zizmor and osv-scanner: `brew install gitleaks zizmor osv-scanner`. A missing scanner shows as "not installed"; it doesn't fail the run.
+- The five scanners: `brew install betterleaks zizmor osv-scanner hadolint actionlint`. A missing scanner shows as "not installed"; it doesn't fail the run. Without betterleaks, an installed gitleaks (its predecessor) scans for secrets instead.
 - `gh`, optional: adds PR title/description and the open-PR poller.
 
 Click **Toolchain** in the sidebar to install any of these and sign in, without the terminal. Everything installs with Homebrew (claude as the `claude-code` cask; update it with `brew upgrade`). If Homebrew is missing, the popup offers to install it in Terminal, because its installer asks for your Mac's password. Sign in and Add account (gh) open Terminal on the tool's own login (`claude auth login`, `gh auth login --web`), so PuRR never sees a password or token.
@@ -81,11 +81,18 @@ PuRR isn't opt-in per repo. While the service runs (PuRR.app, or `purr daemon`):
 ## How a review works (Default · Full review)
 
 ```
-[gitleaks][zizmor][osv] ──► [Context · gather facts] ──► [Branch ×6] ──► 6 lenses ──► [Merge] ──► [Severity] ──► [Verify] ──► [Results]
-          └──────────────────────────── scanner hits go straight to Results ─────────────────────────────────────────┘
+[betterleaks][zizmor][osv][hadolint][actionlint] ──► [Context · gather facts] ──► [Branch ×6] ──► 6 lenses ──► [Merge] ──► [Severity] ──► [Verify] ──► [Results]
+          └──────────────────────────── scanner hits go straight to Results ──────────────────────────────────────────────────────────┘
 ```
 
-1. **Scanners** run on the lines the change adds. This is ported from tc-ai-reviewer: gitleaks on a sparse copy of the added lines, zizmor at high severity, osv-scanner for new critical/high vulnerabilities compared with base.
+1. **Scanners** run on the lines the change adds, ported from tc-ai-reviewer's five:
+   - **betterleaks** (the gitleaks successor): secrets, on a sparse copy holding only the added lines. Any hit is a must-fix. Only the rule and description are kept, never the secret, and its live validation (which would send the secret to the provider) stays off.
+   - **zizmor**: GitHub Actions security mistakes at high severity on added lines. Must-fix, except unpinned actions and images, which are consider.
+   - **osv-scanner**: new critical/high vulnerabilities in a changed lockfile compared with base. Must-fix. It sends package names and versions only.
+   - **hadolint**: Dockerfile errors on added lines. Consider: advice, never blocks.
+   - **actionlint**: workflow errors on added lines. Consider: advice, never blocks.
+
+   A scanner that couldn't check some files says so (state "partial") rather than passing.
 2. **Context (seed session):** one Opus session gets the diff, the full changed files (line-numbered, within a 140k-char budget), CLAUDE.md as hints, and the scanner results. It gathers facts only: callers of changed code, guarantees removed by the diff, relevant tests.
 3. **Branch** duplicates that session. Each **lens** forks it (`claude -p --resume <seed> --fork-session`) and reads the seed's context from the prompt cache. The six lenses are:
    - deleted guarantees and logic
@@ -108,8 +115,8 @@ PuRR isn't opt-in per repo. While the service runs (PuRR.app, or `purr daemon`):
 ## Flows and triggers
 
 - **Flows page:** three read-only defaults:
-  - **Pre-commit scan:** gitleaks, then a gate.
-  - **Pre-push scan:** all three scanners, then a gate.
+  - **Pre-commit scan:** betterleaks, then a gate.
+  - **Pre-push scan:** the three blocking scanners (betterleaks, zizmor, osv-scanner), then a gate.
   - **Full review:** as described above.
 
   To change one, **Duplicate** it, then edit, delete or create new flows.
@@ -209,13 +216,13 @@ purr: feat/x will be reviewed once the push lands (if it has an open PR). For th
 | `src/server/engine/` | flow executor, findings (normalise / dedupe / fingerprint), PR material |
 | `src/server/flows/` | block types, default flows and prompts, validation, CRUD |
 | `src/server/toolchain.ts` | the Toolchain popup: tool status, sign-in state, Homebrew / Claude Code installs, Terminal sign-in |
-| `src/server/scanners.ts` | gitleaks / zizmor / osv (port of tc-ai-reviewer's `scanners.py`) |
+| `src/server/scanners.ts` | betterleaks / zizmor / osv / hadolint / actionlint (port of tc-ai-reviewer's `scanners.py`) |
 | `src/server/manager.ts` | runs: prepare change + worktree, execute, ledger, notifications, supersede, debounce, pause |
 | `src/server/triggers.ts` | post-push: push-intent confirmation + gh poller |
 | `src/server/http.ts` | REST + SSE API ([docs/API.md](docs/API.md)) and the static UI |
 | `src/server/hooks.ts` | hook install/uninstall with chaining |
 | `web/` | React + React Flow UI |
-| `test/` | `npm test` runs unit + integration tests (a fake `claude`, real gitleaks, a real `git push` to a bare remote) |
+| `test/` | `npm test` runs unit + integration tests (a fake `claude`, fake scanners, a real betterleaks or gitleaks, a real `git push` to a bare remote) |
 
 Data lives in `~/.purr/` (`purr.db`, `worktrees/`, `logs/`), or in `$PURR_HOME` if set.
 
@@ -225,7 +232,9 @@ Data lives in `~/.purr/` (`purr.db`, `worktrees/`, `logs/`), or in `$PURR_HOME` 
 - No summary-writer block. Notifications and PR comments use a deterministic summary.
 - No incremental re-review. Each push reviews the whole branch range; the ledger keeps repeats quiet.
 - De-duplication across lenses is deterministic and conservative; the severity step is asked to drop duplicates. Opus does this well. On Haiku, near-duplicates (the same issue worded three ways) can survive. An LLM same-issue block, like tc-ai-reviewer's `same_issue.md`, is the next thing to add.
-- The pre-push gate scans every commit being pushed, so a secret added and later removed in the same push still blocks it. That matches gitleaks' history semantics.
+- The pre-push gate scans every commit being pushed, so a secret added and later removed in the same push still blocks it. That matches betterleaks' history semantics.
+- betterleaks flags an AWS access key id together with its secret, but not a bare key id on its own, which gitleaks also flagged. A key id alone can't be used, and tc-ai-reviewer made the same switch.
+- osv-scanner reads lockfiles as they are (and pinned `requirements*.txt`). tc-ai-reviewer also pins the full tree of a manifest without a lockfile (`package.json`, `pyproject.toml`, unpinned requirements) before scanning it, and flags a change that makes dependencies impossible to install; PuRR doesn't yet.
 - The UI loads as a single 700 kB bundle and the editor has no undo/redo.
 - Posting PR comments is off by default (`Output` block → "Post PR comment").
 

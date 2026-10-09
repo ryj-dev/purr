@@ -1,4 +1,4 @@
-import { FAKE_AWS, sh, tempRepo } from './helpers.ts';
+import { FAKE_SECRET, sh, tempRepo } from './helpers.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, writeFileSync } from 'node:fs';
@@ -21,7 +21,7 @@ test('pre-push after a rebase only scans your own commits, not the base branch o
   sh(repo, 'add', '-A'); sh(repo, 'commit', '-qm', 'feature', '--no-verify');
   const oldTip = sh(repo, 'rev-parse', 'HEAD');
   sh(repo, 'checkout', '-q', 'main');
-  writeFileSync(join(repo, 'teammate.txt'), `key ${FAKE_AWS}\n`);   // someone else's commit on main
+  writeFileSync(join(repo, 'teammate.txt'), `key ${FAKE_SECRET}\n`);   // someone else's commit on main
   sh(repo, 'add', '-A'); sh(repo, 'commit', '-qm', 'teammate', '--no-verify');
   sh(repo, 'checkout', '-q', 'feature'); sh(repo, 'rebase', '-q', 'main');
   const req = { trigger: 'pre-push' as const, repoPath: repo, mode: 'range' as const, head: sh(repo, 'rev-parse', 'HEAD'), base: oldTip, branch: 'feature' };
@@ -51,7 +51,7 @@ test('the hook fails open when PuRR itself is broken, and blocks only on exit 1'
   const p = join(GLOBAL_HOOKS_DIR, 'pre-commit');
   // simulate purr having moved away, with no `purr` on PATH either
   writeFileSync(p, readFileSync(p, 'utf8').replace(/^(\s*)PURR_BIN=.*$/m, "$1PURR_BIN='/nonexistent/purr'"));
-  writeFileSync(join(repo, 'leak.txt'), `token ${FAKE_AWS}\n`);
+  writeFileSync(join(repo, 'leak.txt'), `token ${FAKE_SECRET}\n`);
   sh(repo, 'add', 'leak.txt');
   const r = spawnSync('git', ['commit', '-m', 'x'], { cwd: repo, encoding: 'utf8', env: { ...process.env, PATH: '/usr/bin:/bin' } });
   assert.equal(r.status, 0, 'commit proceeds');

@@ -75,6 +75,9 @@ function BlockPanel({ detail, blockId, onClose }: { detail: RunDetail; blockId: 
               {out.scanner.hits != null && <><dt>Hits</dt><dd>{out.scanner.hits}</dd></>}
               <dt>Time</dt><dd className="mono">{out.scanner.secs}s</dd>
               {out.scanner.error && <><dt>Error</dt><dd className="err-text">{out.scanner.error}</dd></>}
+              {out.scanner.incomplete && out.scanner.incomplete.length > 0 && (
+                <><dt>Not checked</dt><dd>{out.scanner.incomplete.map((x) => <div key={x.file}><span className="mono">{x.file}</span>: {x.reason}</div>)}</dd></>
+              )}
             </dl>
           </div>
         )}

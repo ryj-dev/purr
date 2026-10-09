@@ -7,7 +7,7 @@ export const TRIGGERS: TriggerKind[] = ['pre-commit', 'pre-push', 'post-push', '
 export type Severity = 'must_fix' | 'consider' | 'minor';
 
 export type BlockType =
-  | 'scanner'   // gitleaks / zizmor / osv on the lines this change adds
+  | 'scanner'   // betterleaks / zizmor / osv / hadolint / actionlint on the lines this change adds
   | 'command'   // any shell command (type-check, lint...); its output is text for later blocks
   | 'context'   // starts a Claude session (the seed) that gathers shared context
   | 'branch'    // pure duplicate: 1 session in, one fork per outgoing edge
@@ -17,7 +17,8 @@ export type BlockType =
   | 'gate'      // pass/fail on findings; a failed gate blocks the commit/push
   | 'output';   // notification, results, optional PR comment
 
-export type ScannerName = 'gitleaks' | 'zizmor' | 'osv';
+/** 'gitleaks' is the name before betterleaks replaced it: flows and findings saved with it still load, and it runs betterleaks. */
+export type ScannerName = 'betterleaks' | 'zizmor' | 'osv' | 'hadolint' | 'actionlint' | 'gitleaks';
 export type Effort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 
 export interface ScannerConfig { scanner: ScannerName }
@@ -121,7 +122,13 @@ export interface SessionUse {
   error?: string;
 }
 
-export interface ScannerState { state: 'ran' | 'n/a' | 'not installed' | 'failed'; hits?: number; secs: number; error?: string }
+/** partial: some of what it should check couldn't be (`incomplete` says which files and why), never shown as a clean pass. */
+export interface ScannerState {
+  state: 'ran' | 'partial' | 'n/a' | 'not installed' | 'failed'; hits?: number; secs: number; error?: string;
+  incomplete?: Array<{ file: string; reason: string }>;
+  /** a secrets block: which tool actually ran (betterleaks, or gitleaks when betterleaks isn't installed) */
+  tool?: 'betterleaks' | 'gitleaks';
+}
 
 export interface BlockOutput {
   findings?: Finding[];
@@ -222,7 +229,7 @@ export interface AppState {
   repos: Repo[];
   flows: FlowMeta[];
   triggers: TriggerAssignment[];
-  tools: { gh: boolean; ghAuthed: boolean; gitleaks: boolean; zizmor: boolean; osv: boolean; claude: boolean };
+  tools: { gh: boolean; ghAuthed: boolean; betterleaks: boolean; zizmor: boolean; osv: boolean; hadolint: boolean; actionlint: boolean; claude: boolean };
   version: string;
   /** git's global core.hooksPath points at purr's hooks: commit/push checks cover every repo while purr runs */
   /** ownHooks: repo id -> the core.hooksPath that repo sets for itself, where PuRR's commit and push checks can't run */
@@ -266,7 +273,7 @@ export const TEMPLATE_VARS: Record<string, string> = {
 };
 
 /** One tool in the Toolchain popup: whether it's there, how PuRR would install it, and (claude, gh) who is signed in. */
-export type ToolName = 'gitleaks' | 'zizmor' | 'osv-scanner' | 'claude' | 'gh';
+export type ToolName = 'betterleaks' | 'zizmor' | 'osv-scanner' | 'hadolint' | 'actionlint' | 'claude' | 'gh';
 export interface ToolStatus {
   name: ToolName;
   purpose: string;

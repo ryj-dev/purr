@@ -1,4 +1,4 @@
-// The tools PuRR uses but doesn't ship: the three scanners, claude (reviews) and gh (PR detection and comments).
+// The tools PuRR uses but doesn't ship: the five scanners, claude (reviews) and gh (PR detection and comments).
 // The Toolchain popup shows each one's state and installs what's missing:
 // all with Homebrew (claude as the claude-code cask). Without Homebrew, the popup offers to install it, in Terminal,
 // since its installer asks for the Mac's password.
@@ -8,19 +8,22 @@ import type { AppState, ToolName, ToolStatus, Toolchain } from '../shared/types.
 import { GH_DEFAULT_LOGIN, expectGhSignIn, forgetGhAccounts, ghAccounts } from './gh.ts';
 import { exec } from './util.ts';
 
-export const TOOL_NAMES: ToolName[] = ['gitleaks', 'zizmor', 'osv-scanner', 'claude', 'gh'];
+export const TOOL_NAMES: ToolName[] = ['betterleaks', 'zizmor', 'osv-scanner', 'hadolint', 'actionlint', 'claude', 'gh'];
 
 const PURPOSE: Record<ToolName, string> = {
-  gitleaks: 'Secrets in commits',
+  betterleaks: 'Secrets in commits (the gitleaks successor)',
   zizmor: 'GitHub Actions workflow issues',
   'osv-scanner': 'Known-vulnerable dependencies',
+  hadolint: 'Dockerfile errors (advice)',
+  actionlint: 'GitHub Actions workflow errors (advice)',
   claude: 'Runs the reviews, on your subscription',
   gh: 'Finds your PRs and posts review comments',
 };
 
 /** `brew install` arguments for each tool. */
 export const BREW_INSTALL: Record<ToolName, string[]> = {
-  gitleaks: ['gitleaks'], zizmor: ['zizmor'], 'osv-scanner': ['osv-scanner'], gh: ['gh'], claude: ['--cask', 'claude-code'],
+  betterleaks: ['betterleaks'], zizmor: ['zizmor'], 'osv-scanner': ['osv-scanner'], hadolint: ['hadolint'], actionlint: ['actionlint'],
+  gh: ['gh'], claude: ['--cask', 'claude-code'],
 };
 
 // ---- status ----
@@ -115,8 +118,9 @@ export function toolchainStatus(): Promise<Toolchain> {
 export function toolsSummary(): Promise<AppState['tools']> {
   if (summaryCache && Date.now() - summaryCache.at < 60_000) return summaryCache.v;
   const v = (async () => {
-    const [gitleaks, zizmor, osv, claude, gh] = await Promise.all(['gitleaks', 'zizmor', 'osv-scanner', 'claude', 'gh'].map(async (n) => !!(await locate(n))));
-    return { gh, ghAuthed: gh ? (await ghAccounts()).length > 0 : false, gitleaks, zizmor, osv, claude };
+    const [betterleaks, zizmor, osv, hadolint, actionlint, claude, gh] = await Promise.all(
+      ['betterleaks', 'zizmor', 'osv-scanner', 'hadolint', 'actionlint', 'claude', 'gh'].map(async (n) => !!(await locate(n))));
+    return { gh, ghAuthed: gh ? (await ghAccounts()).length > 0 : false, betterleaks, zizmor, osv, hadolint, actionlint, claude };
   })();
   summaryCache = { at: Date.now(), v };
   v.catch(() => { summaryCache = null; });

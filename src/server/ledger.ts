@@ -19,10 +19,17 @@ export async function fingerprintAll(findings: Finding[], material: Material): P
 }
 
 /**
+ * Rules gitleaks raised on text betterleaks doesn't flag (checked with both tools: a bare AWS access key id, and the
+ * generic-api-key gitleaks adds beside an AWS key pair). betterleaks not finding them says nothing.
+ */
+const GITLEAKS_ONLY = new Set(['aws-access-token', 'generic-api-key']);
+
+/**
  * Marks each finding new / open / regression / dismissed / tracked and records it. When `completeBlocks` is given
  * (every block finished), open items this branch raised before from one of those blocks, and not raised now, become fixed.
  */
-export function applyLedger(db: DB, run: Run, findings: Finding[], completeBlocks: Set<string> | null): void {
+export function applyLedger(db: DB, run: Run, findings: Finding[], completeBlocks: Set<string> | null,
+  unchecked: Map<string, Set<string>> = new Map(), tools: Map<string, string> = new Map()): void {
   if (!run.repoId) return;
   const ts = now();
   const seen = new Set<string>();
@@ -47,7 +54,16 @@ export function applyLedger(db: DB, run: Run, findings: Finding[], completeBlock
   if (completeBlocks && run.branch && run.mode === 'range' && wholeBranch) {
     for (const item of db.listLedger(run.repoId, 'open')) {
       if (item.branch !== run.branch || item.flowId !== run.flowId || seen.has(item.fingerprint)) continue;
-      if (!completeBlocks.has(item.finding.source.blockId)) continue;
+      // the default flows' secrets block was scan-gitleaks before betterleaks replaced it: the same block, renamed
+      const gitleaksEra = item.finding.source.blockId === 'scan-gitleaks' && !completeBlocks.has('scan-gitleaks');
+      const by = gitleaksEra ? 'scan-betterleaks' : item.finding.source.blockId;
+      if (!completeBlocks.has(by)) continue;
+      // betterleaks doesn't raise everything gitleaks did (a bare AWS key id, some generic API keys), so a finding gitleaks
+      // raised under one of those rules is closed only by a run in which gitleaks itself ran in that block: whatever
+      // the block is called (a flow saved with scan-gitleaks runs betterleaks now; scan-betterleaks falls back to
+      // gitleaks when betterleaks isn't installed). Otherwise it stays open until dismissed
+      if (item.finding.source.scanner === 'gitleaks' && GITLEAKS_ONLY.has(item.finding.source.rule ?? '') && tools.get(by) !== 'gitleaks') continue;
+      if (unchecked.get(by)?.has(item.finding.file)) continue;   // a file this run's scanner couldn't check: still open
       db.putLedger({ ...item, state: 'fixed', lastRunId: run.id, updatedAt: ts });
     }
   }

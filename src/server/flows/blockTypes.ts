@@ -19,8 +19,8 @@ export const BUILTIN_TOOLS = ['Read', 'Grep', 'Glob', 'Bash', 'Edit', 'Write', '
 export const BLOCK_TYPES: BlockTypeInfo[] = [
   {
     type: 'scanner', label: 'Code scanner', maxInputs: 0, startsSession: false, needsSession: false,
-    description: 'Runs gitleaks, zizmor or osv-scanner on the lines this change adds. No Claude. Its findings can feed a context block or a gate.',
-    defaultConfig: { scanner: 'gitleaks' },
+    description: 'Runs betterleaks, zizmor, osv-scanner, hadolint or actionlint on the lines this change adds. No Claude. Its findings can feed a context block or a gate.',
+    defaultConfig: { scanner: 'betterleaks' },
   },
   {
     type: 'command', label: 'Command', maxInputs: 0, startsSession: false, needsSession: false,

@@ -40,6 +40,13 @@ export const slim = (f: Finding) => ({
   source: f.source.scanner ? `scanner:${f.source.scanner}` : f.source.blockId,
 });
 
+/**
+ * What makes two scanner hits the same issue: scanner, rule and file, and for actionlint the message too, since its
+ * "rule" is a broad kind (expression, syntax-check...) covering unrelated errors. group() and dedupe() both use it.
+ */
+export const scannerIssueKey = (f: Finding) =>
+  `${f.source.scanner}|${f.source.rule}|${f.file}${f.source.scanner === 'actionlint' ? `|${f.scenario.toLowerCase().replace(/\s+/g, ' ').trim()}` : ''}`;
+
 const words = (s: string) => new Set(s.toLowerCase().match(/[a-z0-9_]{3,}/g) ?? []);
 function similarity(a: string, b: string) {
   const x = words(a), y = words(b);
@@ -56,9 +63,7 @@ function similarity(a: string, b: string) {
  */
 export function sameIssue(a: Finding, b: Finding, lineWindow: number): boolean {
   if (a.file !== b.file) return false;
-  if (a.source.kind === 'scanner' && b.source.kind === 'scanner') {
-    return a.source.scanner === b.source.scanner && a.source.rule === b.source.rule;
-  }
+  if (a.source.kind === 'scanner' && b.source.kind === 'scanner') return scannerIssueKey(a) === scannerIssueKey(b);
   const near = a.line != null && b.line != null ? Math.abs(a.line - b.line) <= lineWindow
     : !!(a.symbol && b.symbol && a.symbol === b.symbol);
   if (!near) return false;
@@ -101,7 +106,10 @@ export function fingerprint(f: Finding, content: string | null): string {
     const lines = content.split('\n');
     window = lines.slice(Math.max(0, f.line - 4), f.line + 3).map(norm).join('\n');
   }
-  const anchor = f.source.kind === 'scanner' ? `${f.source.scanner}:${f.source.rule}` : f.category;
+  // betterleaks is gitleaks' successor with the same rules: its findings keep gitleaks' identity, so a secret dismissed
+  // or tracked before the switch stays that way
+  const scanner = f.source.scanner === 'betterleaks' ? 'gitleaks' : f.source.scanner;
+  const anchor = f.source.kind === 'scanner' ? `${scanner}:${f.source.rule}` : f.category;
   const tail = window || f.title.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
   return createHash('sha1').update([anchor, f.file, f.symbol ?? '', tail].join('|')).digest('hex').slice(0, 16);
 }

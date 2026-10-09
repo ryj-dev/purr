@@ -1,4 +1,4 @@
-import { FAKE_AWS, FAKE_CLAUDE, sh, tempRepo } from './helpers.ts';
+import { FAKE_SECRET, FAKE_CLAUDE, sh, tempRepo } from './helpers.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync } from 'node:fs';
@@ -49,7 +49,7 @@ test('git push: pre-push scan blocks a secret; a clean push lands and queues the
   writeFileSync(PID_FILE, String(process.pid));   // the service "runs" in this process
   try {
     sh(repo, 'checkout', '-q', '-b', 'feature');
-    writeFileSync(join(repo, 'app.js'), `export const x = 1;\nconst k = "${FAKE_AWS}";\n`);
+    writeFileSync(join(repo, 'app.js'), `export const x = 1;\nconst k = "${FAKE_SECRET}";\n`);
     sh(repo, 'commit', '-qam', 'leak', '--no-verify');
     const blocked = await run(repo, 'push', '-u', 'origin', 'feature');
     assert.notEqual(blocked.status, 0, 'push with a secret is blocked');

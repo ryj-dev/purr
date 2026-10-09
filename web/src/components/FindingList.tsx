@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import type { Block, Finding, Severity } from '../../../src/shared/types.ts';
+import { foundByPlain } from '../../../src/shared/scanners.ts';
 import { api, errMsg } from '../api.ts';
 import { SEVERITIES, SEVERITY_LABEL } from '../util.ts';
 import { EmptyState, InlineCode, SevBadge, TypeTile } from './ui.tsx';
@@ -40,7 +41,7 @@ function FindingCard({ f, blocks, onLedger }: { f: Finding; blocks: Block[]; onL
         </details>
       )}
       <div className="meta">
-        <span className="chip src" title={scanner ? 'Found by a code scanner' : 'Found by a Claude lens'}>
+        <span className="chip src" title={scanner ? foundByPlain(f) || 'Found by a code scanner' : 'Found by a Claude lens'}>
           {scanner ? <ScanSearch /> : src ? <TypeTile type={src.type} size="sm" /> : null}
           {scanner ? `${f.source.scanner ?? 'scanner'}${f.source.rule ? ` · ${f.source.rule}` : ''}` : src?.label ?? f.source.blockId}
         </span>

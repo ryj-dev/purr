@@ -31,5 +31,6 @@ export function sh(dir: string, ...a: string[]) {
   return execFileSync('git', a, { cwd: dir, stdio: 'pipe' }).toString().trim();
 }
 
-// A real-looking AWS access key id that gitleaks flags (not a live credential).
-export const FAKE_AWS = 'AKIA' + 'Z3MXQ7PLV2RT4WNE';
+// A real-looking GitHub token that betterleaks and gitleaks both flag (not a live credential). betterleaks doesn't flag
+// a bare AWS access key id on its own (only with its secret), which gitleaks did.
+export const FAKE_SECRET = 'ghp_' + 'Zq3XvT9mK2pL8wR4nY6bD1cF5hJ7sA0eG3uI';

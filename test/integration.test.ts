@@ -1,4 +1,4 @@
-import { FAKE_AWS, FAKE_CLAUDE, sh, tempRepo } from './helpers.ts';
+import { FAKE_SECRET, FAKE_CLAUDE, sh, tempRepo } from './helpers.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, writeFileSync, existsSync, chmodSync, mkdtempSync } from 'node:fs';
@@ -25,7 +25,7 @@ function setup() {
 function featureRepo() {
   const repo = tempRepo({ 'app.js': 'export const x = 1;\n' });
   sh(repo, 'checkout', '-q', '-b', 'feature');
-  writeFileSync(join(repo, 'app.js'), `export const x = 1;\nexport const awsKey = "${FAKE_AWS}";\n\nexport function avg(total, count) {\n  return total / count;\n}\n`);
+  writeFileSync(join(repo, 'app.js'), `export const x = 1;\nexport const apiToken = "${FAKE_SECRET}";\n\nexport function avg(total, count) {\n  return total / count;\n}\n`);
   sh(repo, 'commit', '-qam', 'add avg', '--no-verify');
   return repo;
 }
@@ -43,9 +43,12 @@ test('full review flow: scanners -> seed -> branch x6 -> merge -> severity -> ve
   const blocks = db.listBlockRuns(run.id);
   const byId = Object.fromEntries(blocks.map((b) => [b.blockId, b]));
   for (const b of blocks) assert.equal(b.status, 'done', `${b.blockId}: ${b.error}`);
-  assert.equal(byId['scan-gitleaks'].output?.scanner?.state, 'ran');
-  assert.equal(byId['scan-gitleaks'].output?.findings?.length, 1, 'gitleaks flags the AWS key');
+  // betterleaks, or the gitleaks it falls back to on a machine without it: real tools, the same report
+  assert.equal(byId['scan-betterleaks'].output?.scanner?.state, 'ran');
+  assert.equal(byId['scan-betterleaks'].output?.findings?.length, 1, 'the secrets scanner flags the committed token');
   assert.equal(byId['scan-zizmor'].output?.scanner?.state, 'n/a');
+  assert.equal(byId['scan-hadolint'].output?.scanner?.state, 'n/a', 'no Dockerfile changed');
+  assert.equal(byId['scan-actionlint'].output?.scanner?.state, 'n/a', 'no workflow changed');
 
   // every lens forked the seed session
   const calls = readFileSync(log, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
@@ -65,8 +68,8 @@ test('full review flow: scanners -> seed -> branch x6 -> merge -> severity -> ve
   const div = findings.find((f) => /Divides/.test(f.title));
   assert.equal(div?.severity, 'consider');
   assert.ok(findings.every((f) => f.fingerprint && f.ledger === 'new'));
-  // the security lens' AWS-key finding duplicates the gitleaks hit: merged into it, scanner copy wins
-  const key = findings.find((f) => f.source.scanner === 'gitleaks')!;
+  // the security lens' AWS-key finding duplicates the secrets scanner's hit: merged into it, scanner copy wins
+  const key = findings.find((f) => f.source.scanner === 'betterleaks' || f.source.scanner === 'gitleaks')!;
   assert.deepEqual(key.alsoFoundBy, ['lens-security']);
   // the verifier refuted the concurrency lens' must-fix, so it is gone
   assert.ok(!titles.some((t) => /Race on shared counter/.test(t)), 'refuted finding dropped');
@@ -90,7 +93,7 @@ test('pre-commit default flow blocks a staged secret and passes clean changes; d
   const { db, mgr } = setup();
   const repo = tempRepo();
   await addRepo(db, repo);
-  writeFileSync(join(repo, 'config.js'), `module.exports = { key: "${FAKE_AWS}" };\n`);
+  writeFileSync(join(repo, 'config.js'), `module.exports = { key: "${FAKE_SECRET}" };\n`);
   sh(repo, 'add', 'config.js');
   const req = { trigger: 'pre-commit' as const, repoPath: repo, mode: 'staged' as const };
   const r1 = await mgr.execute(req, mgr.createRun(req)!);
@@ -189,10 +192,10 @@ test('HTTP API: state, default flows read-only, duplicate/edit/delete, triggers,
     const dup = await api('POST', '/api/flows', { duplicateOf: 'default-review' });
     assert.equal(dup.status, 201);
     assert.equal(dup.json.isDefault, false);
-    assert.equal(dup.json.blocks.length, 15);
+    assert.equal(dup.json.blocks.length, 17, 'five scanners, context, branch, six lenses, merge, severity, verify, results');
     const edited = await api('PUT', `/api/flows/${dup.json.id}`, { name: 'Mine', blocks: dup.json.blocks.filter((b: any) => b.id !== 'lens-tests'), edges: dup.json.edges.filter((e: any) => !e.id.includes('lens-tests')) });
     assert.equal(edited.json.name, 'Mine');
-    assert.equal(edited.json.blocks.length, 14);
+    assert.equal(edited.json.blocks.length, 16);
     const t = await api('PUT', '/api/triggers', { trigger: 'post-push', repoId: null, flowId: dup.json.id });
     assert.ok(t.json.some((x: any) => x.trigger === 'post-push' && x.flowId === dup.json.id));
     assert.equal((await api('DELETE', `/api/flows/${dup.json.id}`)).status, 204);
