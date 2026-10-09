@@ -27,7 +27,7 @@ export const DEFAULT_SETTINGS: Settings = {
   claudeBin: 'claude',
   // Keep the user's own hooks and plugins out of review sessions; auth is unaffected.
   claudeExtraArgs: ['--strict-mcp-config'],
-  maxConcurrentClaude: 4,
+  maxConcurrentClaude: 6,   // the default full review's six lenses run at once
   dailySessionCap: 300,
   pollIntervalSec: 60,
   debounceSec: 60,
@@ -41,6 +41,15 @@ export const DEFAULT_SETTINGS: Settings = {
 const EMPTY_USAGE: Usage = {
   fiveHour: null, sevenDay: null, fiveHourResetsAt: null, sevenDayResetsAt: null, pausedUntil: null, sessionsToday: 0, updatedAt: null,
 };
+
+/** The settings that differ from DEFAULT_SETTINGS. */
+export function diffFromDefaults(s: Settings): Partial<Settings> {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(s)) {
+    if (JSON.stringify(v) !== JSON.stringify((DEFAULT_SETTINGS as unknown as Record<string, unknown>)[k])) out[k] = v;
+  }
+  return out as Partial<Settings>;
+}
 
 export type DB = ReturnType<typeof openDb>;
 
@@ -101,6 +110,17 @@ export function openDb(file = paths.db) {
   const kvSet = (key: string, value: unknown) =>
     db.prepare('INSERT INTO kv (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run(key, JSON.stringify(value));
 
+  // Settings used to be saved whole, so anyone who saved any setting kept the then-default 4 Claude sessions. Once:
+  // a saved 4 is dropped, so the current default (6) applies; someone who wants 4 can set it again
+  if (!kvGet('migrations', { concurrency6: false }).concurrency6) {
+    const row = db.prepare("SELECT value FROM kv WHERE key = 'settings'").get() as { value: string } | undefined;
+    if (row) {
+      const saved = JSON.parse(row.value);
+      if (saved.maxConcurrentClaude === 4) { delete saved.maxConcurrentClaude; kvSet('settings', saved); }
+    }
+    kvSet('migrations', { ...kvGet('migrations', {}), concurrency6: true });
+  }
+
   return {
     raw: db,
     close: () => db.close(),
@@ -111,7 +131,8 @@ export function openDb(file = paths.db) {
       return s.projectFolders.length || kvGet('settings', { projectFoldersSet: false } as { projectFoldersSet: boolean }).projectFoldersSet
         ? s : { ...s, projectFolders: defaultProjectFolders() };
     },
-    setSettings: (s: Settings) => kvSet('settings', { ...s, projectFoldersSet: true }),
+    // only what differs from the defaults is kept, so a later change to a default reaches everyone who left it alone
+    setSettings: (s: Settings) => kvSet('settings', { ...diffFromDefaults(s), projectFoldersSet: true }),
     getUsage: (): Usage => {
       const u = kvGet('usage', EMPTY_USAGE);
       const since = new Date(); since.setHours(0, 0, 0, 0);
