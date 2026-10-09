@@ -106,10 +106,7 @@ export function fingerprint(f: Finding, content: string | null): string {
     const lines = content.split('\n');
     window = lines.slice(Math.max(0, f.line - 4), f.line + 3).map(norm).join('\n');
   }
-  // betterleaks is gitleaks' successor with the same rules: its findings keep gitleaks' identity, so a secret dismissed
-  // or tracked before the switch stays that way
-  const scanner = f.source.scanner === 'betterleaks' ? 'gitleaks' : f.source.scanner;
-  const anchor = f.source.kind === 'scanner' ? `${scanner}:${f.source.rule}` : f.category;
+  const anchor = f.source.kind === 'scanner' ? `${f.source.scanner}:${f.source.rule}` : f.category;
   const tail = window || f.title.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
   return createHash('sha1').update([anchor, f.file, f.symbol ?? '', tail].join('|')).digest('hex').slice(0, 16);
 }

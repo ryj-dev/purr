@@ -43,7 +43,7 @@ test('full review flow: scanners -> seed -> branch x6 -> merge -> severity -> ve
   const blocks = db.listBlockRuns(run.id);
   const byId = Object.fromEntries(blocks.map((b) => [b.blockId, b]));
   for (const b of blocks) assert.equal(b.status, 'done', `${b.blockId}: ${b.error}`);
-  // betterleaks, or the gitleaks it falls back to on a machine without it: real tools, the same report
+  // the real betterleaks
   assert.equal(byId['scan-betterleaks'].output?.scanner?.state, 'ran');
   assert.equal(byId['scan-betterleaks'].output?.findings?.length, 1, 'the secrets scanner flags the committed token');
   assert.equal(byId['scan-zizmor'].output?.scanner?.state, 'n/a');
@@ -69,7 +69,7 @@ test('full review flow: scanners -> seed -> branch x6 -> merge -> severity -> ve
   assert.equal(div?.severity, 'consider');
   assert.ok(findings.every((f) => f.fingerprint && f.ledger === 'new'));
   // the security lens' AWS-key finding duplicates the secrets scanner's hit: merged into it, scanner copy wins
-  const key = findings.find((f) => f.source.scanner === 'betterleaks' || f.source.scanner === 'gitleaks')!;
+  const key = findings.find((f) => f.source.scanner === 'betterleaks')!;
   assert.deepEqual(key.alsoFoundBy, ['lens-security']);
   // the verifier refuted the concurrency lens' must-fix, so it is gone
   assert.ok(!titles.some((t) => /Race on shared counter/.test(t)), 'refuted finding dropped');

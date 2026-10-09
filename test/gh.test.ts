@@ -13,11 +13,10 @@ const TWO = `github.com
   - Active account: true
 `;
 
-test('gh auth status: one or several accounts (active first), older gh, and nothing', () => {
-  assert.deepEqual(parseGhStatus(TWO), { accounts: ['me', 'work-me'], multi: true });
-  assert.deepEqual(parseGhStatus('  ✓ Logged in to github.com account me (keyring)\n  - Active account: true\n'), { accounts: ['me'], multi: true });
-  assert.deepEqual(parseGhStatus('github.com\n  ✓ Logged in to github.com as old-me (oauth_token)\n'), { accounts: ['old-me'], multi: false });
-  assert.deepEqual(parseGhStatus('You are not logged into any GitHub hosts.'), { accounts: [], multi: false });
+test('gh auth status: one or several accounts (active first), and nothing', () => {
+  assert.deepEqual(parseGhStatus(TWO), ['me', 'work-me']);
+  assert.deepEqual(parseGhStatus('  ✓ Logged in to github.com account me (keyring)\n  - Active account: true\n'), ['me']);
+  assert.deepEqual(parseGhStatus('You are not logged into any GitHub hosts.'), []);
 });
 
 /** A fake gh on PATH: accounts from `status`, a token per account, a PR per token, comments logged with their token. */
@@ -65,43 +64,12 @@ test('prForBranch tries each account, keeps only an open PR, and says which acco
   try { assert.equal((await prForBranch(process.cwd(), 'feat'))?.account, 'work-me', 'an account gh has no token for is skipped'); } finally { gh.restore(); }
 });
 
-test('a review comment is posted once, as the account that found the PR, or else as one that can see it', async () => {
+test('a review comment is posted once, as the account that found the PR', async () => {
   const gh = fakeGh(TWO, { 'tok-work-me': pr('OPEN') });
   try {
     assert.equal(await commentOnPr(process.cwd(), 7, 'body', 'work-me'), true);
-    // no account known (a run from before PuRR kept it): not just the active one, which can't see this private repo
-    assert.equal(await commentOnPr(process.cwd(), 8, 'body'), true);
-    assert.deepEqual(gh.comments(), ['tok-work-me 7', 'tok-work-me 8']);
+    assert.deepEqual(gh.comments(), ['tok-work-me 7']);
   } finally { gh.restore(); }
-});
-
-test("a PR found through gh's own login (an unreadable account list) gets its comment, before and after gh reads normally again", async () => {
-  const { GH_DEFAULT_LOGIN } = await import('../src/server/gh.ts');
-  let gh = fakeGh('Signed in, in words from a future gh\n', { none: pr('OPEN') });
-  try {
-    assert.equal(await commentOnPr(process.cwd(), 7, 'b', GH_DEFAULT_LOGIN), true);
-    assert.deepEqual(gh.comments(), ['none 7'], "gh's own login, no token");
-  } finally { gh.restore(); }
-  gh = fakeGh(TWO, { 'tok-work-me': pr('OPEN') });
-  try {
-    assert.equal(await commentOnPr(process.cwd(), 7, 'b', GH_DEFAULT_LOGIN), true);
-    assert.deepEqual(gh.comments(), ['tok-work-me 7'], 'now an account list again: one that can see the PR');
-  } finally { gh.restore(); }
-});
-
-test('an older gh (one login, no --user) is used as it is, without a token per account', async () => {
-  const gh = fakeGh('  ✓ Logged in to github.com as old-me (oauth_token)\n', { none: pr('OPEN') });
-  try {
-    assert.deepEqual(await ghAccounts(), ['old-me']);
-    assert.equal((await prForBranch(process.cwd(), 'feat'))?.number, 7);
-    await commentOnPr(process.cwd(), 7, 'b');
-    await commentOnPr(process.cwd(), 8, 'b', 'old-me');   // a run whose PR this gh found, as 'old-me'
-    assert.deepEqual(gh.comments(), ['none 7', 'none 8'], 'no token asked for: gh posts as its one login');
-  } finally { gh.restore(); }
-  const unknown = fakeGh('Signed in, in words from a future gh\n', { none: pr('OPEN') });
-  try { assert.equal((await ghAccounts()).length, 1, 'exit 0 means signed in, even unparsed'); } finally { unknown.restore(); }
-  const out = fakeGh('You are not logged into any GitHub hosts.\n', {}, 1);
-  try { assert.deepEqual(await ghAccounts(), []); } finally { out.restore(); }
 });
 
 test("a run created from the poller's request keeps the account that found its PR", async () => {
@@ -170,14 +138,14 @@ test('a review posts its PR comment as the account that found the PR', async () 
   } finally { gh.restore(); db.close(); }
 });
 
-test("a gh status that fails says nothing about which gh this is: comments still go as the account that found the PR", async () => {
+test("a gh status that fails doesn't stop a comment going as the account that found the PR", async () => {
   let gh = fakeGh(TWO, {});
   try { assert.deepEqual(await ghAccounts(), ['me', 'work-me']); } finally { gh.restore(); }
   gh = fakeGh('error connecting to api.github.com\n', {}, 1);
   try {
     assert.deepEqual(await ghAccounts(), []);
     await commentOnPr(process.cwd(), 7, 'b', 'work-me');
-    assert.deepEqual(gh.comments(), ['tok-work-me 7'], 'still multi-account: a token for that account');
+    assert.deepEqual(gh.comments(), ['tok-work-me 7'], 'a token for that account');
   } finally { gh.restore(); }
 });
 
@@ -187,37 +155,6 @@ test('a comment that fails (it may have been posted anyway) is not tried again a
     assert.equal(await commentOnPr(process.cwd(), 7, 'b', 'work-me'), false);
     assert.deepEqual(gh.comments(), ['tok-work-me 7'], 'one attempt, as the account that found the PR');
   } finally { gh.restore(); }
-});
-
-test('a signed-in gh in words PuRR can\'t parse is used through its own login, even after a multi-account gh', async () => {
-  let gh = fakeGh(TWO, {});
-  try { await ghAccounts(); } finally { gh.restore(); }    // PuRR has seen a multi-account gh
-  gh = fakeGh('Signed in, in words from a future gh\n', { none: pr('OPEN') });
-  try {
-    assert.equal((await ghAccounts()).length, 1);
-    assert.equal((await prForBranch(process.cwd(), 'feat'))?.number, 7, 'no token asked for the placeholder');
-    await commentOnPr(process.cwd(), 7, 'b');
-    assert.deepEqual(gh.comments(), ['none 7']);
-  } finally { gh.restore(); }
-});
-
-test('the Toolchain popup shows gh signed in, but no made-up account name, when it can\'t read who', async () => {
-  const { refreshToolchain, toolchainStatus } = await import('../src/server/toolchain.ts');
-  const gh = fakeGh('Signed in, in words from a future gh\n', {});
-  // only the fake gh and the system's own tools: not this machine's claude or scanners
-  const path = process.env.PATH;
-  process.env.PATH = `${gh.dir}:/usr/bin:/bin:/usr/sbin:/sbin`;
-  const brew = process.env.PURR_BREW;
-  process.env.PURR_BREW = '';
-  try {
-    refreshToolchain();
-    const auth = (await toolchainStatus()).tools.find((t) => t.name === 'gh')!.auth;
-    assert.deepEqual(auth, { signedIn: true, accounts: [], detail: 'signed in' });
-  } finally {
-    process.env.PATH = path;
-    if (brew === undefined) delete process.env.PURR_BREW; else process.env.PURR_BREW = brew;
-    gh.restore(); refreshToolchain();
-  }
 });
 
 test("the PR fetch says which accounts answered, when each was asked, and since when a newly listed one can have been signed in", async (t) => {

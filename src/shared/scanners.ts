@@ -3,7 +3,7 @@
 import type { Finding, ScannerName } from './types.ts';
 
 /** The scanners a flow can use, in the order the editor lists them. */
-export const SCANNERS: Exclude<ScannerName, 'gitleaks'>[] = ['betterleaks', 'zizmor', 'osv', 'hadolint', 'actionlint'];
+export const SCANNERS: ScannerName[] = ['betterleaks', 'zizmor', 'osv', 'hadolint', 'actionlint'];
 
 /** Short label for a scanner block. */
 export const SCANNER_LABEL: Record<ScannerName, string> = {
@@ -12,7 +12,6 @@ export const SCANNER_LABEL: Record<ScannerName, string> = {
   osv: 'osv · dependencies',
   hadolint: 'hadolint · Dockerfiles',
   actionlint: 'actionlint · workflow lint',
-  gitleaks: 'betterleaks · secrets',
 };
 
 /** One line for the flow editor's picker. */
@@ -22,13 +21,11 @@ export const SCANNER_CHOICE: Record<ScannerName, string> = {
   osv: 'osv-scanner: new vulnerable dependencies',
   hadolint: 'hadolint: Dockerfile errors (consider, never blocks)',
   actionlint: 'actionlint: workflow errors (consider, never blocks)',
-  gitleaks: 'gitleaks (now betterleaks): secrets in added lines',
 };
 
-/** What each tool is, for the "Found by" line. gitleaks stays for findings recorded before betterleaks replaced it. */
+/** What each tool is, for the "Found by" line. */
 const ABOUT: Record<string, [string, string | null]> = {
   betterleaks: ['an open-source tool that finds secrets (API keys, tokens, passwords) in code. It only reads the lines this change adds', null],
-  gitleaks: ['an open-source tool that finds secrets (API keys, tokens, passwords) in code. It only reads the lines this change adds', null],
   hadolint: ['an open-source Dockerfile linter. Only its errors on lines this change adds are raised', 'https://github.com/hadolint/hadolint/wiki/{rule}'],
   actionlint: ['an open-source checker for GitHub Actions workflow files. Only errors on lines this change adds are raised', null],
   zizmor: ['an open-source checker for security mistakes in GitHub Actions workflows', 'https://docs.zizmor.sh/audits/#{rule}'],

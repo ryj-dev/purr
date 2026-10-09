@@ -9,7 +9,7 @@ import { exec } from './util.ts';
 export interface PrInfo {
   number: number; title: string; body: string; url: string; baseRefName: string; headRefName: string; headRefOid: string;
   isDraft: boolean; createdAt?: string;
-  account?: string;   // the signed-in account that found it, and that PuRR comments as
+  account: string;   // the signed-in account that found it, and that PuRR comments as
 }
 /** An open PR plus where it lives, from an account's PR list. */
 export interface OpenPr extends PrInfo { repo: string; account: string }   // repo: "owner/name", lower-case
@@ -24,7 +24,7 @@ async function ghRun(cwd: string, args: string[], opts: { input?: string; accoun
   try {
     let env: NodeJS.ProcessEnv | undefined;
     if (opts.token) env = { ...process.env, GH_TOKEN: opts.token };
-    else if (opts.account && multiAccount) {   // an older gh has one login and no --user: just use it
+    else if (opts.account) {
       const token = await tokenFor(opts.account);
       if (!token) return null;
       env = { ...process.env, GH_TOKEN: token };
@@ -46,19 +46,10 @@ async function tokenFor(account: string): Promise<string | null> {
 }
 
 let accountsCache: { at: number; list: string[] } | null = null;
-/** Stands in for an account when gh is signed in but PuRR can't read who as: gh's own login is used. Not a name to show. */
-export const GH_DEFAULT_LOGIN = '(gh default login)';
-/** Whether gh lists accounts the multi-account way (gh 2.40+), so each can be picked with `gh auth token --user`. */
-let multiAccount = true;
-
-/** Accounts in `gh auth status` output, the active one first. Older gh says "Logged in to github.com as <name>". */
-export function parseGhStatus(text: string): { accounts: string[]; multi: boolean } {
+/** Accounts in `gh auth status` output, the active one first. */
+export function parseGhStatus(text: string): string[] {
   const found = [...text.matchAll(/Logged in to github\.com account (\S+)[^\n]*\n\s*- Active account: (true|false)/g)];
-  if (found.length) {
-    return { accounts: found.sort((a, b) => (a[2] === 'true' ? -1 : 0) - (b[2] === 'true' ? -1 : 0)).map((m) => m[1]), multi: true };
-  }
-  const old = text.match(/Logged in to github\.com (?:as|account) (\S+)/);
-  return { accounts: old ? [old[1]] : [], multi: false };
+  return found.sort((a, b) => (a[2] === 'true' ? -1 : 0) - (b[2] === 'true' ? -1 : 0)).map((m) => m[1]);
 }
 
 /** Until then, a sign-in may be finishing in Terminal: look again every few seconds instead of every five minutes. */
@@ -70,12 +61,7 @@ export async function ghAccounts(): Promise<string[]> {
   let list: string[] = [];
   try {
     const r = await exec('gh', ['auth', 'status', '--hostname', 'github.com'], { timeoutMs: 15_000 });
-    const parsed = parseGhStatus(r.stdout + r.stderr);
-    // only a clean answer says which kind of gh this is: a timeout says nothing
-    if (r.code === 0 && parsed.accounts.length) multiAccount = parsed.multi;
-    // signed in (exit 0) in words PuRR doesn't know: still use gh, as its default login
-    list = parsed.accounts.length || r.code !== 0 ? parsed.accounts : [GH_DEFAULT_LOGIN];
-    if (r.code === 0 && !parsed.accounts.length) multiAccount = false;   // that placeholder has no token: use gh's own login
+    list = parseGhStatus(r.stdout + r.stderr);
   } catch { /* gh missing */ }
   // an account not in the last list was signed in since that list was read: not before it
   for (const a of list) if (!signedInSince.has(a)) signedInSince.set(a, lastAccountsRead ?? Date.now());
@@ -173,29 +159,21 @@ export async function openPrsForAllAccounts(): Promise<PrFetch | null> {
  * Posts as the account that found the PR (else the active one), once: trying the next account after a failure could
  * post the comment twice, since a timed-out `gh pr comment` may still have posted it.
  */
-export async function commentOnPr(repoPath: string, number: number, body: string, account?: string | null): Promise<boolean> {
+export async function commentOnPr(repoPath: string, number: number, body: string, account: string): Promise<boolean> {
   const accounts = await ghAccounts();
-  // found through gh's own login while PuRR couldn't read who as: now gh lists accounts, so that's no account at all
-  if (account === GH_DEFAULT_LOGIN && multiAccount) account = null;
   // each account's token is read once, with a second try for a keychain blip, and the post uses that same token
   const tokenOf = async (a: string) => (await tokenFor(a)) ?? (await tokenFor(a));
-  // as that account; else (signed out since, nothing sent yet) the first other account that can see the PR, which a
-  // read-only `gh pr view` tells without posting anything
-  let as: string | undefined;   // none known (a run from before PuRR kept it): the first account that can see the PR
-  let token: string | null = null;
-  if (account) {
-    token = multiAccount ? await tokenOf(account) : null;
-    if (!multiAccount || token) as = account;
-  }
+  let as: string | undefined;
+  let token = await tokenOf(account);
+  if (token) as = account;
   // still signed in but no token even so: don't post as somebody else
-  if (account && !as && accounts.includes(account)) return false;
+  else if (accounts.includes(account)) return false;
+  // signed out since (nothing sent yet): the first other account that can see the PR, which a read-only `gh pr view`
+  // tells without posting anything
   for (const a of as ? [] : accounts.filter((x) => x !== account)) {
-    const t = multiAccount ? await tokenOf(a) : null;
-    if (multiAccount && !t) continue;
-    if ((await gh(repoPath, ['pr', 'view', String(number), '--json', 'number'], { account: a, token: t ?? undefined })) !== null) { as = a; token = t; break; }
+    const t = await tokenOf(a);
+    if (t && (await gh(repoPath, ['pr', 'view', String(number), '--json', 'number'], { token: t })) !== null) { as = a; token = t; break; }
   }
-  if (!as) return false;
-  if (multiAccount && !token) token = await tokenOf(as);   // the active account, when no finding account was known
-  if (multiAccount && !token) return false;
-  return (await gh(repoPath, ['pr', 'comment', String(number), '--body-file', '-'], { input: body, account: as, token: token ?? undefined })) !== null;
+  if (!as || !token) return false;
+  return (await gh(repoPath, ['pr', 'comment', String(number), '--body-file', '-'], { input: body, token })) !== null;
 }
