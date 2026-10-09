@@ -232,7 +232,8 @@ export interface AppState {
   tools: { gh: boolean; ghAuthed: boolean; betterleaks: boolean; zizmor: boolean; osv: boolean; hadolint: boolean; actionlint: boolean; claude: boolean };
   version: string;
   /** git's global core.hooksPath points at purr's hooks: commit/push checks cover every repo while purr runs */
-  globalHooks: { active: boolean; hooksPath: string | null };
+  /** ownHooks: repo id -> the core.hooksPath that repo sets for itself, where PuRR's commit and push checks can't run */
+  globalHooks: { active: boolean; hooksPath: string | null; ownHooks: Record<string, string> };
 }
 
 export interface ValidationIssue { blockId: string | null; level: 'error' | 'warning'; message: string }
