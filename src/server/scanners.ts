@@ -14,6 +14,7 @@ import { basename, dirname, join, relative } from 'node:path';
 import type { Finding, ScannerName, ScannerState, Severity } from '../shared/types.ts';
 import { type ChangeSpec, type ChangedFile, fileAt, fileAtBase } from './git.ts';
 import { exec, newId, paths } from './util.ts';
+import { scannerIssueKey } from './engine/findings.ts';
 
 const WF = /(^|\/)\.github\/workflows\/[^/]+\.ya?ml$/;
 const DOCKERFILE = /(^|\/)(Dockerfile(\.[^/]+)?|[^/]+\.Dockerfile)$/;
@@ -74,8 +75,7 @@ function hit(blockId: string, scanner: ScannerName, file: string, line: number |
 export function group(hits: Finding[]): Finding[] {
   const out = new Map<string, Finding>();
   for (const h of hits) {
-    const own = h.source.scanner === 'actionlint' ? `|${h.scenario.toLowerCase().replace(/\s+/g, ' ').trim()}` : '';
-    const k = `${h.source.scanner}|${h.source.rule}|${h.file}${own}`;
+    const k = scannerIssueKey(h);
     const prev = out.get(k);
     if (prev) prev.lines!.push(...(h.line != null ? [h.line] : []));
     else out.set(k, { ...h, lines: h.line != null ? [h.line] : [] });
@@ -124,15 +124,18 @@ async function secrets(blockId: string, files: ChangedFile[], work: string, sign
     tool = 'gitleaks';   // older installs: gitleaks has the same flags, and never validates
     r = await exec('gitleaks', common, { cwd: work, timeoutMs: 300_000, signal });
   }
-  if (r.code !== 0) throw new Error(`${tool} exited ${r.code}: ${clean(r.stderr)}`);
   let hits: Array<Record<string, any>> | null = null;
   try { hits = existsSync(rep) ? JSON.parse(readFileSync(rep, 'utf8') || 'null') : null; } catch { /* below */ }
-  if (!Array.isArray(hits)) throw new Error(`${tool} wrote no readable report`);   // never a silent pass
   const realPath = (p: string) => (p.endsWith(AS_DATA) && SCAN_CONFIG.has(basename(p.slice(0, -AS_DATA.length))) ? p.slice(0, -AS_DATA.length) : p);
-  return hits.map((h) => hit(blockId, tool, realPath(relative(root, h.File)), h.StartLine ?? null, h.RuleID, 'secrets',
+  const found = (Array.isArray(hits) ? hits : []).map((h) => hit(blockId, tool, realPath(relative(root, h.File)), h.StartLine ?? null, h.RuleID, 'secrets',
     'A secret is committed here; anyone with repo access can use it',
     `This line holds what looks like a real ${secretKind(h.RuleID)}. Anyone who can read the repo, or its history, can use it.`,
     "Revoke and rotate it now; deleting the line doesn't remove it from git history."));
+  // run with --exit-code 0, so any other exit is it going wrong. Secrets it reported before that still block: the scan
+  // ends failed (it may have missed some), never as a clean pass, and never dropping what it did find
+  if (r.code !== 0) throw new ScanFailed(`${tool} exited ${r.code}: ${clean(r.stderr)}`, found);
+  if (!Array.isArray(hits)) throw new Error(`${tool} wrote no readable report`);   // never a silent pass
+  return found;
 }
 
 async function zizmor(blockId: string, files: ChangedFile[], change: ChangeSpec, work: string, signal?: AbortSignal): Promise<Finding[] | null> {
@@ -369,6 +372,12 @@ async function actionlint(blockId: string, files: ChangedFile[], change: ChangeS
 /** The review a scan belongs to was cancelled. */
 export class Cancelled extends Error { constructor() { super('cancelled'); } }
 
+/** A scan that went wrong after finding something: it fails, but what it found still counts (a gate still blocks on it). */
+class ScanFailed extends Error {
+  found: Finding[];
+  constructor(message: string, found: Finding[]) { super(message); this.found = found; }
+}
+
 /**
  * Runs one scanner. A missing or failing tool is reported in the state and yields no findings. The one thing that throws
  * is `signal` aborting (the review was cancelled or superseded): the scan stops between files, kills the tool it's
@@ -395,7 +404,9 @@ export async function runScanner(name: ScannerName, blockId: string, files: Chan
     if (signal?.aborted) throw new Cancelled();
     const missing = isMissing(e);
     const tool = name === 'gitleaks' ? 'betterleaks' : name;
-    return { findings: [], state: { state: missing ? 'not installed' : 'failed', error: missing ? `${tool} is not on PATH` : String(e?.message ?? e), secs: secs() } };
+    const found = e instanceof ScanFailed ? group(e.found) : [];
+    return { findings: found, state: { state: missing ? 'not installed' : 'failed', ...(found.length ? { hits: found.length } : {}),
+      error: missing ? `${tool} is not on PATH` : String(e?.message ?? e), secs: secs() } };
   } finally {
     rmSync(work, { recursive: true, force: true });
   }

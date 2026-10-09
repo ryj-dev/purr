@@ -63,6 +63,8 @@ test('betterleaks sees only the added lines, never validates or redacts nothing,
     'app.js': `const a = 1;\nconst key = "${FAKE_SECRET}";\n`,
     '.betterleaks.toml': `# a change's own config must not steer its scan\n# "${FAKE_SECRET}"\n`,
     '.gitleaks.toml': `[allowlist]\nregexes = ["${FAKE_SECRET}"]\n`,
+    '.gitleaksignore': `app.js:github-pat:2\n`,
+    '.betterleaksignore': `app.js:github-pat:2\n`,
   }, { 'app.js': 'const a = 1;\n' });
   const t = fakeTools({ betterleaks: SECRETS });
   try {
@@ -79,7 +81,7 @@ test('betterleaks sees only the added lines, never validates or redacts nothing,
     const args = readFileSync(join(t.dir, 'betterleaks.args'), 'utf8').split('\n');
     for (const a of ['--validation=false', '--redact', '--no-banner']) assert.ok(args.includes(a), a);
     assert.equal(readFileSync(join(t.dir, 'seen', 'app.js'), 'utf8'), `\nconst key = "${FAKE_SECRET}";\n`, 'line 1 blank: it was already there');
-    for (const c of ['.betterleaks.toml', '.gitleaks.toml']) {
+    for (const c of ['.betterleaks.toml', '.gitleaks.toml', '.gitleaksignore', '.betterleaksignore']) {
       assert.ok(!existsSync(join(t.dir, 'seen', c)), `${c} is never where the scanner would load it as config`);
       assert.ok(existsSync(join(t.dir, 'seen', c + '.purr-scan')), `${c} is scanned as plain text`);
     }
@@ -126,6 +128,15 @@ test('a secrets scanner that writes no readable report, or exits non-zero, fails
     const r = await runScanner('betterleaks', 'b', files, change);
     assert.equal(r.state.state, 'failed');
     assert.match(r.state.error!, /betterleaks exited 1: config error/);
+  } finally { t.restore(); }
+  // a report with a secret, then a non-zero exit: failed, but the secret it found still counts (a gate still blocks)
+  const leak = await staged({ 'app.js': `const k = "${FAKE_SECRET}";\n` });
+  t = fakeTools({ betterleaks: `${SECRETS}\necho 'crashed late' >&2\nexit 1` });
+  try {
+    const r = await runScanner('betterleaks', 'b', leak.files, leak.change);
+    assert.equal(r.state.state, 'failed');
+    assert.match(r.state.error!, /exited 1: crashed late/);
+    assert.deepEqual(r.findings.map((f) => [f.file, f.severity]), [['app.js', 'must_fix']]);
   } finally { t.restore(); }
 });
 
@@ -186,16 +197,22 @@ test('a secret dismissed when gitleaks found it keeps its identity now betterlea
   assert.equal(fingerprint(f('betterleaks'), content), fingerprint(f('gitleaks'), content));
 });
 
-test("a secret raised by the old scan-gitleaks block is marked fixed when the full review's scan-betterleaks no longer finds it", async () => {
+test("a secret raised by the old scan-gitleaks block is fixed when scan-betterleaks no longer finds it, unless betterleaks wouldn't have", async () => {
   const { openDb } = await import('../src/server/db.ts');
   const { applyLedger } = await import('../src/server/ledger.ts');
   const db = openDb(join(mkdtempSync(join(process.env.TMPDIR!, 'purr-db-')), 'purr.db'));
-  const old: Finding = { id: 'x', file: 'app.js', line: 2, category: 'secrets', severity: 'must_fix', title: 'A secret', scenario: 's', fingerprint: 'fp-old',
-    source: { blockId: 'scan-gitleaks', kind: 'scanner', scanner: 'gitleaks', rule: 'aws-access-token' } };
-  db.putLedger({ fingerprint: 'fp-old', repoId: 'r1', branch: 'feat', state: 'open', flowId: 'default-review', finding: old, firstRunId: 'r0', lastRunId: 'r0', updatedAt: 'x' });
+  const old = (fp: string, rule: string) => db.putLedger({ fingerprint: fp, repoId: 'r1', branch: 'feat', state: 'open', flowId: 'default-review',
+    finding: { id: fp, file: 'app.js', line: 2, category: 'secrets', severity: 'must_fix', title: 'A secret', scenario: 's', fingerprint: fp,
+      source: { blockId: 'scan-gitleaks', kind: 'scanner', scanner: 'gitleaks', rule } }, firstRunId: 'r0', lastRunId: 'r0', updatedAt: 'x' });
+  old('token', 'github-pat');
+  old('bare-key-id', 'aws-access-token');   // betterleaks doesn't flag a bare AWS key id: its silence says nothing
+  old('generic', 'generic-api-key');
   const run = { id: 'r1run', repoId: 'r1', branch: 'feat', flowId: 'default-review', trigger: 'post-push', mode: 'range' } as any;
   applyLedger(db, run, [], new Set(['scan-betterleaks', 'context']));
-  assert.equal(db.getLedger('fp-old', 'r1')?.state, 'fixed');
+  assert.deepEqual(['token', 'bare-key-id', 'generic'].map((fp) => db.getLedger(fp, 'r1')?.state), ['fixed', 'open', 'open']);
+  // gitleaks itself (the old block in a flow saved with it) can still close them
+  applyLedger(db, { ...run, id: 'r2run' }, [], new Set(['scan-gitleaks']));
+  assert.equal(db.getLedger('bare-key-id', 'r1')?.state, 'fixed');
   db.close();
 });
 
@@ -459,10 +476,17 @@ const installed = (tool: string) => { try { execFileSync('which', [tool], { stdi
 test('the real betterleaks accepts PuRR\'s flags and finds a committed GitHub token', { skip: !installed('betterleaks') && 'betterleaks is not installed here' }, async () => {
   // FAKE_SECRET is a GitHub token's shape, not a real one, which betterleaks and gitleaks both flag (betterleaks, unlike
   // gitleaks, doesn't flag a bare AWS key id on its own)
-  const { change, files } = await staged({ 'app.js': `const k = "${FAKE_SECRET}";\n` });
+  // the change also adds config and ignore files that would allowlist the token, if the scanner loaded them
+  const { change, files } = await staged({
+    'app.js': `const k = "${FAKE_SECRET}";\n`,
+    '.betterleaks.toml': `[extend]\nuseDefault = true\n[allowlist]\nregexes = ['''ghp_[A-Za-z0-9]{36}''']\n`,
+    '.gitleaks.toml': `[extend]\nuseDefault = true\n[allowlist]\nregexes = ['''ghp_[A-Za-z0-9]{36}''']\n`,
+    '.gitleaksignore': 'app.js:github-pat:1\n',
+  });
   const r = await runScanner('betterleaks', 's', files, change);
   assert.equal(r.state.state, 'ran', JSON.stringify(r.state));
-  assert.equal(r.findings.length, 1);
+  assert.equal(r.findings.filter((f) => f.file === 'app.js').length, 1, 'still flagged: the change\'s own allowlist is not loaded');
+  r.findings = r.findings.filter((f) => f.file === 'app.js');
   assert.equal(r.findings[0].file, 'app.js');
   assert.equal(r.findings[0].severity, 'must_fix');
 });
@@ -532,4 +556,48 @@ test('a review cancelled mid-scan: the scanner block ends cancelled, not failed,
     applyLedger(db, { ...run, mode: 'range' }, result.findings, checked.complete, checked.unchecked);
     assert.equal(db.getLedger('df', 'r1')?.state, 'open');
   } finally { t.restore(); db.close(); }
+});
+
+test('two different actionlint errors of one kind in a workflow both reach the review\'s results', async () => {
+  const { executeFlow } = await import('../src/server/engine/executor.ts');
+  const wf = '.github/workflows/ci.yml';
+  const body = Array.from({ length: 45 }, (_, i) => `      - run: echo step-${i + 1}`).join('\n') + '\n';   // not comments: fingerprints skip those
+  const { change, files, repo } = await staged({ [wf]: body });
+  const t = fakeTools({ actionlint: FROM_FIXTURE('actionlint', 1) });
+  writeFileSync(join(t.dir, `actionlint-${wf.replace(/\//g, '_')}.json`), JSON.stringify([
+    { message: 'property "foo" is not defined in object type', filepath: wf, line: 10, column: 3, kind: 'expression' },
+    { message: 'undefined variable "bar"', filepath: wf, line: 40, column: 3, kind: 'expression' },
+  ]));
+  try {
+    const flow = { id: 'f', name: 'scan', edges: [{ id: 'e', source: 'scan-actionlint', target: 'out' }], blocks: [
+      { id: 'scan-actionlint', type: 'scanner', label: 'actionlint', position: { x: 0, y: 0 }, config: { scanner: 'actionlint' } },
+      { id: 'out', type: 'output', label: 'Results', position: { x: 1, y: 0 }, config: { notify: false, postPrComment: false } }] } as any;
+    const run = { id: 'r-al', repoId: 'r1', branch: 'feat', flowId: 'f', trigger: 'post-push', mode: 'staged' } as any;
+    const result = await executeFlow({ run, flow, change, files, cwd: repo }, { claude: {} as any, signal: new AbortController().signal, onBlock: () => {} });
+    assert.deepEqual(result.findings.map((f) => f.line).sort((a, b) => (a ?? 0) - (b ?? 0)), [10, 40],
+      `not merged into one at the results: ${JSON.stringify([...result.blocks.values()].map((b: any) => [b.blockId, b.status, b.error, b.output?.scanner, b.output?.findings?.length]))}`);
+  } finally { t.restore(); }
+});
+
+test('cancelling an osv-scanner or secrets scan stops it promptly, as cancelled', async () => {
+  const slow = (tool: string) => `echo "$@" >> "$D/ran"\nsleep 5\n${tool === 'osv' ? "echo '{\"results\":[]}'" : ''}`;
+  const lock = '{"lockfileVersion":3,"packages":{}}\n';
+  const two = await staged({ 'package-lock.json': lock, 'sub/package-lock.json': lock });
+  let t = fakeTools({ 'osv-scanner': slow('osv') });
+  try {
+    const ac = new AbortController();
+    const started = setInterval(() => { if (existsSync(join(t.dir, 'ran'))) { clearInterval(started); ac.abort(); } }, 20);
+    const t0 = Date.now();
+    await assert.rejects(runScanner('osv', 'o', two.files, two.change, ac.signal), Cancelled);
+    assert.ok(Date.now() - t0 < 4_000, `osv stopped promptly (${Date.now() - t0}ms)`);
+  } finally { t.restore(); }
+  const leak = await staged({ 'app.js': `const k = "${FAKE_SECRET}";\n` });
+  t = fakeTools({ betterleaks: slow('betterleaks') });
+  try {
+    const ac = new AbortController();
+    const started = setInterval(() => { if (existsSync(join(t.dir, 'ran'))) { clearInterval(started); ac.abort(); } }, 20);
+    const t0 = Date.now();
+    await assert.rejects(runScanner('betterleaks', 'b', leak.files, leak.change, ac.signal), Cancelled);
+    assert.ok(Date.now() - t0 < 4_000, `betterleaks stopped promptly (${Date.now() - t0}ms)`);
+  } finally { t.restore(); }
 });

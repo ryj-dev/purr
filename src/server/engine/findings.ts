@@ -40,6 +40,13 @@ export const slim = (f: Finding) => ({
   source: f.source.scanner ? `scanner:${f.source.scanner}` : f.source.blockId,
 });
 
+/**
+ * What makes two scanner hits the same issue: scanner, rule and file, and for actionlint the message too, since its
+ * "rule" is a broad kind (expression, syntax-check...) covering unrelated errors. group() and dedupe() both use it.
+ */
+export const scannerIssueKey = (f: Finding) =>
+  `${f.source.scanner}|${f.source.rule}|${f.file}${f.source.scanner === 'actionlint' ? `|${f.scenario.toLowerCase().replace(/\s+/g, ' ').trim()}` : ''}`;
+
 const words = (s: string) => new Set(s.toLowerCase().match(/[a-z0-9_]{3,}/g) ?? []);
 function similarity(a: string, b: string) {
   const x = words(a), y = words(b);
@@ -56,9 +63,7 @@ function similarity(a: string, b: string) {
  */
 export function sameIssue(a: Finding, b: Finding, lineWindow: number): boolean {
   if (a.file !== b.file) return false;
-  if (a.source.kind === 'scanner' && b.source.kind === 'scanner') {
-    return a.source.scanner === b.source.scanner && a.source.rule === b.source.rule;
-  }
+  if (a.source.kind === 'scanner' && b.source.kind === 'scanner') return scannerIssueKey(a) === scannerIssueKey(b);
   const near = a.line != null && b.line != null ? Math.abs(a.line - b.line) <= lineWindow
     : !!(a.symbol && b.symbol && a.symbol === b.symbol);
   if (!near) return false;
