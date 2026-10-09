@@ -17,8 +17,7 @@ export type BlockType =
   | 'gate'      // pass/fail on findings; a failed gate blocks the commit/push
   | 'output';   // notification, results, optional PR comment
 
-/** 'gitleaks' is the name before betterleaks replaced it: flows and findings saved with it still load, and it runs betterleaks. */
-export type ScannerName = 'betterleaks' | 'zizmor' | 'osv' | 'hadolint' | 'actionlint' | 'gitleaks';
+export type ScannerName = 'betterleaks' | 'zizmor' | 'osv' | 'hadolint' | 'actionlint';
 export type Effort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 
 export interface ScannerConfig { scanner: ScannerName }
@@ -126,8 +125,6 @@ export interface SessionUse {
 export interface ScannerState {
   state: 'ran' | 'partial' | 'n/a' | 'not installed' | 'failed'; hits?: number; secs: number; error?: string;
   incomplete?: Array<{ file: string; reason: string }>;
-  /** a secrets block: which tool actually ran (betterleaks, or gitleaks when betterleaks isn't installed) */
-  tool?: 'betterleaks' | 'gitleaks';
 }
 
 export interface BlockOutput {
@@ -156,7 +153,7 @@ export interface Run {
   headSha: string | null;
   mode: 'staged' | 'range';
   workdir: string | null;     // checkout the Claude sessions ran in (cd here to `claude --resume` one)
-  pr: { number: number; title: string; body: string; url: string; account?: string } | null;   // account: the gh login that found it
+  pr: { number: number; title: string; body: string; url: string; account: string } | null;   // account: the gh login that found it
   status: RunStatus;
   queuedAt: string;
   startedAt: string | null;

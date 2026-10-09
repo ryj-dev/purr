@@ -1,4 +1,5 @@
-import type { Block, Edge, PromptConfig, ValidationIssue, VerifyConfig } from '../../shared/types.ts';
+import type { Block, Edge, PromptConfig, ScannerConfig, ValidationIssue, VerifyConfig } from '../../shared/types.ts';
+import { SCANNERS } from '../../shared/scanners.ts';
 import { blockTypeInfo } from './blockTypes.ts';
 
 export interface Graph {
@@ -144,6 +145,9 @@ export function validateFlow(blocks: Block[], edges: Edge[]): ValidationIssue[] 
         }
         break;
       }
+      case 'scanner':
+        if (!SCANNERS.includes((b.config as ScannerConfig).scanner)) err(b.id, `Unknown scanner "${(b.config as ScannerConfig).scanner}"`);
+        break;
       case 'gate':
         if (!ins.length) err(b.id, 'A gate needs findings as input');
         break;

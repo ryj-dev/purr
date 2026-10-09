@@ -26,19 +26,6 @@ test('saved settings keep only what differs from the defaults, so a new default 
   db.close();
 });
 
-test('once: a saved 4 Claude sessions (the old default, saved with everything else) gives way to the new default', () => {
-  const file = fresh();
-  const old = openDb(file);
-  old.raw.prepare("INSERT OR REPLACE INTO kv (key, value) VALUES ('settings', ?)").run(JSON.stringify({ maxConcurrentClaude: 4, dailySessionCap: 300, port: 7878 }));
-  old.raw.prepare("DELETE FROM kv WHERE key = 'migrations'").run();
-  old.close();
-  const db = openDb(file);
-  assert.equal(db.getSettings().maxConcurrentClaude, 6);
-  db.setSettings({ ...db.getSettings(), maxConcurrentClaude: 4 });   // chosen again on purpose
-  db.close();
-  assert.equal(openDb(file).getSettings().maxConcurrentClaude, 4, 'not dropped a second time');
-});
-
 test("the daily session cap counts sessions still running, not just finished ones", () => {
   const db = openDb(fresh());
   db.setSettings({ ...db.getSettings(), dailySessionCap: 2 });

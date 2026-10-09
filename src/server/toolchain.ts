@@ -5,13 +5,13 @@
 // Signing in also opens Terminal, on the tool's own login command: PuRR never sees a password or token.
 import { existsSync, realpathSync } from 'node:fs';
 import type { AppState, ToolName, ToolStatus, Toolchain } from '../shared/types.ts';
-import { GH_DEFAULT_LOGIN, expectGhSignIn, forgetGhAccounts, ghAccounts } from './gh.ts';
+import { expectGhSignIn, forgetGhAccounts, ghAccounts } from './gh.ts';
 import { exec } from './util.ts';
 
 export const TOOL_NAMES: ToolName[] = ['betterleaks', 'zizmor', 'osv-scanner', 'hadolint', 'actionlint', 'claude', 'gh'];
 
 const PURPOSE: Record<ToolName, string> = {
-  betterleaks: 'Secrets in commits (the gitleaks successor)',
+  betterleaks: 'Secrets in commits',
   zizmor: 'GitHub Actions workflow issues',
   'osv-scanner': 'Known-vulnerable dependencies',
   hadolint: 'Dockerfile errors (advice)',
@@ -87,8 +87,7 @@ async function statusOf(name: ToolName): Promise<ToolStatus> {
     if (path && name === 'claude') return claudeAuth(path);
     if (path && name === 'gh') {
       const accounts = await ghAccounts();
-      const named = accounts.filter((a) => a !== GH_DEFAULT_LOGIN);
-      return { signedIn: accounts.length > 0, accounts: named, ...(accounts.length && !named.length ? { detail: 'signed in' } : {}) };
+      return { signedIn: accounts.length > 0, accounts };
     }
     return null;
   };

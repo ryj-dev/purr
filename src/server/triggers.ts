@@ -73,7 +73,7 @@ export class PostPushWatcher {
   async settled() { while (this.confirming.size) await Promise.all([...this.confirming]); }
 
   /** From the pre-push hook. Confirms the push landed (up to 90s), then schedules the post-push flow. */
-  async pushIntent(body: { repoPath: string; branch: string; sha: string; remote?: string; from?: string | null }) {
+  async pushIntent(body: { repoPath: string; branch: string; sha: string; remote?: string; from: string | null }) {
     if (body.repoPath && existsSync(body.repoPath)) body.repoPath = realpathSync(body.repoPath);
     // every repo counts: register it on its first push if no commit has yet
     const repo = this.db.getRepoByPath(body.repoPath) ?? await addRepo(this.db, body.repoPath).catch(() => null);
@@ -94,15 +94,10 @@ export class PostPushWatcher {
     note('pending', 'waiting for the push to land');
     const confirm = (async () => {
       const deadline = Date.now() + this.deps.confirmMs;
-      // the branch's tip before this push (null: a new branch); the hook says, else it's what's there at first look
-      let from = body.from;
+      const from = body.from;   // the branch's tip before this push (null: a new branch), as the hook saw it
       let onTop: string | null = null;   // a newer tip found on top of this push before it was seen, that nothing else reviews
       while (Date.now() < deadline) {
         const tip = await this.deps.lsRemote(body.repoPath, remote, body.branch);
-        // an older hook sends no `from`: the tip at first look stands in, and nothing later does (a quick second
-        // push seen after this one landed is a newer push, not the old tip)
-        // (no answer from ls-remote says nothing about the old tip: wait for one that does)
-        if (from === undefined && tip) from = tip === body.sha ? null : tip;
         if (tip && tip !== body.sha && tip !== from) {
           // the branch moved on before this push was seen. If something will review that newer push (its own hook here
           // reported it: a quick second push, or an amend force-pushed straight after; or an open PR the poller

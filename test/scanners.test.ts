@@ -92,27 +92,12 @@ test('betterleaks sees only the added lines, never validates or redacts nothing,
   } finally { t.restore(); }
 });
 
-test('without betterleaks, gitleaks does the job; with neither, the scanner says betterleaks is missing', async () => {
+test('without betterleaks, the secrets scanner says it is missing', async () => {
   const { change, files } = await staged({ 'app.js': `const key = "${FAKE_SECRET}";\n` });
-  let t = fakeTools({ gitleaks: SECRETS });
-  try {
-    const r = await runScanner('betterleaks', 'scan-betterleaks', files, change);
-    assert.equal(r.state.state, 'ran', r.state.error ?? '');
-    assert.equal(r.findings[0].source.scanner, 'gitleaks', 'says which one ran');
-    assert.equal(r.state.tool, 'gitleaks', 'and so does the state, for the ledger');
-    assert.ok(!readFileSync(join(t.dir, 'gitleaks.args'), 'utf8').includes('--validation'), "gitleaks has no such flag (and never validates)");
-  } finally { t.restore(); }
-  t = fakeTools({});
+  const t = fakeTools({});
   try {
     const r = await runScanner('betterleaks', 'scan-betterleaks', files, change);
     assert.deepEqual([r.state.state, r.state.error], ['not installed', 'betterleaks is not on PATH']);
-  } finally { t.restore(); }
-  // a flow saved with gitleaks runs betterleaks
-  t = fakeTools({ betterleaks: SECRETS });
-  try {
-    const r = await runScanner('gitleaks', 'scan-gitleaks', files, change);
-    assert.equal(r.findings[0].source.scanner, 'betterleaks');
-    assert.equal(r.state.tool, 'betterleaks');
   } finally { t.restore(); }
 });
 
@@ -192,49 +177,6 @@ test('actionlint: workflow errors on added lines, as consider; nothing to check 
   } finally { t.restore(); }
 });
 
-test('a secret dismissed when gitleaks found it keeps its identity now betterleaks finds it', () => {
-  const f = (scanner: 'gitleaks' | 'betterleaks'): Finding => ({ id: 'x', file: 'app.js', line: 2, category: 'secrets', severity: 'must_fix',
-    title: 'A secret', scenario: 's', source: { blockId: `scan-${scanner}`, kind: 'scanner', scanner, rule: 'aws-access-token' } });
-  const content = 'a\nb\nc\n';
-  assert.equal(fingerprint(f('betterleaks'), content), fingerprint(f('gitleaks'), content));
-});
-
-test("a secret gitleaks raised is fixed when the secrets block no longer finds it, unless only gitleaks could have found it", async () => {
-  const { openDb } = await import('../src/server/db.ts');
-  const { applyLedger } = await import('../src/server/ledger.ts');
-  const db = openDb(join(mkdtempSync(join(process.env.TMPDIR!, 'purr-db-')), 'purr.db'));
-  const open = (fp: string, rule: string, blockId = 'scan-gitleaks') => db.putLedger({ fingerprint: fp, repoId: 'r1', branch: 'feat', state: 'open',
-    flowId: 'default-review', finding: { id: fp, file: 'app.js', line: 2, category: 'secrets', severity: 'must_fix', title: 'A secret', scenario: 's',
-      fingerprint: fp, source: { blockId, kind: 'scanner', scanner: 'gitleaks', rule } }, firstRunId: 'r0', lastRunId: 'r0', updatedAt: 'x' });
-  const state = (fp: string) => db.getLedger(fp, 'r1')?.state;
-  const run = (id: string) => ({ id, repoId: 'r1', branch: 'feat', flowId: 'default-review', trigger: 'post-push', mode: 'range' } as any);
-
-  // the default flow, renamed block: betterleaks ran in scan-betterleaks
-  open('token', 'github-pat');
-  open('bare-key-id', 'aws-access-token');   // betterleaks doesn't flag a bare AWS key id: its silence says nothing
-  open('generic', 'generic-api-key');
-  applyLedger(db, run('a'), [], new Set(['scan-betterleaks', 'context']), new Map(), new Map([['scan-betterleaks', 'betterleaks']]));
-  assert.deepEqual(['token', 'bare-key-id', 'generic'].map(state), ['fixed', 'open', 'open']);
-
-  // a flow duplicated before betterleaks: its block is still called scan-gitleaks, but betterleaks runs in it now
-  open('dup', 'aws-access-token');
-  applyLedger(db, run('b'), [], new Set(['scan-gitleaks']), new Map(), new Map([['scan-gitleaks', 'betterleaks']]));
-  assert.equal(state('dup'), 'open', "the block's name says gitleaks, but betterleaks ran: still open");
-
-  // the default flow when betterleaks wasn't installed: gitleaks (the fallback) raised it under scan-betterleaks; once
-  // betterleaks is installed, its silence can't close it either
-  open('fallback', 'aws-access-token', 'scan-betterleaks');
-  applyLedger(db, run('c'), [], new Set(['scan-betterleaks']), new Map(), new Map([['scan-betterleaks', 'betterleaks']]));
-  assert.equal(state('fallback'), 'open');
-
-  // only a run in which gitleaks itself ran can close them, whatever the block is called
-  applyLedger(db, run('d'), [], new Set(['scan-betterleaks']), new Map(), new Map([['scan-betterleaks', 'gitleaks']]));
-  assert.deepEqual(['bare-key-id', 'generic', 'fallback'].map(state), ['fixed', 'fixed', 'fixed']);
-  applyLedger(db, run('e'), [], new Set(['scan-gitleaks']), new Map(), new Map([['scan-gitleaks', 'gitleaks']]));
-  assert.equal(state('dup'), 'fixed');
-  db.close();
-});
-
 test('the default flows: pre-commit is betterleaks, pre-push the blocking three, the full review all five', () => {
   const scanners = (id: string) => DEFAULT_FLOWS.find((x) => x.id === id)!.blocks.filter((b) => b.type === 'scanner').map((b) => (b.config as any).scanner);
   assert.deepEqual(scanners('default-pre-commit'), ['betterleaks']);
@@ -248,21 +190,12 @@ test('the default flows: pre-commit is betterleaks, pre-push the blocking three,
   assert.ok(!JSON.stringify(DEFAULT_FLOWS).includes('gitleaks'));
 });
 
-test('a shared flow with a gitleaks scanner imports as betterleaks, and says so', () => {
-  const flow = DEFAULT_FLOWS.find((x) => x.id === 'default-pre-commit')!;
-  const json = exportFlow(flow).json.replace(/"betterleaks"/g, '"gitleaks"');
-  const p = previewImport(json);
-  assert.equal((p.blocks.find((b) => b.type === 'scanner')!.config as any).scanner, 'betterleaks');
-  assert.ok(p.notes.some((n) => /gitleaks is now betterleaks/.test(n)), p.notes.join(' | '));
-});
-
 test('a scanner finding says which tool found it and what that tool is', () => {
   const by = (scanner: any, rule: string) => foundBy({ id: 'x', file: 'f', line: 1, category: 'c', severity: 'consider', title: 't', scenario: 's',
     source: { blockId: 'b', kind: 'scanner', scanner, rule } });
   assert.match(by('hadolint', 'DL3009'), /Found by \*\*hadolint\*\*.*\[`DL3009`\]\(https:\/\/github\.com\/hadolint\/hadolint\/wiki\/DL3009\)/);
   assert.match(by('hadolint', 'SC1073'), /\[`SC1073`\]\(https:\/\/www\.shellcheck\.net\/wiki\/SC1073\)/, "a ShellCheck code links to ShellCheck's wiki");
   assert.match(by('betterleaks', 'aws-access-token'), /Found by \*\*betterleaks\*\*, an open-source tool that finds secrets/);
-  assert.match(by('gitleaks', 'x'), /Found by \*\*gitleaks\*\*/, 'findings recorded before the switch still say what found them');
 });
 
 // osv-scanner: answers from what's in the file it's given (the last argument), and notes what it was asked to read
@@ -363,10 +296,9 @@ test("a scanner that couldn't check a file can't call its findings there fixed; 
   open('unchecked', 'api/Dockerfile', 'scan-hadolint');
   open('failed', '.github/workflows/ci.yml', 'scan-actionlint');
   open('secret', 'app.js', 'scan-betterleaks');
-  open('old-secret', 'old.js', 'scan-gitleaks');   // raised by the old gitleaks block, closable by scan-betterleaks when it runs
   applyLedger(db, { id: 'r1run', repoId: 'r1', branch: 'feat', flowId: 'default-review', trigger: 'post-push', mode: 'range' } as any, [], got.complete, got.unchecked);
-  assert.deepEqual(['checked', 'unchecked', 'failed', 'secret', 'old-secret'].map((fp) => db.getLedger(fp, 'r1')?.state), ['fixed', 'open', 'open', 'open', 'open'],
-    "betterleaks missing this time: its open secrets stay open, the old gitleaks block's too");
+  assert.deepEqual(['checked', 'unchecked', 'failed', 'secret'].map((fp) => db.getLedger(fp, 'r1')?.state), ['fixed', 'open', 'open', 'open'],
+    'betterleaks missing this time: its open secrets stay open');
   db.close();
 });
 
@@ -493,8 +425,7 @@ test("a missing osv-scanner shows as not installed, not failed or partial", asyn
 const installed = (tool: string) => { try { execFileSync('which', [tool], { stdio: 'pipe' }); return true; } catch { return false; } };
 
 test('the real betterleaks accepts PuRR\'s flags and finds a committed GitHub token', { skip: !installed('betterleaks') && 'betterleaks is not installed here' }, async () => {
-  // FAKE_SECRET is a GitHub token's shape, not a real one, which betterleaks and gitleaks both flag (betterleaks, unlike
-  // gitleaks, doesn't flag a bare AWS key id on its own)
+  // FAKE_SECRET is a GitHub token's shape, not a real one, which betterleaks flags
   // the change also adds config and ignore files that would allowlist the token, if the scanner loaded them
   const { change, files } = await staged({
     'app.js': `const k = "${FAKE_SECRET}";\n`,
@@ -641,4 +572,20 @@ test('two actionlint errors of one kind on one line, with different messages, ke
   await fingerprintAll(fs, { content: async () => 'jobs:\n  build:\n    steps:\n      - run: echo\n      - run: echo\n      - run: echo\n      - run: echo ${{ x.foo.bar }}\n' } as any);
   assert.ok(fs[0].fingerprint && fs[1].fingerprint);
   assert.notEqual(fs[0].fingerprint, fs[1].fingerprint);
+});
+
+test("a secret finding's identity is pinned: a change to it would reopen every dismissed secret", () => {
+  const f = { id: 'x', file: 'app.js', line: 2, category: 'secrets', severity: 'must_fix', title: 'GitHub token', scenario: 's',
+    source: { blockId: 'scan-betterleaks', kind: 'scanner', scanner: 'betterleaks', rule: 'github-pat' } } as Finding;
+  assert.equal(fingerprint(f, 'a\nconst token = "x";\nb'), '23236a4b2fbbe8f7');
+});
+
+test('a scanner block naming a scanner PuRR has no longer is a flow error, and never runs another scanner', async () => {
+  const { validateFlow } = await import('../src/server/flows/validate.ts');
+  const blocks = [{ id: 's', type: 'scanner', config: { scanner: 'gitleaks' } }, { id: 'out', type: 'output', config: { notify: false, postPrComment: false } }] as any;
+  const errors = validateFlow(blocks, [{ id: 'e', source: 's', target: 'out' }] as any).filter((i) => i.level === 'error').map((i) => i.message);
+  assert.ok(errors.includes('Unknown scanner "gitleaks"'), errors.join(' | '));
+  const r = await runScanner('gitleaks' as any, 's', [], { mode: 'staged' } as any);
+  assert.equal(r.state.state, 'failed');
+  assert.match(r.state.error ?? '', /unknown scanner "gitleaks"/);
 });

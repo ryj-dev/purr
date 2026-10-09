@@ -4,10 +4,9 @@
 // consider. Repeats of one rule in one file become one finding with `lines`. Everything is offline except osv, which
 // sends package names and versions.
 //
-// betterleaks (the gitleaks successor, same flags and report) runs on a sparse copy of each changed file holding only
-// the added lines (others blank), so line numbers stay right. Only the rule id and description are kept, never the
-// secret itself, and its live validation (which would send the secret to its provider) stays off. Without betterleaks,
-// an installed gitleaks does the same job.
+// betterleaks runs on a sparse copy of each changed file holding only the added lines (others blank), so line numbers
+// stay right. Only the rule id and description are kept, never the secret itself, and its live validation (which would
+// send the secret to its provider) stays off.
 
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from 'node:fs';
 import { basename, dirname, join, relative } from 'node:path';
@@ -25,7 +24,8 @@ export const isDockerfile = (path: string) => DOCKERFILE.test(path) && !NOT_DOCK
 // full pinned trees osv-scanner reads as they are (go.mod lists every module the build uses; osv can't parse go.sum)
 const LOCKS = /(^|\/)(package-lock\.json|npm-shrinkwrap\.json|yarn\.lock|pnpm-lock\.yaml|composer\.lock|uv\.lock|poetry\.lock|pdm\.lock|Pipfile\.lock|requirements[^/]*\.txt|Gemfile\.lock|go\.mod|Cargo\.lock)$/;
 // a change's own scanner config or ignore file must never steer the scan of that change, but a secret pasted into one
-// is still a secret: it's scanned under a name the scanner doesn't load as config, and reported under its own
+// is still a secret: it's scanned under a name the scanner doesn't load as config, and reported under its own.
+// betterleaks reads gitleaks' file names too
 const SCAN_CONFIG = new Set(['.betterleaks.toml', '.gitleaks.toml', '.betterleaksignore', '.gitleaksignore']);
 const AS_DATA = '.purr-scan';
 /** One hadolint / actionlint call (one file). A setting so the tests can make it short. */
@@ -96,8 +96,7 @@ const safePath = (p: string) => !p.split('/').includes('..') && !p.startsWith('/
 
 const isMissing = (e: any) => e?.code === 'ENOENT';
 
-/** betterleaks, or gitleaks if only that is installed: same report either way, findings say which one ran. */
-async function secrets(blockId: string, files: ChangedFile[], work: string, ran: { tool?: 'betterleaks' | 'gitleaks' }, signal?: AbortSignal):
+async function secrets(blockId: string, files: ChangedFile[], work: string, signal?: AbortSignal):
   Promise<Finding[] | null> {
   const root = join(work, 'secrets');
   let any = false;
@@ -116,27 +115,18 @@ async function secrets(blockId: string, files: ChangedFile[], work: string, ran:
   const common = ['dir', root, '--no-banner', '--no-color', '--redact', '-f', 'json', '-r', rep, '--exit-code', '0', '-l', 'error'];
   // run in the scratch folder, not the repo: a config file there must not steer the scan.
   // --validation=false: never send a found secret to its provider to check it (betterleaks' default; said on purpose)
-  let tool: 'betterleaks' | 'gitleaks' = 'betterleaks';
-  let r;
-  try {
-    r = await exec('betterleaks', [...common, '--validation=false'], { cwd: work, timeoutMs: 300_000, signal });
-  } catch (e) {
-    if (!isMissing(e)) throw e;
-    tool = 'gitleaks';   // older installs: gitleaks has the same flags, and never validates
-    r = await exec('gitleaks', common, { cwd: work, timeoutMs: 300_000, signal });
-  }
-  ran.tool = tool;   // the ledger needs to know: betterleaks' silence can't close what only gitleaks raises
+  const r = await exec('betterleaks', [...common, '--validation=false'], { cwd: work, timeoutMs: 300_000, signal });
   let hits: Array<Record<string, any>> | null = null;
   try { hits = existsSync(rep) ? JSON.parse(readFileSync(rep, 'utf8') || 'null') : null; } catch { /* below */ }
   const realPath = (p: string) => (p.endsWith(AS_DATA) && SCAN_CONFIG.has(basename(p.slice(0, -AS_DATA.length))) ? p.slice(0, -AS_DATA.length) : p);
-  const found = (Array.isArray(hits) ? hits : []).map((h) => hit(blockId, tool, realPath(relative(root, h.File)), h.StartLine ?? null, h.RuleID, 'secrets',
+  const found = (Array.isArray(hits) ? hits : []).map((h) => hit(blockId, 'betterleaks', realPath(relative(root, h.File)), h.StartLine ?? null, h.RuleID, 'secrets',
     'A secret is committed here; anyone with repo access can use it',
     `This line holds what looks like a real ${secretKind(h.RuleID)}. Anyone who can read the repo, or its history, can use it.`,
     "Revoke and rotate it now; deleting the line doesn't remove it from git history."));
   // run with --exit-code 0, so any other exit is it going wrong. Secrets it reported before that still block: the scan
   // ends failed (it may have missed some), never as a clean pass, and never dropping what it did find
-  if (r.code !== 0) throw new ScanFailed(`${tool} exited ${r.code}: ${clean(r.stderr)}`, found);
-  if (!Array.isArray(hits)) throw new Error(`${tool} wrote no readable report`);   // never a silent pass
+  if (r.code !== 0) throw new ScanFailed(`betterleaks exited ${r.code}: ${clean(r.stderr)}`, found);
+  if (!Array.isArray(hits)) throw new Error('betterleaks wrote no readable report');   // never a silent pass
   return found;
 }
 
@@ -381,6 +371,8 @@ class ScanFailed extends Error {
   constructor(message: string, found: Finding[]) { super(message); this.found = found; }
 }
 
+function unknownScanner(name: never): never { throw new Error(`unknown scanner "${name}"`); }
+
 /**
  * Runs one scanner. A missing or failing tool is reported in the state and yields no findings. The one thing that throws
  * is `signal` aborting (the review was cancelled or superseded): the scan stops between files, kills the tool it's
@@ -392,27 +384,24 @@ export async function runScanner(name: ScannerName, blockId: string, files: Chan
   const t0 = Date.now();
   const incomplete: Incomplete = [];
   const secs = () => (Date.now() - t0) / 1000;
-  const ran: { tool?: 'betterleaks' | 'gitleaks' } = {};
-  const tool = () => (ran.tool ? { tool: ran.tool } : {});
   try {
-    // 'gitleaks': a flow saved before betterleaks replaced it
-    const got = name === 'betterleaks' || name === 'gitleaks' ? await secrets(blockId, files, work, ran, signal)
+    const got = name === 'betterleaks' ? await secrets(blockId, files, work, signal)
       : name === 'zizmor' ? await zizmor(blockId, files, change, work, signal)
       : name === 'hadolint' ? await hadolint(blockId, files, change, work, incomplete, signal)
       : name === 'actionlint' ? await actionlint(blockId, files, change, work, incomplete, signal)
-      : await osv(blockId, files, change, work, incomplete, signal);
+      : name === 'osv' ? await osv(blockId, files, change, work, incomplete, signal)
+      : unknownScanner(name);
     if (signal?.aborted) throw new Cancelled();
     const findings = got ? group(got) : [];
     if (got === null) return { findings, state: { state: 'n/a', secs: secs() } };
-    return { findings, state: incomplete.length ? { state: 'partial', hits: findings.length, incomplete, secs: secs(), ...tool() }
-      : { state: 'ran', hits: findings.length, secs: secs(), ...tool() } };
+    return { findings, state: incomplete.length ? { state: 'partial', hits: findings.length, incomplete, secs: secs() }
+      : { state: 'ran', hits: findings.length, secs: secs() } };
   } catch (e: any) {
     if (signal?.aborted) throw new Cancelled();
     const missing = isMissing(e);
-    const named = name === 'gitleaks' ? 'betterleaks' : name;
     const found = e instanceof ScanFailed ? group(e.found) : [];
     return { findings: found, state: { state: missing ? 'not installed' : 'failed', ...(found.length ? { hits: found.length } : {}),
-      error: missing ? `${named} is not on PATH` : String(e?.message ?? e), secs: secs(), ...(missing ? {} : tool()) } };
+      error: missing ? `${name} is not on PATH` : String(e?.message ?? e), secs: secs() } };
   } finally {
     rmSync(work, { recursive: true, force: true });
   }

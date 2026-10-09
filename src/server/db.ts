@@ -93,15 +93,12 @@ export function openDb(file = paths.db) {
     CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, run_id TEXT, block_id TEXT, created_at TEXT NOT NULL, data TEXT NOT NULL);
     CREATE INDEX IF NOT EXISTS sessions_created ON sessions (created_at);
     CREATE TABLE IF NOT EXISTS ledger (fingerprint TEXT NOT NULL, repo_id TEXT NOT NULL, branch TEXT, state TEXT NOT NULL,
-      data TEXT NOT NULL, first_run_id TEXT NOT NULL, last_run_id TEXT NOT NULL, updated_at TEXT NOT NULL,
+      data TEXT NOT NULL, first_run_id TEXT NOT NULL, last_run_id TEXT NOT NULL, updated_at TEXT NOT NULL, flow_id TEXT,
       PRIMARY KEY (fingerprint, repo_id));
+    -- one row per commit, repo and branch: the same commit can go to two branches with different fates
+    CREATE TABLE IF NOT EXISTS push_outcomes (sha TEXT NOT NULL, repo_path TEXT NOT NULL, branch TEXT NOT NULL, data TEXT NOT NULL,
+      at TEXT NOT NULL, PRIMARY KEY (sha, repo_path, branch));
   `);
-  // one row per commit, repo and branch: the same commit can go to two branches with different fates
-  const cols = (db.prepare('PRAGMA table_info(push_outcomes)').all() as { name: string }[]).map((c) => c.name);
-  if (cols.length && !cols.includes('branch')) db.exec('DROP TABLE push_outcomes');   // an early shape; only notes in flight
-  db.exec(`CREATE TABLE IF NOT EXISTS push_outcomes (sha TEXT NOT NULL, repo_path TEXT NOT NULL, branch TEXT NOT NULL, data TEXT NOT NULL,
-    at TEXT NOT NULL, PRIMARY KEY (sha, repo_path, branch))`);
-  try { db.exec('ALTER TABLE ledger ADD COLUMN flow_id TEXT'); } catch { /* already there */ }
 
   const kvGet = <T>(key: string, dflt: T): T => {
     const row = db.prepare('SELECT value FROM kv WHERE key = ?').get(key) as { value: string } | undefined;
@@ -109,17 +106,6 @@ export function openDb(file = paths.db) {
   };
   const kvSet = (key: string, value: unknown) =>
     db.prepare('INSERT INTO kv (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run(key, JSON.stringify(value));
-
-  // Settings used to be saved whole, so anyone who saved any setting kept the then-default 4 Claude sessions. Once:
-  // a saved 4 is dropped, so the current default (6) applies; someone who wants 4 can set it again
-  if (!kvGet('migrations', { concurrency6: false }).concurrency6) {
-    const row = db.prepare("SELECT value FROM kv WHERE key = 'settings'").get() as { value: string } | undefined;
-    if (row) {
-      const saved = JSON.parse(row.value);
-      if (saved.maxConcurrentClaude === 4) { delete saved.maxConcurrentClaude; kvSet('settings', saved); }
-    }
-    kvSet('migrations', { ...kvGet('migrations', {}), concurrency6: true });
-  }
 
   return {
     raw: db,

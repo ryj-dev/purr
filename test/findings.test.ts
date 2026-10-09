@@ -28,7 +28,7 @@ const finding = (fp: string, over: Partial<Finding> = {}): Finding => ({
 
 test('findRuns filters by repo, branch, PR, sha prefix and trigger, newest first', () => {
   const db = openDb(join(mkdtempSync(join(process.env.TMPDIR!, 'purr-db-')), 'purr.db'));
-  const pr = { number: 7, title: 't', body: '', url: 'u' };
+  const pr = { number: 7, title: 't', body: '', url: 'u', account: 'me' };
   db.putRun(fakeRun({ id: 'old', repoId: 'r1', branch: 'feat', pr, headSha: 'abc111' }));
   db.putRun(fakeRun({ id: 'new', repoId: 'r1', branch: 'feat', pr, headSha: 'abc222' }));
   db.putRun(fakeRun({ id: 'hook', repoId: 'r1', branch: 'feat', trigger: 'pre-push', headSha: 'abc333' }));
@@ -291,7 +291,7 @@ test('pushes that get no review of their own say why: superseded in the debounce
     lsRemote: async () => (tips.length > 1 ? tips.shift()! : tips[0]) ?? null, ghAuthed: async () => true, prForBranch: async () => pr,
     inHistoryOf: async () => line, confirmEveryMs: 5,
   });
-  const push = async (sha: string, from: string | null | undefined, seen: (string | null)[]) => {
+  const push = async (sha: string, from: string | null, seen: (string | null)[]) => {
     tips = seen;
     await watcher.pushIntent({ repoPath, branch: 'feat', sha, from });
     assert.equal(kindOf(sha), 'pending', 'pending while it lands');
@@ -350,15 +350,15 @@ test('pushes that get no review of their own say why: superseded in the debounce
   assert.deepEqual(kind('cde1'), ['superseded', 'cde2']);
   line = 'unknown';
 
-  // an older hook (no `from`), and a quick second push landing while gh is asked about this one: covered by it
-  const older = new PostPushWatcher(db, mgr, {
+  // a quick second push landing while gh is asked about this one: covered by it
+  const quick2 = new PostPushWatcher(db, mgr, {
     lsRemote: async () => (tips.length > 1 ? tips.shift()! : tips[0]) ?? null, ghAuthed: async () => true,
     prForBranch: async () => { tips = ['dcd2']; return pr; }, inHistoryOf: async () => 'yes', confirmEveryMs: 5,   // on top of this one
   });
   tips = ['dcd1'];
-  await older.pushIntent({ repoPath, branch: 'feat', sha: 'dcd1' });
-  await older.settled();
-  assert.deepEqual(kind('dcd1'), ['superseded', 'dcd2'], "the later tip isn't taken as the old one");
+  await quick2.pushIntent({ repoPath, branch: 'feat', sha: 'dcd1', from: 'dcd0' });
+  await quick2.settled();
+  assert.deepEqual(kind('dcd1'), ['superseded', 'dcd2'], 'the newer push takes its place');
 
   // gh can't be asked whether there's a PR (offline), reviews PR-only: noted no-pr, and --wait keeps waiting
   const offline = new PostPushWatcher(db, mgr, { lsRemote: async () => 'aef1', ghAuthed: async () => true, prForBranch: async () => null, confirmEveryMs: 5 });
@@ -381,13 +381,6 @@ test('pushes that get no review of their own say why: superseded in the debounce
   await bot.settled();
   assert.deepEqual(sched, ['bbb9'], "the bot's push had no review coming: it's reviewed here, which covers this one");
   assert.deepEqual(kind('bbb1'), ['superseded', 'bbb9'], '--wait on this push follows it there');
-
-  // an older hook (no `from`) and no answer at the first look: the old tip is what the next answer shows, not "moved"
-  line = 'no';
-  await push('fab1', undefined, [null, 'fab0', 'fab0', 'fab1']);
-  assert.equal(kindOf('fab1'), 'pending', 'scheduled, not skipped as rejected');
-  assert.ok(sched.includes('fab1'));
-  line = 'unknown';
 
   // the branch moves to a commit pushed to another branch long ago (its old note there promises nothing here), by CI,
   // with no PR and reviews not PR-only: this push is reviewed
@@ -443,14 +436,7 @@ test('pushes that get no review of their own say why: superseded in the debounce
   assert.equal(kindOf('fff1'), 'pending', 'scheduled: its review is on the way');
   assert.ok(sched.includes('fff1'));
 
-  // a hook from before `from` existed: the tip seen first stands in for it, so a push landing isn't "overtaken"
   db.setSettings({ ...db.getSettings(), postPushPrsOnly: false });
-  await push('acd1', undefined, ['acd0', 'acd1']);
-  assert.equal(kindOf('acd1'), 'pending', 'landed and scheduled');
-  assert.ok(sched.includes('acd1'));
-  await push('acd2', undefined, ['acd2']);
-  assert.equal(kindOf('acd2'), 'pending', 'already there at first look');
-  assert.ok(sched.includes('acd2'));
 
   // something going wrong while confirming the push is reported, not left pending
   const broken = new PostPushWatcher(db, mgr, { lsRemote: async () => { throw new Error('git crashed'); }, confirmMs: 60, confirmEveryMs: 10 });
@@ -609,19 +595,6 @@ test('a push handed to another clone, whose PR the poller first sees late, is st
   db.close();
 });
 
-test('the push notes table from an earlier build (no branch column) is rebuilt, and notes keyed by branch work', () => {
-  const file = join(mkdtempSync(join(process.env.TMPDIR!, 'purr-db-')), 'purr.db');
-  const old = openDb(file);
-  old.raw.exec('DROP TABLE push_outcomes; CREATE TABLE push_outcomes (sha TEXT PRIMARY KEY, data TEXT NOT NULL, at TEXT NOT NULL)');
-  old.raw.prepare('INSERT INTO push_outcomes VALUES (?, ?, ?)').run('abc', '{}', 'x');
-  old.close();
-  const db = openDb(file);
-  db.setPushOutcome({ sha: 'abc1', kind: 'no-pr', reason: 'r', repoPath: '/r', branch: 'a' });
-  db.setPushOutcome({ sha: 'abc1', kind: 'pending', reason: 'r', repoPath: '/r', branch: 'b' });
-  assert.deepEqual(db.getPushOutcomes('abc1', ['/r']).map((o) => [o.branch, o.kind]).sort(), [['a', 'no-pr'], ['b', 'pending']]);
-  db.close();
-});
-
 test("the service's events wake a waiting --wait at once, even one that came while it was busy looking", async () => {
   const { ServiceEvents } = await import('../src/server/lookup.ts');
   const { ClaudeRunner } = await import('../src/server/claude.ts');
@@ -666,7 +639,7 @@ test("a newer push covered by an open PR the poller lists, or by a review alread
   const pr = { number: 4, title: 't', body: '', url: 'u', baseRefName: 'main', headRefName: 'feat', headRefOid: 'x', isDraft: false };
   const watcher = new PostPushWatcher(db, mgr, {
     fetchPrs: async () => ({ prs: [{ ...pr, repo: 'work-org/app-w', account: 'me', createdAt: new Date(Date.now() - 86_400_000).toISOString() }], answered: ['me'] }),
-    lsRemote: async () => (tips.length > 1 ? tips.shift()! : tips[0]) ?? null, ghAuthed: async () => true, prForBranch: async () => pr,
+    lsRemote: async () => (tips.length > 1 ? tips.shift()! : tips[0]) ?? null, ghAuthed: async () => true, prForBranch: async () => ({ ...pr, account: 'me' }),
     inHistoryOf: async () => 'yes', confirmEveryMs: 5,
   });
   const kind = (sha: string) => db.getPushOutcomes(sha, [a.path])[0]?.kind ?? null;

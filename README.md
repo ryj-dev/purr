@@ -63,7 +63,7 @@ npm install && npm run build          # build the UI (the service runs from Type
 - Node ≥ 23.6 (developed on 26)
 - git
 - `claude`
-- The five scanners: `brew install betterleaks zizmor osv-scanner hadolint actionlint`. A missing scanner shows as "not installed"; it doesn't fail the run. Without betterleaks, an installed gitleaks (its predecessor) scans for secrets instead.
+- The five scanners: `brew install betterleaks zizmor osv-scanner hadolint actionlint`. A missing scanner shows as "not installed"; it doesn't fail the run.
 - `gh`, optional: adds PR title/description and the open-PR poller.
 
 Click **Toolchain** in the sidebar to install any of these and sign in, without the terminal. Everything installs with Homebrew (claude as the `claude-code` cask; update it with `brew upgrade`). If Homebrew is missing, the popup offers to install it in Terminal, because its installer asks for your Mac's password. Sign in and Add account (gh) open Terminal on the tool's own login (`claude auth login`, `gh auth login --web`), so PuRR never sees a password or token.
@@ -222,7 +222,7 @@ purr: feat/x will be reviewed once the push lands (if it has an open PR). For th
 | `src/server/http.ts` | REST + SSE API ([docs/API.md](docs/API.md)) and the static UI |
 | `src/server/hooks.ts` | hook install/uninstall with chaining |
 | `web/` | React + React Flow UI |
-| `test/` | `npm test` runs unit + integration tests (a fake `claude`, fake scanners, a real betterleaks or gitleaks, a real `git push` to a bare remote) |
+| `test/` | `npm test` runs unit + integration tests (a fake `claude`, fake scanners, a real betterleaks, a real `git push` to a bare remote) |
 
 Data lives in `~/.purr/` (`purr.db`, `worktrees/`, `logs/`), or in `$PURR_HOME` if set.
 
@@ -233,7 +233,7 @@ Data lives in `~/.purr/` (`purr.db`, `worktrees/`, `logs/`), or in `$PURR_HOME` 
 - No incremental re-review. Each push reviews the whole branch range; the ledger keeps repeats quiet.
 - De-duplication across lenses is deterministic and conservative; the severity step is asked to drop duplicates. Opus does this well. On Haiku, near-duplicates (the same issue worded three ways) can survive. An LLM same-issue block, like tc-ai-reviewer's `same_issue.md`, is the next thing to add.
 - The pre-push gate scans every commit being pushed, so a secret added and later removed in the same push still blocks it. That matches betterleaks' history semantics.
-- betterleaks flags an AWS access key id together with its secret, but not a bare key id on its own, which gitleaks also flagged. A key id alone can't be used, and tc-ai-reviewer made the same switch.
+- betterleaks flags an AWS access key id together with its secret, but not a bare key id on its own. A key id alone can't be used, and tc-ai-reviewer made the same switch.
 - osv-scanner reads lockfiles as they are (and pinned `requirements*.txt`). tc-ai-reviewer also pins the full tree of a manifest without a lockfile (`package.json`, `pyproject.toml`, unpinned requirements) before scanning it, and flags a change that makes dependencies impossible to install; PuRR doesn't yet.
 - The UI loads as a single 700 kB bundle and the editor has no undo/redo.
 - Posting PR comments is off by default (`Output` block → "Post PR comment").

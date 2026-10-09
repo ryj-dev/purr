@@ -122,8 +122,7 @@ export function Inspector({ block, blocks, edges, readOnly, issues, onChange, on
           <label className="field">
             <span>Scanner</span>
             <select value={c.scanner} disabled={d} onChange={(e) => set<'scanner'>({ scanner: e.target.value as ScannerName })}>
-              {/* a flow saved before betterleaks replaced gitleaks shows its old choice (which runs betterleaks) */}
-              {[...SCANNERS, ...(c.scanner === 'gitleaks' ? ['gitleaks' as const] : [])].map((s) => (
+              {SCANNERS.map((s) => (
                 <option key={s} value={s}>{SCANNER_CHOICE[s]}</option>
               ))}
             </select>
