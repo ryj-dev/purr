@@ -13,22 +13,68 @@ import { remoteUrl, repoRoot } from './git.ts';
 import { TOOL_NAMES, installMissing, installTool, onToolchainChange, openHomebrewInstall, openSignIn, refreshToolchain, toolchainStatus, toolsSummary } from './toolchain.ts';
 import type { RunManager } from './manager.ts';
 import type { PostPushWatcher } from './triggers.ts';
-import { newId, now } from './util.ts';
+import { Semaphore, newId, now, sharedCache } from './util.ts';
 import { VERSION, WEB_DIR as WEB } from './runtime.ts';
-import { GLOBAL_HOOKS_DIR, currentGlobalHooksPath } from './globalHooks.ts';
+import { GLOBAL_HOOKS_DIR, currentGlobalHooksPath, repoOwnHooksPath } from './globalHooks.ts';
 
 const MIME: Record<string, string> = {
   '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml',
   '.json': 'application/json', '.png': 'image/png', '.ico': 'image/x-icon', '.woff2': 'font/woff2',
 };
 
-let hooksCache: { at: number; v: AppState['globalHooks'] } | null = null;
-async function globalHooksState(): Promise<AppState['globalHooks']> {
-  if (hooksCache && Date.now() - hooksCache.at < 30_000) return hooksCache.v;
-  const hooksPath = await currentGlobalHooksPath();
-  const v = { active: hooksPath === GLOBAL_HOOKS_DIR, hooksPath };
-  hooksCache = { at: Date.now(), v };
-  return v;
+// every open window refetches state at once: they share one git call, kept for 30s (a failed one isn't kept)
+const globalHooksPath = sharedCache(
+  () => currentGlobalHooksPath().then((hooksPath) => ({ active: hooksPath === GLOBAL_HOOKS_DIR, hooksPath })), 30_000);
+
+/**
+ * Which repos set their own core.hooksPath. That's a git call per repo, and a repo on a slow or unplugged volume can
+ * take seconds, so it never holds up /api/state (the desktop app gives up on it after 1.5s): the last result is
+ * served straight away and a stale one is refreshed in the background, a few repos at a time, one refresh at once.
+ * onChange fires when the answer changes, so open windows pick it up.
+ */
+export function ownHooksTracker(onChange: () => void, opts: { ttlMs?: number; check?: (repoPath: string) => Promise<string | null> } = {}) {
+  const ttlMs = opts.ttlMs ?? 30_000;
+  const check = opts.check ?? repoOwnHooksPath;
+  let known: Record<string, string> = {};
+  let checked = new Set<string>();
+  let at = 0;
+  let refreshing: Promise<void> | null = null;
+  let covering = new Set<string>();    // repo ids the running refresh checks
+  let waiting: Repo[] | null = null;   // a repo list with ids the running refresh doesn't cover
+  const gate = new Semaphore(4);
+  const refresh = async (repos: Repo[]) => {
+    const found = await Promise.all(repos.map(async (r) => {
+      const release = await gate.acquire();
+      // a repo that didn't answer in time keeps what was known about it
+      try { return [r.id, await check(r.path)] as const; } catch { return [r.id, known[r.id] ?? null] as const; } finally { release(); }
+    }));
+    const next: Record<string, string> = {};
+    for (const [id, p] of found) if (p) next[id] = p;
+    const changed = JSON.stringify(next) !== JSON.stringify(known);
+    known = next;
+    checked = new Set(repos.map((r) => r.id));
+    at = Date.now();
+    if (changed) onChange();
+  };
+  const start = (repos: Repo[]) => {
+    covering = new Set(repos.map((r) => r.id));
+    refreshing = refresh(repos).catch(() => {}).finally(() => {
+      refreshing = null;
+      const next = waiting;
+      waiting = null;
+      if (next) start(next);
+    });
+  };
+  return {
+    get(repos: Repo[]): Record<string, string> {
+      const unseen = repos.some((r) => !checked.has(r.id));
+      if (refreshing) { if (repos.some((r) => !covering.has(r.id))) waiting = repos; }
+      else if (unseen || Date.now() - at >= ttlMs) start(repos);
+      return known;
+    },
+    /** Resolves once no refresh is running or waiting (for tests). */
+    async settled() { while (refreshing) await refreshing; },
+  };
 }
 
 async function body<T>(req: IncomingMessage): Promise<T> {
@@ -71,6 +117,7 @@ export function startHttp(db: DB, mgr: RunManager, watcher: PostPushWatcher, por
     mgr.emit({ type: 'tools' });
     if (settled) broadcastState();   // the sidebar's summary
   });
+  const ownHooks = ownHooksTracker(broadcastState);
 
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://localhost');
@@ -103,10 +150,11 @@ export function startHttp(db: DB, mgr: RunManager, watcher: PostPushWatcher, por
         return;
       }
       if (a === 'state' && m === 'GET') {
+        const repos = db.listRepos();
         const state: AppState = {
-          settings: db.getSettings(), usage: db.getUsage(), repos: db.listRepos(), flows: db.listFlows(),
+          settings: db.getSettings(), usage: db.getUsage(), repos, flows: db.listFlows(),
           triggers: db.listTriggers(), tools: await toolsSummary(), version: VERSION,
-          globalHooks: await globalHooksState(),
+          globalHooks: { ...(await globalHooksPath()), ownHooks: ownHooks.get(repos) },
         };
         return send(200, state);
       }

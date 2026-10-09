@@ -7,4 +7,5 @@ contextBridge.exposeInMainWorld('purrDesktop', {
   getLoginItem: () => ipcRenderer.invoke('purr:get-login-item'),
   setLoginItem: (enabled: boolean) => ipcRenderer.invoke('purr:set-login-item', enabled),
   installCli: () => ipcRenderer.invoke('purr:install-cli'),
+  cliStatus: () => ipcRenderer.invoke('purr:cli-status'),
 });
