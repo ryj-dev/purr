@@ -109,7 +109,7 @@ export interface Finding {
   alsoFoundBy?: string[];     // block ids of merged duplicates
   verified?: { real: boolean; note: string } | null;
   fingerprint?: string;
-  ledger?: 'new' | 'open' | 'regression' | 'dismissed' | 'tracked';
+  ledger?: 'new' | 'open' | 'regression' | 'dismissed' | 'tracked' | 'fixed';   // 'fixed' only when read back later
 }
 
 export interface SessionUse {
@@ -294,4 +294,5 @@ export type ServerEvent =
   | { type: 'usage'; usage: Usage }
   | { type: 'state' }
   | { type: 'tools' }                    // a tool install started, moved on, finished or failed
+  | { type: 'push'; sha: string }        // what became of a pushed commit changed (wakes a waiting `purr findings`)
   | { type: 'notify'; title: string; body: string; runId: string };   // shown natively by PuRR.app

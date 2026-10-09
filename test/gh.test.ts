@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { chmodSync, mkdtempSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { accountSignedInSince, commentOnPr, forgetGhAccounts, ghAccounts, openPrsForAllAccounts, parseGhStatus, prForBranch } from '../src/server/gh.ts';
+import { accountSignedInSince, prLookup, commentOnPr, forgetGhAccounts, ghAccounts, openPrsForAllAccounts, parseGhStatus, prForBranch } from '../src/server/gh.ts';
 
 const TWO = `github.com
   ✓ Logged in to github.com account work-me (keyring)
@@ -30,7 +30,12 @@ D="${dir}"
 case "$1 $2" in
   "auth status") cat "$D/status"; exit ${statusExit} ;;
   "auth token") [ "$6" = "no-token" ] && exit 1; [ -e "$D/blip-$6" ] && { rm "$D/blip-$6"; exit 1; }; echo "tok-$6" ;;
-  "pr view") f="$D/pr-\${GH_TOKEN:-none}.json"; [ -f "$f" ] || exit 1; cat "$f" ;;
+  "pr view") [ -e "$D/garbled" ] && { echo "<html>rate limited</html>"; exit 0; }
+    f="$D/pr-\${GH_TOKEN:-none}.json"; [ -f "$f" ] && { cat "$f"; exit 0; }
+    [ -e "$D/offline" ] && { echo "error connecting to api.github.com" >&2; exit 1; }
+    [ -e "$D/notgithub" ] && { echo "none of the git remotes configured for this repository point to a known GitHub host" >&2; exit 1; }
+    [ -e "$D/hidden-\${GH_TOKEN:-none}" ] && { echo "GraphQL: Could not resolve to a Repository with the name 'org/app'." >&2; exit 1; }
+    echo "no pull requests found for branch \"$3\"" >&2; exit 1 ;;
   "api graphql") f="$D/graphql-\${GH_TOKEN:-none}.json"; [ -f "$f" ] || exit 1; cat "$f" ;;
   "pr comment") cat > /dev/null; echo "\${GH_TOKEN:-none} $3" >> "$D/comments"; exit ${commentExit} ;;
   *) exit 2 ;;
@@ -260,6 +265,34 @@ test('a manual review keeps the account that found its PR', async () => {
     assert.equal(run.pr?.number, 7);
     assert.equal(run.pr?.account, 'work-me', 'found by the non-active account: it comments as that one');
   } finally { gh.restore(); db.close(); }
+});
+
+test("a branch's PR: found, none, or gh couldn't say, which is not the same as none", async () => {
+  const gh = fakeGh(TWO, { 'tok-work-me': pr('OPEN') });
+  try {
+    assert.equal((await prLookup(process.cwd(), 'feat'))?.account, 'work-me');
+  } finally { gh.restore(); }
+  const none = fakeGh(TWO, {});
+  try {
+    assert.equal(await prLookup(process.cwd(), 'feat'), null, 'gh says there is none');
+    writeFileSync(join(none.dir, 'offline'), '');
+    assert.equal(await prLookup(process.cwd(), 'feat'), undefined, "offline: gh couldn't say");
+  } finally { none.restore(); }
+  // one account can't see the repo at all, the other sees no PR: none
+  const hidden = fakeGh(TWO, {});
+  writeFileSync(join(hidden.dir, 'hidden-tok-me'), '');
+  try { assert.equal(await prLookup(process.cwd(), 'feat'), null); } finally { hidden.restore(); }
+  // a remote that isn't on GitHub: there's no PR to find, which is a definite no
+  const plain = fakeGh(TWO, {});
+  writeFileSync(join(plain.dir, 'notgithub'), '');
+  try { assert.equal(await prLookup(process.cwd(), 'feat'), null); } finally { plain.restore(); }
+  // gh answers, but not with JSON: that says nothing either way
+  const garbled = fakeGh(TWO, {});
+  writeFileSync(join(garbled.dir, 'garbled'), '');
+  try { assert.equal(await prLookup(process.cwd(), 'feat'), undefined); } finally { garbled.restore(); }
+  // one account says there's none, the other can't be reached: it might be the one that sees the PR
+  const mixed = fakeGh(TWO.replace('account me', 'account no-token'), {});
+  try { assert.equal(await prLookup(process.cwd(), 'feat'), undefined); } finally { mixed.restore(); }
 });
 
 test("PuRR adds the folders where Claude Code's installer and Homebrew put tools to a short PATH, once each, after what's there", async () => {

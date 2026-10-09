@@ -16,8 +16,11 @@ export interface OpenPr extends PrInfo { repo: string; account: string }   // re
 
 const FIELDS = 'number,title,body,url,baseRefName,headRefName,headRefOid,isDraft,createdAt,state';
 
-/** `token`: one already read for the account, used as it is (no second keychain read that could fail). */
-async function gh(cwd: string, args: string[], opts: { input?: string; account?: string; token?: string } = {}) {
+/**
+ * One gh call as an account, with its exit code and output; null if it couldn't run (no token, no gh). `token`: one
+ * already read for the account, used as it is (no second keychain read that could fail).
+ */
+async function ghRun(cwd: string, args: string[], opts: { input?: string; account?: string; token?: string } = {}) {
   try {
     let env: NodeJS.ProcessEnv | undefined;
     if (opts.token) env = { ...process.env, GH_TOKEN: opts.token };
@@ -26,9 +29,13 @@ async function gh(cwd: string, args: string[], opts: { input?: string; account?:
       if (!token) return null;
       env = { ...process.env, GH_TOKEN: token };
     }
-    const r = await exec('gh', args, { cwd, input: opts.input, env, timeoutMs: 30_000 });
-    return r.code === 0 ? r.stdout : null;
+    return await exec('gh', args, { cwd, input: opts.input, env, timeoutMs: 30_000 });
   } catch { return null; }
+}
+
+async function gh(cwd: string, args: string[], opts: { input?: string; account?: string; token?: string } = {}) {
+  const r = await ghRun(cwd, args, opts);
+  return r && r.code === 0 ? r.stdout : null;
 }
 
 async function tokenFor(account: string): Promise<string | null> {
@@ -102,16 +109,33 @@ export function githubRepo(url: string | null | undefined): string | null {
 
 /** The open PR for a branch, trying each signed-in account (a private personal repo is only visible to one). */
 export async function prForBranch(repoPath: string, branch: string): Promise<PrInfo | null> {
-  for (const account of await ghAccounts()) {
-    const out = await gh(repoPath, ['pr', 'view', branch, '--json', FIELDS], { account });
-    if (!out) continue;
-    try {
-      const pr = JSON.parse(out) as PrInfo & { state?: string };
-      if (pr.state === 'OPEN') return { ...pr, account };   // gh also returns a branch's closed or merged PR
-      return null;
-    } catch { /* try the next account */ }
+  return (await prLookup(repoPath, branch)) ?? null;
+}
+
+/**
+ * A branch's open PR, trying each account; null when gh says there's none; undefined when gh couldn't say (signed
+ * out, offline, a timeout), which isn't the same as no PR.
+ */
+export async function prLookup(repoPath: string, branch: string): Promise<PrInfo | null | undefined> {
+  const accounts = await ghAccounts();
+  if (!accounts.length) return undefined;   // signed out: gh can't say
+  let unknown = false;
+  for (const account of accounts) {
+    const r = await ghRun(repoPath, ['pr', 'view', branch, '--json', FIELDS], { account });
+    if (!r) { unknown = true; continue; }
+    if (r.code === 0) {
+      try {
+        const pr = JSON.parse(r.stdout) as PrInfo & { state?: string };
+        if (pr.state === 'OPEN') return { ...pr, account };   // gh also returns a branch's closed or merged PR
+        return null;
+      } catch { unknown = true; continue; }   // garbled output says nothing either way
+    }
+    if (/no (open )?pull requests? found/i.test(r.stderr)) continue;   // this account sees no PR for it
+    if (/known GitHub host/i.test(r.stderr)) return null;   // not a GitHub remote at all: there's no PR to find
+    if (!/could not resolve to a repository/i.test(r.stderr)) unknown = true;   // (one that can't see the repo says nothing)
   }
-  return null;
+  // an account that couldn't answer might be the one that sees the PR: "none" only when every one that could see said so
+  return unknown ? undefined : null;
 }
 
 const OPEN_PRS = `query($n: Int!) { viewer { login pullRequests(first: $n, states: OPEN, orderBy: { field: UPDATED_AT, direction: DESC }) {
