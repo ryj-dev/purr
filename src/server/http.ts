@@ -1,42 +1,80 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { basename, extname, join, normalize, resolve, sep } from 'node:path';
-import type { AppState, Repo, ServerEvent, Settings, TriggerAssignment, TriggerKind } from '../shared/types.ts';
+import type { AppState, Repo, ServerEvent, Settings, ToolName, TriggerAssignment, TriggerKind } from '../shared/types.ts';
 import { TRIGGERS } from '../shared/types.ts';
 import type { DB } from './db.ts';
 import { BLOCK_TYPES } from './flows/blockTypes.ts';
 import { HttpError, createFlow, deleteFlow, setBlockOptions, updateFlow } from './flows/store.ts';
 import { validateFlow } from './flows/validate.ts';
 import { exportFlow, importFlow, previewImport } from './flows/share.ts';
+import { uniqueFolders } from './db.ts';
 import { remoteUrl, repoRoot } from './git.ts';
-import { ghAuthed } from './gh.ts';
+import { TOOL_NAMES, installMissing, installTool, onToolchainChange, openHomebrewInstall, openSignIn, refreshToolchain, toolchainStatus, toolsSummary } from './toolchain.ts';
 import type { RunManager } from './manager.ts';
 import type { PostPushWatcher } from './triggers.ts';
-import { newId, now, which } from './util.ts';
+import { Semaphore, newId, now, sharedCache } from './util.ts';
 import { VERSION, WEB_DIR as WEB } from './runtime.ts';
-import { GLOBAL_HOOKS_DIR, currentGlobalHooksPath } from './globalHooks.ts';
+import { GLOBAL_HOOKS_DIR, currentGlobalHooksPath, repoOwnHooksPath } from './globalHooks.ts';
 
 const MIME: Record<string, string> = {
   '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml',
   '.json': 'application/json', '.png': 'image/png', '.ico': 'image/x-icon', '.woff2': 'font/woff2',
 };
 
-let toolCache: { at: number; tools: AppState['tools'] } | null = null;
-async function tools(): Promise<AppState['tools']> {
-  if (toolCache && Date.now() - toolCache.at < 60_000) return toolCache.tools;
-  const [gh, gitleaks, zizmor, osv, claude] = await Promise.all(['gh', 'gitleaks', 'zizmor', 'osv-scanner', 'claude'].map(which));
-  const t = { gh, ghAuthed: gh ? await ghAuthed() : false, gitleaks, zizmor, osv, claude };
-  toolCache = { at: Date.now(), tools: t };
-  return t;
-}
+// every open window refetches state at once: they share one git call, kept for 30s (a failed one isn't kept)
+const globalHooksPath = sharedCache(
+  () => currentGlobalHooksPath().then((hooksPath) => ({ active: hooksPath === GLOBAL_HOOKS_DIR, hooksPath })), 30_000);
 
-let hooksCache: { at: number; v: AppState['globalHooks'] } | null = null;
-async function globalHooksState(): Promise<AppState['globalHooks']> {
-  if (hooksCache && Date.now() - hooksCache.at < 30_000) return hooksCache.v;
-  const hooksPath = await currentGlobalHooksPath();
-  const v = { active: hooksPath === GLOBAL_HOOKS_DIR, hooksPath };
-  hooksCache = { at: Date.now(), v };
-  return v;
+/**
+ * Which repos set their own core.hooksPath. That's a git call per repo, and a repo on a slow or unplugged volume can
+ * take seconds, so it never holds up /api/state (the desktop app gives up on it after 1.5s): the last result is
+ * served straight away and a stale one is refreshed in the background, a few repos at a time, one refresh at once.
+ * onChange fires when the answer changes, so open windows pick it up.
+ */
+export function ownHooksTracker(onChange: () => void, opts: { ttlMs?: number; check?: (repoPath: string) => Promise<string | null> } = {}) {
+  const ttlMs = opts.ttlMs ?? 30_000;
+  const check = opts.check ?? repoOwnHooksPath;
+  let known: Record<string, string> = {};
+  let checked = new Set<string>();
+  let at = 0;
+  let refreshing: Promise<void> | null = null;
+  let covering = new Set<string>();    // repo ids the running refresh checks
+  let waiting: Repo[] | null = null;   // a repo list with ids the running refresh doesn't cover
+  const gate = new Semaphore(4);
+  const refresh = async (repos: Repo[]) => {
+    const found = await Promise.all(repos.map(async (r) => {
+      const release = await gate.acquire();
+      // a repo that didn't answer in time keeps what was known about it
+      try { return [r.id, await check(r.path)] as const; } catch { return [r.id, known[r.id] ?? null] as const; } finally { release(); }
+    }));
+    const next: Record<string, string> = {};
+    for (const [id, p] of found) if (p) next[id] = p;
+    const changed = JSON.stringify(next) !== JSON.stringify(known);
+    known = next;
+    checked = new Set(repos.map((r) => r.id));
+    at = Date.now();
+    if (changed) onChange();
+  };
+  const start = (repos: Repo[]) => {
+    covering = new Set(repos.map((r) => r.id));
+    refreshing = refresh(repos).catch(() => {}).finally(() => {
+      refreshing = null;
+      const next = waiting;
+      waiting = null;
+      if (next) start(next);
+    });
+  };
+  return {
+    get(repos: Repo[]): Record<string, string> {
+      const unseen = repos.some((r) => !checked.has(r.id));
+      if (refreshing) { if (repos.some((r) => !covering.has(r.id))) waiting = repos; }
+      else if (unseen || Date.now() - at >= ttlMs) start(repos);
+      return known;
+    },
+    /** Resolves once no refresh is running or waiting (for tests). */
+    async settled() { while (refreshing) await refreshing; },
+  };
 }
 
 async function body<T>(req: IncomingMessage): Promise<T> {
@@ -75,6 +113,11 @@ export function startHttp(db: DB, mgr: RunManager, watcher: PostPushWatcher, por
     for (const c of clients) c.write(line);
   });
   const broadcastState = () => mgr.emit({ type: 'state' });
+  onToolchainChange((settled) => {
+    mgr.emit({ type: 'tools' });
+    if (settled) broadcastState();   // the sidebar's summary
+  });
+  const ownHooks = ownHooksTracker(broadcastState);
 
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://localhost');
@@ -107,17 +150,40 @@ export function startHttp(db: DB, mgr: RunManager, watcher: PostPushWatcher, por
         return;
       }
       if (a === 'state' && m === 'GET') {
+        const repos = db.listRepos();
         const state: AppState = {
-          settings: db.getSettings(), usage: db.getUsage(), repos: db.listRepos(), flows: db.listFlows(),
-          triggers: db.listTriggers(), tools: await tools(), version: VERSION,
-          globalHooks: await globalHooksState(),
+          settings: db.getSettings(), usage: db.getUsage(), repos, flows: db.listFlows(),
+          triggers: db.listTriggers(), tools: await toolsSummary(), version: VERSION,
+          globalHooks: { ...(await globalHooksPath()), ownHooks: ownHooks.get(repos) },
         };
         return send(200, state);
+      }
+      if (a === 'tools') {
+        if (!id && m === 'GET') {
+          if (url.searchParams.has('fresh')) refreshToolchain();
+          return send(200, await toolchainStatus());
+        }
+        if (id === 'install-missing' && m === 'POST') return send(202, { installing: await installMissing() });
+        if (id === 'homebrew' && sub === 'install' && m === 'POST') {
+          try { await openHomebrewInstall(); } catch (e: any) { throw new HttpError(400, String(e?.message ?? e)); }
+          return send(200, { ok: true });
+        }
+        if (id && !TOOL_NAMES.includes(id as ToolName)) throw new HttpError(404, `Unknown tool ${id}`);
+        if (id && sub === 'install' && m === 'POST') { installTool(id as ToolName); return send(202, { ok: true }); }
+        if (id && sub === 'signin' && m === 'POST') {
+          try { await openSignIn(id as ToolName); } catch (e: any) { throw new HttpError(400, String(e?.message ?? e)); }
+          return send(200, { ok: true });
+        }
       }
       if (a === 'usage' && m === 'GET') return send(200, db.getUsage());
       if (a === 'settings' && m === 'PUT') {
         const patch = await body<Partial<Settings>>(req);
         const next = { ...db.getSettings(), ...patch };
+        if (Array.isArray(patch.projectFolders)) {
+          const home = process.env.HOME ?? '';
+          next.projectFolders = uniqueFolders(patch.projectFolders.map((f) => String(f).trim()).filter(Boolean)   // resolve('') would be the service's cwd
+            .map((f) => resolve(f.replace(/^~(?=\/|$)/, home))));
+        }
         if (!(next.maxConcurrentClaude >= 1)) throw new HttpError(400, 'Max concurrent Claude sessions must be at least 1');
         if (!(next.port > 0 && next.port < 65536)) throw new HttpError(400, 'Port must be 1-65535');
         db.setSettings(next);

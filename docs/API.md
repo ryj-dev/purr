@@ -23,6 +23,27 @@ interface BlockTypeInfo {
 }
 ```
 
+## Toolchain
+| Method | Path | Body | Returns |
+|---|---|---|---|
+| GET | `/api/tools` | `?fresh=1` skips the short status cache | `Toolchain` |
+| POST | `/api/tools/:name/install` | | 202; progress shows in the tool's `job` |
+| POST | `/api/tools/install-missing` | | 202 `{ installing: ToolName[] }`, installed one at a time |
+| POST | `/api/tools/homebrew/install` | | opens Terminal on Homebrew's installer |
+| POST | `/api/tools/:name/signin` | | `claude` or `gh`: opens Terminal on its login (for gh, also adds another account) |
+
+`:name` is `gitleaks`, `zizmor`, `osv-scanner`, `claude` or `gh`. All of them install with Homebrew (`brew install`, claude as `--cask claude-code`). Each change to an install sends a `tools` event, and a finished or failed one also sends `state`.
+
+```ts
+interface Toolchain { homebrew: { installed: boolean; path: string | null }; tools: ToolStatus[] }
+interface ToolStatus {
+  name: ToolName; purpose: string; installed: boolean; path: string | null; version: string | null;
+  source: 'homebrew' | 'claude-installer' | 'other' | null;   // from its path
+  auth: { signedIn: boolean; accounts: string[]; detail?: string } | null;   // claude and gh only
+  job: { state: 'running' | 'failed'; step: string; error?: string } | null;
+}
+```
+
 ## Flows
 | Method | Path | Body | Returns |
 |---|---|---|---|

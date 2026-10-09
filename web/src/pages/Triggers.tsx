@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useState } from 'react';
 import { TRIGGERS, type Repo, type TriggerAssignment, type TriggerKind } from '../../../src/shared/types.ts';
+import { lockedBy, ownHooksCount } from '../../../src/shared/ownHooks.ts';
 import { api, errMsg } from '../api.ts';
 import { useApp } from '../state.tsx';
 import { useToast } from '../components/Toast.tsx';
 import { Confirm } from '../components/Modal.tsx';
 import { ErrorCard, PageHeader, SkeletonRows, triggerIcon } from '../components/ui.tsx';
-import { Ban, FolderGit2, FolderPlus, Globe, LoaderCircle, Plus, ShieldCheck, Trash, TriangleAlert, Undo2 } from 'lucide-react';
+import { Ban, FolderGit2, FolderPlus, Globe, LoaderCircle, Lock, Plus, ShieldCheck, Trash, TriangleAlert, Undo2 } from 'lucide-react';
 
 const EXPLAIN: Record<TriggerKind, string> = {
   'pre-commit': 'Blocks the commit if the gate fails. Keep it fast: scanners only.',
@@ -70,7 +71,18 @@ export function TriggersPage() {
 
   const flowName = (id: string | null | undefined) => (id ? flows.find((f) => f.id === id)?.name ?? 'missing flow' : 'Disabled');
 
+  const ownHooks = gh?.ownHooks ?? {};
+  const ownCount = ownHooksCount(repos, ownHooks);
+
   const cell = (trigger: TriggerKind, repoId: string | null) => {
+    const own = lockedBy(trigger, repoId, ownHooks);
+    if (own) {
+      return (
+        <div className="locked-cell" title={`This repo sets its own core.hooksPath (${own}), so git never runs PuRR's ${trigger} hook here. Its own hooks still run, and so do post-push PR reviews.`}>
+          <Lock size={13} />Skipped: own hooks
+        </div>
+      );
+    }
     const row = get(trigger, repoId);
     const value = row ? (row.flowId ?? '__disabled') : repoId ? '__inherit' : '__disabled';
     const globalRow = get(trigger, null);
@@ -86,7 +98,7 @@ export function TriggersPage() {
   return (
     <div className="page">
       <PageHeader title="Repos & triggers"
-        sub={<>PuRR covers every git repository while it's running; each appears here on its first commit or push. Choose which flow runs on each trigger: the Global row applies everywhere, a repo row overrides it, and <b>Exclude</b> leaves a repo out entirely.</>} />
+        sub={<>PuRR covers every git repository while it's running. Repos appear here on their first commit or push, and repos in your project folders (Settings) are found automatically. Choose which flow runs on each trigger: the Global row applies everywhere, a repo row overrides it, and <b>Exclude</b> leaves a repo out entirely.</>} />
       {gh && (
         <div className={`banner inline ${gh.active ? 'info' : 'warn'}`} style={{ marginBottom: 16 }}>
           {gh.active ? <ShieldCheck size={15} /> : <TriangleAlert size={15} />}
@@ -94,6 +106,14 @@ export function TriggersPage() {
             {gh.active
               ? <>Commit and push checks are active in every repo: git's global <code>core.hooksPath</code> points at PuRR's hooks, which run each repo's own hooks first. Quitting PuRR turns them off.</>
               : <>Commit and push checks are <b>not</b> active: git's global <code>core.hooksPath</code> is {gh.hooksPath ? <code>{gh.hooksPath}</code> : 'unset'}. Restart the PuRR service to reinstall them.</>}
+          </span>
+        </div>
+      )}
+      {gh?.active && ownCount > 0 && (
+        <div className="banner inline warn" style={{ marginBottom: 16 }}>
+          <Lock size={15} />
+          <span>
+            {ownCount === 1 ? '1 repo uses its' : `${ownCount} repos use their`} own git hooks (a repo-level <code>core.hooksPath</code>, like husky or <code>.githooks</code>). Git runs those instead of PuRR's, so commit and push checks are <b>skipped</b> there. Post-push PR reviews still run.
           </span>
         </div>
       )}
@@ -124,7 +144,8 @@ export function TriggersPage() {
                       <div className="scope">
                         <span className="ic"><FolderGit2 size={14} /></span>
                         <div style={{ minWidth: 0, flex: 1 }}>
-                          <div className="cell-main">{r.name}{out && <span className="chip" style={{ marginLeft: 8 }}>Excluded</span>}</div>
+                          <div className="cell-main">{r.name}{out && <span className="chip" style={{ marginLeft: 8 }}>Excluded</span>}
+                            {!out && ownHooks[r.id] && <span className="chip warn" style={{ marginLeft: 8 }} title={`core.hooksPath = ${ownHooks[r.id]}`}>Own hooks</span>}</div>
                           <div className="cell-sub mono" title={r.remoteUrl ?? undefined}>{r.path}</div>
                         </div>
                         <div className="row-actions">

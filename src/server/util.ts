@@ -15,6 +15,15 @@ export const paths = {
 };
 for (const p of [paths.home, paths.worktrees, paths.scratch, paths.logs]) mkdirSync(p, { recursive: true });
 
+// Also look where Claude Code's installer and Homebrew put things, in case this process started with a PATH that
+// misses them, e.g. a tool installed from the Toolchain popup (the hooks and the service both import this module).
+export function withToolDirs(path: string | undefined, home: string): string {
+  const dirs = [...new Set((path || '/usr/bin:/bin:/usr/sbin:/sbin').split(':').filter(Boolean))];
+  const extra = [join(home, '.local/bin'), '/opt/homebrew/bin', '/usr/local/bin'].filter((d) => !dirs.includes(d));
+  return [...dirs, ...extra].join(':');
+}
+process.env.PATH = withToolDirs(process.env.PATH, homedir());
+
 export const ROOT = fileURLToPath(new URL('../..', import.meta.url)).replace(/\/$/, '');
 
 export const now = () => new Date().toISOString();
@@ -69,10 +78,6 @@ export function exec(cmd: string, args: string[], opts: {
     child.stdin.on('error', () => {});
     if (opts.input !== undefined) child.stdin.end(opts.input); else child.stdin.end();
   });
-}
-
-export async function which(bin: string): Promise<boolean> {
-  try { return (await exec('/usr/bin/which', [bin])).code === 0; } catch { return false; }
 }
 
 export class Semaphore {
@@ -131,4 +136,20 @@ export function extractJson(text: string, kind: 'array' | 'object' = 'array'): u
     }
   }
   return found;
+}
+
+/**
+ * `fn` at most once per `ttlMs`: concurrent callers share one call, and a failed call isn't kept, so the next caller
+ * tries again.
+ */
+export function sharedCache<T>(fn: () => Promise<T>, ttlMs: number): () => Promise<T> {
+  let cache: { at: number; v: Promise<T> } | null = null;
+  return () => {
+    if (!cache || Date.now() - cache.at >= ttlMs) {
+      const v = fn();
+      cache = { at: Date.now(), v };
+      v.catch(() => { if (cache?.v === v) cache = null; });
+    }
+    return cache.v;
+  };
 }

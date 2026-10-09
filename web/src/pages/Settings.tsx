@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Settings } from '../../../src/shared/types.ts';
 import { api, errMsg } from '../api.ts';
 import { useApp } from '../state.tsx';
@@ -6,7 +6,9 @@ import { useToast } from '../components/Toast.tsx';
 import { UsageMeter } from '../components/UsageMeter.tsx';
 import { fmtTime } from '../util.ts';
 import { PageHeader } from '../components/ui.tsx';
-import { Save, SquareTerminal } from 'lucide-react';
+import { numFieldHandlers, syncValue } from '../numText.ts';
+import { cliAction } from '../../../src/shared/cliLink.ts';
+import { Check, Save, SquareTerminal } from 'lucide-react';
 
 function DesktopCard() {
   const toast = useToast();
@@ -16,9 +18,19 @@ function DesktopCard() {
   const toggle = async (on: boolean) => {
     try { setLogin(await bridge.setLoginItem(on)); } catch (e) { toast(errMsg(e), 'error'); }
   };
+  const [cliState, setCliState] = useState<Awaited<ReturnType<PurrDesktop['cliStatus']>> | null>(null);
+  const loadCli = useCallback(() => { bridge.cliStatus?.().then(setCliState, () => setCliState(null)); }, [bridge]);
+  useEffect(() => {
+    loadCli();
+    // installed from the tray, or changed in a terminal, while this page was open
+    window.addEventListener('focus', loadCli);
+    return () => window.removeEventListener('focus', loadCli);
+  }, [loadCli]);
+  const act = cliState ? cliAction(cliState) : null;
   const cli = async () => {
     const r = await bridge.installCli();
     toast(r.message, r.ok ? 'ok' : 'error');
+    loadCli();
   };
   return (
     <div className="card">
@@ -35,11 +47,37 @@ function DesktopCard() {
       <div className="set-row">
         <div>
           <div className="t">Command line tool</div>
-          <div className="d">Links <code>~/.local/bin/purr</code> to this app, so you can use <code>purr run</code> and <code>purr hooks</code> from a terminal.</div>
+          <div className="d">Links <code>~/.local/bin/purr</code> to this app, so you can use <code>purr run</code> and <code>purr hooks</code> from a terminal.
+            {act?.note && <> {act.note}</>}</div>
         </div>
-        <button onClick={cli}><SquareTerminal size={13} />Install <code>purr</code></button>
+        {act?.kind === 'done' ? (
+          <span className="chip ok" title={`${cliState!.link} → ${cliState!.target}`}><Check size={12} />{act.button}</span>
+        ) : act?.kind === 'blocked' ? (
+          <span className="chip warn" title={act.note}>{act.button}</span>
+        ) : (
+          <button onClick={cli}><SquareTerminal size={13} />{act?.button ?? 'Install purr'}</button>
+        )}
       </div>
     </div>
+  );
+}
+
+/**
+ * A number setting edited as text: clearing the box to type a new value leaves it empty (no 0 filled in, so 4 -> 6
+ * doesn't become 06). Leaving it empty, or not a number, puts the last value back when you leave the box.
+ */
+function NumField({ label, hint, value, onChange }: { label: string; hint?: string; value: number; onChange: (v: number) => void }) {
+  const [text, setText] = useState(String(value));
+  const memo = useRef({ before: null as number | null, saved: null as number | null }).current;   // kept across renders, for the edit in progress
+  const box = numFieldHandlers(() => ({ text, value }), setText, onChange, memo);
+  const last = useRef<number | undefined>(undefined);
+  useEffect(() => { last.current = syncValue(last.current, value, box); });
+  return (
+    <label className="field">
+      <span>{label}</span>
+      <input type="number" min={0} value={text} onChange={(e) => box.type(e.target.value)} onFocus={box.focus} onBlur={box.blur} />
+      {hint && <span className="hint">{hint}</span>}
+    </label>
   );
 }
 
@@ -48,10 +86,11 @@ export function SettingsPage() {
   const toast = useToast();
   const [s, setS] = useState<Settings | null>(null);
   const [extra, setExtra] = useState('');
+  const [folders, setFolders] = useState('');
   const [dirty, setDirty] = useState(false);
 
   useEffect(() => {
-    if (state && !dirty) { setS(state.settings); setExtra(state.settings.claudeExtraArgs.join('\n')); }
+    if (state && !dirty) { setS(state.settings); setExtra(state.settings.claudeExtraArgs.join('\n')); setFolders(state.settings.projectFolders.join('\n')); }
   }, [state, dirty]);
 
   if (!s || !state) {
@@ -66,15 +105,12 @@ export function SettingsPage() {
   const u = state.usage;
   const upd = (p: Partial<Settings>) => { setS({ ...s, ...p }); setDirty(true); };
   const num = (k: keyof Settings, label: string, hint?: string) => (
-    <label className="field">
-      <span>{label}</span>
-      <input type="number" value={s[k] as number} min={0} onChange={(e) => upd({ [k]: Number(e.target.value) } as Partial<Settings>)} />
-      {hint && <span className="hint">{hint}</span>}
-    </label>
+    <NumField label={label} hint={hint} value={s[k] as number} onChange={(v) => upd({ [k]: v } as Partial<Settings>)} />
   );
   const save = async () => {
     try {
-      const next = await api.saveSettings({ ...s, claudeExtraArgs: extra.split('\n').map((x) => x.trim()).filter(Boolean) });
+      const lines = (t: string) => t.split('\n').map((x) => x.trim()).filter(Boolean);
+      const next = await api.saveSettings({ ...s, claudeExtraArgs: lines(extra), projectFolders: lines(folders) });
       setS(next);
       setDirty(false);
       toast(next.port !== state.settings.port ? 'Saved. Restart the daemon for the new port.' : 'Saved', 'ok');
@@ -119,6 +155,12 @@ export function SettingsPage() {
           {num('pollIntervalSec', 'PR poll interval (seconds)')}
           {num('debounceSec', 'Post-push debounce (seconds)', 'A newer push within this window replaces the queued run.')}
         </div>
+        <label className="field">
+          <span>Project folders (one per line)</span>
+          <textarea rows={3} value={folders} onChange={(e) => { setFolders(e.target.value); setDirty(true); }} spellCheck={false}
+            placeholder="~/Documents/github" />
+          <span className="hint">Git repos in these folders, and one level down, are registered automatically, so their open PRs are reviewed after each push even where git's hooks can't reach (a repo with its own <code>core.hooksPath</code>).</span>
+        </label>
         <label className="field">
           <span>Extra claude arguments (one per line)</span>
           <textarea rows={4} value={extra} onChange={(e) => { setExtra(e.target.value); setDirty(true); }} spellCheck={false} />

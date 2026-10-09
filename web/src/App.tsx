@@ -8,6 +8,7 @@ import { AppContext } from './state.tsx';
 import type { AppState } from '../../src/shared/types.ts';
 import { ToastProvider } from './components/Toast.tsx';
 import { UsageMeter } from './components/UsageMeter.tsx';
+import { ToolchainPopup } from './components/ToolchainPopup.tsx';
 import { Logo } from './components/ui.tsx';
 import { RunsPage } from './pages/Runs.tsx';
 import { RunDetailPage } from './pages/RunDetail.tsx';
@@ -40,6 +41,7 @@ export function App() {
   const [state, setState] = useState<AppState | null>(null);
   const [blockTypes, setBlockTypes] = useState<BlockTypeInfo[]>([]);
   const [reachable, setReachable] = useState(true);
+  const [toolchainOpen, setToolchainOpen] = useState(false);
   const [connected, setConnected] = useState(false);
 
   const refresh = useCallback(async () => {
@@ -106,7 +108,7 @@ export function App() {
             </nav>
             <div className="foot">
               {tools && (
-                <div className="toolchain" aria-label="Toolchain">
+                <button type="button" className="toolchain" onClick={() => setToolchainOpen(true)} title="Install tools and sign in">
                   <h3>Toolchain</h3>
                   <ul className="tools">
                     {(['gitleaks', 'zizmor', 'osv', 'claude'] as const).map((t) => (
@@ -115,8 +117,9 @@ export function App() {
                     <li className={`tool ${tools.gh && tools.ghAuthed ? 'on' : 'off'}`}
                       title={!tools.gh ? 'gh not installed' : tools.ghAuthed ? 'gh authenticated' : 'gh not authenticated: PR detection and comments disabled'}><i />gh</li>
                   </ul>
-                </div>
+                </button>
               )}
+              {toolchainOpen && <ToolchainPopup onClose={() => setToolchainOpen(false)} />}
               <div className={`conn ${connected ? 'on' : ''}`} title={connected ? 'Receiving live updates from the PuRR service' : 'Not connected to the live event stream'}>
                 <i />{connected ? 'Live' : 'Not live'}
               </div>

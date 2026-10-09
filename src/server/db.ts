@@ -2,7 +2,26 @@ import { DatabaseSync } from 'node:sqlite';
 import type {
   BlockRun, Finding, Flow, FlowMeta, LedgerItem, Repo, Run, Settings, TriggerAssignment, TriggerKind, Usage,
 } from '../shared/types.ts';
+import { existsSync, realpathSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import { now, paths } from './util.ts';
+
+// Common places people keep their clones; the ones that exist on this machine are watched by default.
+const COMMON_PROJECT_FOLDERS = ['Documents/github', 'Documents/GitHub', 'github', 'GitHub', 'code', 'Code', 'src', 'projects',
+  'Projects', 'dev', 'Developer', 'repos', 'workspace', 'git'];
+/** Real on-disk paths, without duplicates: on a case-insensitive disk ~/Documents/github and ~/Documents/GitHub are one folder. */
+export function uniqueFolders(folders: string[]): string[] {
+  const out = new Map<string, string>();
+  for (const f of folders) {
+    if (!existsSync(f)) { out.set(f, f); continue; }
+    const real = realpathSync.native(f);
+    if (!out.has(real.toLowerCase())) out.set(real.toLowerCase(), real);
+  }
+  return [...out.values()];
+}
+export const defaultProjectFolders = () =>
+  uniqueFolders(COMMON_PROJECT_FOLDERS.map((f) => join(homedir(), f)).filter((p) => existsSync(p)));
 
 export const DEFAULT_SETTINGS: Settings = {
   claudeBin: 'claude',
@@ -15,6 +34,7 @@ export const DEFAULT_SETTINGS: Settings = {
   notifications: true,
   reviewsPaused: false,
   postPushPrsOnly: true,
+  projectFolders: [],          // filled with defaultProjectFolders() on first read
   port: 7878,
 };
 
@@ -57,8 +77,12 @@ export function openDb(file = paths.db) {
     close: () => db.close(),
 
     // settings / usage
-    getSettings: (): Settings => kvGet('settings', DEFAULT_SETTINGS),
-    setSettings: (s: Settings) => kvSet('settings', s),
+    getSettings: (): Settings => {
+      const s = kvGet('settings', DEFAULT_SETTINGS);
+      return s.projectFolders.length || kvGet('settings', { projectFoldersSet: false } as { projectFoldersSet: boolean }).projectFoldersSet
+        ? s : { ...s, projectFolders: defaultProjectFolders() };
+    },
+    setSettings: (s: Settings) => kvSet('settings', { ...s, projectFoldersSet: true }),
     getUsage: (): Usage => {
       const u = kvGet('usage', EMPTY_USAGE);
       const since = new Date(); since.setHours(0, 0, 0, 0);

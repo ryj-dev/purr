@@ -5,7 +5,7 @@
 // the CLI or an older launch agent), the app attaches to it instead of starting a second one.
 
 import { spawn, execFile, type ChildProcess } from 'node:child_process';
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync, symlinkSync, lstatSync, readlinkSync, unlinkSync } from 'node:fs';
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -13,6 +13,8 @@ import {
   BrowserWindow, Menu, Notification, Tray, app, dialog, ipcMain, nativeImage, shell, type MenuItemConstructorOptions,
 } from 'electron';
 import type { AppState, Run, ServerEvent } from '../src/shared/types.ts';
+import { cliStatusOf, installCliAt } from './cliLink.ts';
+import { cliAction, cliTrayItem } from '../src/shared/cliLink.ts';
 
 const PURR_HOME = process.env.PURR_HOME || join(homedir(), '.purr');
 const LOG = join(PURR_HOME, 'logs', 'daemon.log');
@@ -296,6 +298,7 @@ async function api(method: string, path: string, body?: unknown) {
 }
 
 function updateTray() {
+  const cli = cliAction(cliStatus());   // read once: the link could change between two reads
   if (!tray) return;
   const { line, active } = trayStatus();
   tray.setTitle(active ? ` ${active}` : '', { fontType: 'monospacedDigit' });
@@ -337,7 +340,8 @@ function updateTray() {
       click: (item) => { setLoginItem(item.checked); updateTray(); },
     },
     { type: 'separator' },
-    { label: 'Install command line tool…', click: async () => { const r = installCli(); dialog.showMessageBox({ message: r.ok ? 'The purr command line tool is installed' : 'Couldn\'t install the command line tool', detail: r.message }); } },
+    // installed, or something in the way that only you can move: shown, not clickable
+    cliTrayItem(cli, () => { const r = installCli(); updateTray(); void dialog.showMessageBox({ message: r.ok ? 'The purr command line tool is installed' : 'Couldn\'t install the command line tool', detail: r.message }); }),
     { label: mode === 'external' ? 'Service: started outside the app' : 'Restart service', enabled: mode !== 'external', click: () => restartService() },
     { label: 'Open service log', click: () => shell.openPath(LOG) },
     { type: 'separator' },
@@ -358,28 +362,17 @@ function setLoginItem(enabled: boolean): boolean {
   return loginItemEnabled();
 }
 
-function installCli(): { ok: boolean; message: string } {
-  const dir = join(homedir(), '.local', 'bin');
-  const link = join(dir, 'purr');
-  try {
-    mkdirSync(dir, { recursive: true });
-    if (existsSync(link) || (() => { try { lstatSync(link); return true; } catch { return false; } })()) {
-      const st = lstatSync(link);
-      if (!st.isSymbolicLink()) return { ok: false, message: `${link} exists and isn't a link; remove it first.` };
-      if (readlinkSync(link) === SHIM) return { ok: true, message: `${link} already points at this app.` };
-      unlinkSync(link);
-    }
-    symlinkSync(SHIM, link);
-    const onPath = (userPath || '').split(':').includes(dir);
-    return { ok: true, message: `Linked ${link} → ${SHIM}.${onPath ? '' : ` Add ${dir} to your PATH to use it.`}` };
-  } catch (e) {
-    return { ok: false, message: (e as Error).message };
-  }
-}
+const CLI_DIR = join(homedir(), '.local', 'bin');
+const CLI_LINK = join(CLI_DIR, 'purr');
+
+const cliStatus = () => cliStatusOf(CLI_LINK, SHIM, userPath || '');
+
+const installCli = () => installCliAt(CLI_LINK, SHIM, userPath || '');
 
 ipcMain.handle('purr:get-login-item', () => loginItemEnabled());
 ipcMain.handle('purr:set-login-item', (_e, on: boolean) => { const r = setLoginItem(!!on); updateTray(); return r; });
-ipcMain.handle('purr:install-cli', () => installCli());
+ipcMain.handle('purr:install-cli', () => { const r = installCli(); updateTray(); return r; });
+ipcMain.handle('purr:cli-status', () => cliStatus());
 ipcMain.on('purr:version', (e) => { e.returnValue = app.getVersion(); });
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -444,7 +437,7 @@ if (!app.requestSingleInstanceLock()) {
     const icon = nativeImage.createFromPath(TRAY_ICON);
     icon.setTemplateImage(true);
     tray = new Tray(icon);
-    tray.on('click', () => tray?.popUpContextMenu());
+    tray.on('click', () => { updateTray(); tray?.popUpContextMenu(); });   // fresh: the CLI link may have changed
     updateTray();
 
     appLog('ready');
