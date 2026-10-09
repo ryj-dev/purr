@@ -92,4 +92,4 @@ interface ToolStatus {
 | Method | Path | Body |
 |---|---|---|
 | POST | `/api/hooks/notify` | `{ runId }`: a CLI-run hook flow finished; rebroadcast it |
-| POST | `/api/hooks/push-intent` | `{ repoPath, branch, sha, remote, from }`: from pre-push; `from` is the branch's tip on the remote before this push (`null` for a new branch; omitted, the daemon takes what it sees first). The daemon confirms the push landed, debounces, and queues the post-push flow, and records what became of the push for `purr findings --wait`: pending, no open PR, superseded by a newer push (a tip other than `from` and `sha`), or skipped |
+| POST | `/api/hooks/push-intent` | `{ repoPath, branch, sha, remote, from }`: from pre-push; `from` is the branch's tip on the remote before this push, required (`null` for a new branch). The daemon confirms the push landed, debounces, and queues the post-push flow, and records what became of the push for `purr findings --wait`: pending, no open PR, superseded by a newer push (a tip other than `from` and `sha`), or skipped |
