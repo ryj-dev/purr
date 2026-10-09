@@ -47,15 +47,17 @@ export const runPr = (pr: PrInfo): NonNullable<Run['pr']> => ({ number: pr.numbe
 export function completeBlocks(blocks: Array<{ id: string }>, runs: Map<string, BlockRun>) {
   const complete = new Set<string>();
   const unchecked = new Map<string, Set<string>>();
+  const tools = new Map<string, string>();   // a secrets block: the tool that actually ran in it
   for (const b of blocks) {
     const br = runs.get(b.id);
     if (br?.status !== 'done') continue;
     const sc = br.output?.scanner;
     if (sc && sc.state !== 'ran' && sc.state !== 'n/a' && sc.state !== 'partial') continue;
     if (sc?.state === 'partial') unchecked.set(b.id, new Set((sc.incomplete ?? []).map((x) => x.file)));
+    if (sc?.tool) tools.set(b.id, sc.tool);
     complete.add(b.id);
   }
-  return { complete, unchecked };
+  return { complete, unchecked, tools };
 }
 
 export class RunManager {
@@ -211,7 +213,7 @@ export class RunManager {
       );
       await fingerprintAll(result.findings, material);
       const checked = result.failedBlocks.length === 0 && !controller.signal.aborted ? completeBlocks(run.flow.blocks, result.blocks) : null;
-      applyLedger(this.db, run, result.findings, checked?.complete ?? null, checked?.unchecked);
+      applyLedger(this.db, run, result.findings, checked?.complete ?? null, checked?.unchecked, checked?.tools);
       this.db.setRunFindings(run.id, result.findings);
       run.counts = countBySeverity(active(result.findings));
       if (controller.signal.aborted) {

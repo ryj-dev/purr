@@ -29,7 +29,7 @@ const LOCKS = /(^|\/)(package-lock\.json|npm-shrinkwrap\.json|yarn\.lock|pnpm-lo
 const SCAN_CONFIG = new Set(['.betterleaks.toml', '.gitleaks.toml', '.betterleaksignore', '.gitleaksignore']);
 const AS_DATA = '.purr-scan';
 /** One hadolint / actionlint call (one file). A setting so the tests can make it short. */
-export const limits = { fileMs: 60_000 };
+export const limits = { fileMs: 60_000, osvMs: 120_000 };
 
 // zizmor rule -> [headline, what goes wrong, fix]
 const ZIZMOR: Record<string, [string, string, string]> = {
@@ -97,7 +97,8 @@ const safePath = (p: string) => !p.split('/').includes('..') && !p.startsWith('/
 const isMissing = (e: any) => e?.code === 'ENOENT';
 
 /** betterleaks, or gitleaks if only that is installed: same report either way, findings say which one ran. */
-async function secrets(blockId: string, files: ChangedFile[], work: string, signal?: AbortSignal): Promise<Finding[] | null> {
+async function secrets(blockId: string, files: ChangedFile[], work: string, ran: { tool?: 'betterleaks' | 'gitleaks' }, signal?: AbortSignal):
+  Promise<Finding[] | null> {
   const root = join(work, 'secrets');
   let any = false;
   for (const f of files) {
@@ -124,6 +125,7 @@ async function secrets(blockId: string, files: ChangedFile[], work: string, sign
     tool = 'gitleaks';   // older installs: gitleaks has the same flags, and never validates
     r = await exec('gitleaks', common, { cwd: work, timeoutMs: 300_000, signal });
   }
+  ran.tool = tool;   // the ledger needs to know: betterleaks' silence can't close what only gitleaks raises
   let hits: Array<Record<string, any>> | null = null;
   try { hits = existsSync(rep) ? JSON.parse(readFileSync(rep, 'utf8') || 'null') : null; } catch { /* below */ }
   const realPath = (p: string) => (p.endsWith(AS_DATA) && SCAN_CONFIG.has(basename(p.slice(0, -AS_DATA.length))) ? p.slice(0, -AS_DATA.length) : p);
@@ -171,7 +173,8 @@ async function zizmor(blockId: string, files: ChangedFile[], change: ChangeSpec,
 type Vuln = { ver: string; sev: number; summary: string; fixed: string[] };
 async function osvScan(path: string, signal?: AbortSignal): Promise<Map<string, Vuln>> {
   // --no-resolve: the file is a full pinned tree, read as it is
-  const r = await exec('osv-scanner', ['scan', 'source', '--no-resolve', '--all-packages', '--format', 'json', '-L', path], { timeoutMs: 120_000, signal });
+  const r = await exec('osv-scanner', ['scan', 'source', '--no-resolve', '--all-packages', '--format', 'json', '-L', path], { timeoutMs: limits.osvMs, signal });
+  if (r.timedOut && !signal?.aborted) throw new Error(`osv-scanner timed out after ${limits.osvMs / 1000}s`);
   const vulns = new Map<string, Vuln>();
   if (r.code === 128) return vulns;   // no packages in the file
   let data: any = null;
@@ -389,9 +392,11 @@ export async function runScanner(name: ScannerName, blockId: string, files: Chan
   const t0 = Date.now();
   const incomplete: Incomplete = [];
   const secs = () => (Date.now() - t0) / 1000;
+  const ran: { tool?: 'betterleaks' | 'gitleaks' } = {};
+  const tool = () => (ran.tool ? { tool: ran.tool } : {});
   try {
     // 'gitleaks': a flow saved before betterleaks replaced it
-    const got = name === 'betterleaks' || name === 'gitleaks' ? await secrets(blockId, files, work, signal)
+    const got = name === 'betterleaks' || name === 'gitleaks' ? await secrets(blockId, files, work, ran, signal)
       : name === 'zizmor' ? await zizmor(blockId, files, change, work, signal)
       : name === 'hadolint' ? await hadolint(blockId, files, change, work, incomplete, signal)
       : name === 'actionlint' ? await actionlint(blockId, files, change, work, incomplete, signal)
@@ -399,14 +404,15 @@ export async function runScanner(name: ScannerName, blockId: string, files: Chan
     if (signal?.aborted) throw new Cancelled();
     const findings = got ? group(got) : [];
     if (got === null) return { findings, state: { state: 'n/a', secs: secs() } };
-    return { findings, state: incomplete.length ? { state: 'partial', hits: findings.length, incomplete, secs: secs() } : { state: 'ran', hits: findings.length, secs: secs() } };
+    return { findings, state: incomplete.length ? { state: 'partial', hits: findings.length, incomplete, secs: secs(), ...tool() }
+      : { state: 'ran', hits: findings.length, secs: secs(), ...tool() } };
   } catch (e: any) {
     if (signal?.aborted) throw new Cancelled();
     const missing = isMissing(e);
-    const tool = name === 'gitleaks' ? 'betterleaks' : name;
+    const named = name === 'gitleaks' ? 'betterleaks' : name;
     const found = e instanceof ScanFailed ? group(e.found) : [];
     return { findings: found, state: { state: missing ? 'not installed' : 'failed', ...(found.length ? { hits: found.length } : {}),
-      error: missing ? `${tool} is not on PATH` : String(e?.message ?? e), secs: secs() } };
+      error: missing ? `${named} is not on PATH` : String(e?.message ?? e), secs: secs(), ...(missing ? {} : tool()) } };
   } finally {
     rmSync(work, { recursive: true, force: true });
   }

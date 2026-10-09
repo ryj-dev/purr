@@ -99,6 +99,7 @@ test('without betterleaks, gitleaks does the job; with neither, the scanner says
     const r = await runScanner('betterleaks', 'scan-betterleaks', files, change);
     assert.equal(r.state.state, 'ran', r.state.error ?? '');
     assert.equal(r.findings[0].source.scanner, 'gitleaks', 'says which one ran');
+    assert.equal(r.state.tool, 'gitleaks', 'and so does the state, for the ledger');
     assert.ok(!readFileSync(join(t.dir, 'gitleaks.args'), 'utf8').includes('--validation'), "gitleaks has no such flag (and never validates)");
   } finally { t.restore(); }
   t = fakeTools({});
@@ -111,6 +112,7 @@ test('without betterleaks, gitleaks does the job; with neither, the scanner says
   try {
     const r = await runScanner('gitleaks', 'scan-gitleaks', files, change);
     assert.equal(r.findings[0].source.scanner, 'betterleaks');
+    assert.equal(r.state.tool, 'betterleaks');
   } finally { t.restore(); }
 });
 
@@ -197,22 +199,39 @@ test('a secret dismissed when gitleaks found it keeps its identity now betterlea
   assert.equal(fingerprint(f('betterleaks'), content), fingerprint(f('gitleaks'), content));
 });
 
-test("a secret raised by the old scan-gitleaks block is fixed when scan-betterleaks no longer finds it, unless betterleaks wouldn't have", async () => {
+test("a secret gitleaks raised is fixed when the secrets block no longer finds it, unless only gitleaks could have found it", async () => {
   const { openDb } = await import('../src/server/db.ts');
   const { applyLedger } = await import('../src/server/ledger.ts');
   const db = openDb(join(mkdtempSync(join(process.env.TMPDIR!, 'purr-db-')), 'purr.db'));
-  const old = (fp: string, rule: string) => db.putLedger({ fingerprint: fp, repoId: 'r1', branch: 'feat', state: 'open', flowId: 'default-review',
-    finding: { id: fp, file: 'app.js', line: 2, category: 'secrets', severity: 'must_fix', title: 'A secret', scenario: 's', fingerprint: fp,
-      source: { blockId: 'scan-gitleaks', kind: 'scanner', scanner: 'gitleaks', rule } }, firstRunId: 'r0', lastRunId: 'r0', updatedAt: 'x' });
-  old('token', 'github-pat');
-  old('bare-key-id', 'aws-access-token');   // betterleaks doesn't flag a bare AWS key id: its silence says nothing
-  old('generic', 'generic-api-key');
-  const run = { id: 'r1run', repoId: 'r1', branch: 'feat', flowId: 'default-review', trigger: 'post-push', mode: 'range' } as any;
-  applyLedger(db, run, [], new Set(['scan-betterleaks', 'context']));
-  assert.deepEqual(['token', 'bare-key-id', 'generic'].map((fp) => db.getLedger(fp, 'r1')?.state), ['fixed', 'open', 'open']);
-  // gitleaks itself (the old block in a flow saved with it) can still close them
-  applyLedger(db, { ...run, id: 'r2run' }, [], new Set(['scan-gitleaks']));
-  assert.equal(db.getLedger('bare-key-id', 'r1')?.state, 'fixed');
+  const open = (fp: string, rule: string, blockId = 'scan-gitleaks') => db.putLedger({ fingerprint: fp, repoId: 'r1', branch: 'feat', state: 'open',
+    flowId: 'default-review', finding: { id: fp, file: 'app.js', line: 2, category: 'secrets', severity: 'must_fix', title: 'A secret', scenario: 's',
+      fingerprint: fp, source: { blockId, kind: 'scanner', scanner: 'gitleaks', rule } }, firstRunId: 'r0', lastRunId: 'r0', updatedAt: 'x' });
+  const state = (fp: string) => db.getLedger(fp, 'r1')?.state;
+  const run = (id: string) => ({ id, repoId: 'r1', branch: 'feat', flowId: 'default-review', trigger: 'post-push', mode: 'range' } as any);
+
+  // the default flow, renamed block: betterleaks ran in scan-betterleaks
+  open('token', 'github-pat');
+  open('bare-key-id', 'aws-access-token');   // betterleaks doesn't flag a bare AWS key id: its silence says nothing
+  open('generic', 'generic-api-key');
+  applyLedger(db, run('a'), [], new Set(['scan-betterleaks', 'context']), new Map(), new Map([['scan-betterleaks', 'betterleaks']]));
+  assert.deepEqual(['token', 'bare-key-id', 'generic'].map(state), ['fixed', 'open', 'open']);
+
+  // a flow duplicated before betterleaks: its block is still called scan-gitleaks, but betterleaks runs in it now
+  open('dup', 'aws-access-token');
+  applyLedger(db, run('b'), [], new Set(['scan-gitleaks']), new Map(), new Map([['scan-gitleaks', 'betterleaks']]));
+  assert.equal(state('dup'), 'open', "the block's name says gitleaks, but betterleaks ran: still open");
+
+  // the default flow when betterleaks wasn't installed: gitleaks (the fallback) raised it under scan-betterleaks; once
+  // betterleaks is installed, its silence can't close it either
+  open('fallback', 'aws-access-token', 'scan-betterleaks');
+  applyLedger(db, run('c'), [], new Set(['scan-betterleaks']), new Map(), new Map([['scan-betterleaks', 'betterleaks']]));
+  assert.equal(state('fallback'), 'open');
+
+  // only a run in which gitleaks itself ran can close them, whatever the block is called
+  applyLedger(db, run('d'), [], new Set(['scan-betterleaks']), new Map(), new Map([['scan-betterleaks', 'gitleaks']]));
+  assert.deepEqual(['bare-key-id', 'generic', 'fallback'].map(state), ['fixed', 'fixed', 'fixed']);
+  applyLedger(db, run('e'), [], new Set(['scan-gitleaks']), new Map(), new Map([['scan-gitleaks', 'gitleaks']]));
+  assert.equal(state('dup'), 'fixed');
   db.close();
 });
 
@@ -600,4 +619,26 @@ test('cancelling an osv-scanner or secrets scan stops it promptly, as cancelled'
     await assert.rejects(runScanner('betterleaks', 'b', leak.files, leak.change, ac.signal), Cancelled);
     assert.ok(Date.now() - t0 < 4_000, `betterleaks stopped promptly (${Date.now() - t0}ms)`);
   } finally { t.restore(); }
+});
+
+test('osv-scanner running past its time says it timed out, not a bare exit code', async () => {
+  const t = fakeTools({ 'osv-scanner': 'sleep 5' });
+  const was = limits.osvMs;
+  limits.osvMs = 500;
+  try {
+    const one = await staged({ 'package-lock.json': '{"lockfileVersion":3,"packages":{}}\n' });
+    const r = await runScanner('osv', 'scan-osv', one.files, one.change);
+    assert.equal(r.state.state, 'failed');
+    assert.match(r.state.error ?? JSON.stringify(r.state.incomplete), /osv-scanner timed out after 0\.5s/);
+  } finally { limits.osvMs = was; t.restore(); }
+});
+
+test('two actionlint errors of one kind on one line, with different messages, keep two identities', async () => {
+  const { fingerprintAll } = await import('../src/server/ledger.ts');
+  const err = (message: string): Finding => ({ id: message, file: '.github/workflows/ci.yml', line: 7, category: 'lint', severity: 'consider',
+    title: `Workflow problem: ${message}`, scenario: message, source: { blockId: 'scan-actionlint', kind: 'scanner', scanner: 'actionlint', rule: 'expression' } });
+  const fs = [err('property "foo" is not defined in object type'), err('receiver of object dereference "bar" must be type of object')];
+  await fingerprintAll(fs, { content: async () => 'jobs:\n  build:\n    steps:\n      - run: echo\n      - run: echo\n      - run: echo\n      - run: echo ${{ x.foo.bar }}\n' } as any);
+  assert.ok(fs[0].fingerprint && fs[1].fingerprint);
+  assert.notEqual(fs[0].fingerprint, fs[1].fingerprint);
 });

@@ -126,6 +126,8 @@ export interface SessionUse {
 export interface ScannerState {
   state: 'ran' | 'partial' | 'n/a' | 'not installed' | 'failed'; hits?: number; secs: number; error?: string;
   incomplete?: Array<{ file: string; reason: string }>;
+  /** a secrets block: which tool actually ran (betterleaks, or gitleaks when betterleaks isn't installed) */
+  tool?: 'betterleaks' | 'gitleaks';
 }
 
 export interface BlockOutput {
