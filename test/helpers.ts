@@ -5,6 +5,9 @@ import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 
 const base = process.env.TMPDIR || tmpdir();
+// tests drive fake gh binaries: a real token in the environment would reach them (and could show up in a failure)
+delete process.env.GH_TOKEN;
+delete process.env.GITHUB_TOKEN;
 process.env.PURR_HOME = mkdtempSync(join(base, 'purr-test-home-'));
 // Tests never see the user's ~/.gitconfig (e.g. PuRR's own global core.hooksPath would bypass per-repo test hooks).
 process.env.GIT_CONFIG_GLOBAL = join(mkdtempSync(join(base, 'purr-test-gitglobal-')), 'gitconfig');

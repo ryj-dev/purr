@@ -174,7 +174,8 @@ input, textarea { caret-color: var(--text); }
 .nav a.active svg { color: var(--text); }
 
 .sidebar .foot { margin-top: auto; padding: 10px 12px 14px; display: flex; flex-direction: column; gap: 10px; }
-.toolchain { border: 1px solid var(--border); border-radius: var(--r-lg); padding: 9px 11px; background: var(--surface); }
+.toolchain { display: block; width: 100%; height: auto; text-align: left; font: inherit; border: 1px solid var(--border); border-radius: var(--r-lg); padding: 9px 11px; background: var(--surface); cursor: pointer; }
+.toolchain:hover:not(:disabled) { background: var(--surface); border-color: var(--border-3); }
 .toolchain h3 { margin: 0 0 6px; font-size: 11px; color: var(--text-3); }
 .toolchain .tools { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 3px 10px; }
 .tool { display: flex; align-items: center; gap: 7px; font-family: var(--mono); font-size: 11px; color: var(--text-2); }
@@ -825,3 +826,29 @@ code.ic-code { font-size: 11.5px; padding: 1px 5px 0; border-radius: var(--r-sm)
 .share-agree { margin-top: 12px; font-weight: 600; }
 .warn-text { color: var(--warn); }
 .seg.nocap button { text-transform: none; }
+
+/* Toolchain popup */
+.tc-brew { display: flex; align-items: center; gap: 14px; padding: 10px 12px; margin-bottom: 12px; border: 1px solid color-mix(in srgb, var(--warn) 35%, transparent); border-radius: var(--r-lg); background: color-mix(in srgb, var(--warn) 7%, var(--surface)); font-size: 12.5px; color: var(--text-2); line-height: 1.5; }
+.tc-brew > div { flex: 1; min-width: 0; }
+.tc-brew b { color: var(--text); }
+.tc-brew button { flex-shrink: 0; }
+.tc-list { list-style: none; margin: 0; padding: 0; border: 1px solid var(--border); border-radius: var(--r-lg); background: var(--surface); }
+.tc-row { display: flex; align-items: flex-start; gap: 11px; padding: 11px 13px; }
+.tc-row + .tc-row { border-top: 1px solid var(--border); }
+.tc-dot { width: 7px; height: 7px; border-radius: 50%; margin-top: 6px; flex-shrink: 0; background: var(--ok); }
+.tc-row.off .tc-dot { background: transparent; box-shadow: inset 0 0 0 1.5px var(--danger); }
+.tc-main { flex: 1; min-width: 0; }
+.tc-name { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; font-family: var(--mono); font-size: 13px; font-weight: 600; color: var(--text); }
+.tc-ver { font-weight: 400; color: var(--text-3); font-size: 11.5px; }
+.tc-src { font-family: inherit; font-weight: 400; font-size: 11px; color: var(--text-3); }
+.tc-purpose { font-size: 12.5px; color: var(--text-2); margin-top: 2px; }
+.tc-accounts { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: 6px; font-size: 11.5px; }
+.tc-accounts code { font-family: var(--mono); font-size: 11.5px; padding: 1px 6px; border-radius: var(--r-sm); background: var(--surface-2); color: var(--text-2); }
+.tc-signed { display: inline-flex; align-items: center; gap: 4px; color: var(--ok); }
+.tc-step { margin-top: 5px; font-family: var(--mono); font-size: 11px; color: var(--text-3); overflow-wrap: anywhere; }
+.tc-action { flex-shrink: 0; display: flex; align-items: center; min-height: 26px; }
+.tc-done { display: inline-flex; align-items: center; gap: 5px; font-size: 12.5px; color: var(--ok); padding: 0 4px; }
+.tc-waiting { display: flex; align-items: center; gap: 6px; margin-top: 10px; }
+@media (max-width: 560px) {
+  .tc-brew { flex-direction: column; align-items: stretch; }
+}

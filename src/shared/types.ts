@@ -149,7 +149,7 @@ export interface Run {
   headSha: string | null;
   mode: 'staged' | 'range';
   workdir: string | null;     // checkout the Claude sessions ran in (cd here to `claude --resume` one)
-  pr: { number: number; title: string; body: string; url: string } | null;
+  pr: { number: number; title: string; body: string; url: string; account?: string } | null;   // account: the gh login that found it
   status: RunStatus;
   queuedAt: string;
   startedAt: string | null;
@@ -190,6 +190,7 @@ export interface Settings {
   notifications: boolean;
   reviewsPaused: boolean;     // post-push reviews don't start (hooks and manual runs still do)
   postPushPrsOnly: boolean;   // review a push only when its branch has an open PR (needs gh; without gh every push is reviewed)
+  projectFolders: string[];   // git repos in these folders (and one level down) are registered automatically
   port: number;
 }
 
@@ -264,9 +265,26 @@ export const TEMPLATE_VARS: Record<string, string> = {
   finding_schema: 'The JSON schema findings must follow',
 };
 
+/** One tool in the Toolchain popup: whether it's there, how PuRR would install it, and (claude, gh) who is signed in. */
+export type ToolName = 'gitleaks' | 'zizmor' | 'osv-scanner' | 'claude' | 'gh';
+export interface ToolStatus {
+  name: ToolName;
+  purpose: string;
+  installed: boolean;
+  path: string | null;
+  version: string | null;
+  /** how it was installed, from its path */
+  source: 'homebrew' | 'claude-installer' | 'other' | null;
+  /** claude and gh only: null for the scanners, and while not installed */
+  auth: { signedIn: boolean; accounts: string[]; detail?: string } | null;
+  job: { state: 'running' | 'failed'; step: string; error?: string } | null;
+}
+export interface Toolchain { homebrew: { installed: boolean; path: string | null }; tools: ToolStatus[] }
+
 export type ServerEvent =
   | { type: 'run'; run: Run }
   | { type: 'block'; runId: string; block: BlockRun }
   | { type: 'usage'; usage: Usage }
   | { type: 'state' }
+  | { type: 'tools' }                    // a tool install started, moved on, finished or failed
   | { type: 'notify'; title: string; body: string; runId: string };   // shown natively by PuRR.app

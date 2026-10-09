@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react';
 import type {
-  AppState, Block, BlockType, Edge, Flow, FlowMeta, LedgerItem, Repo, Run, RunDetail, ServerEvent, Settings, TriggerAssignment, TriggerKind, Usage, ValidationIssue, FlowExport, ImportPreview,
+  AppState, Block, BlockType, Edge, Flow, FlowMeta, LedgerItem, Repo, Run, RunDetail, ServerEvent, Settings, TriggerAssignment, TriggerKind, Usage, ValidationIssue, FlowExport, ImportPreview, ToolName, Toolchain,
 } from '../../src/shared/types.ts';
 
 export interface BlockTypeInfo {
@@ -50,6 +50,12 @@ export const api = {
   usage: () => req<Usage>('GET', '/api/usage'),
   saveSettings: (s: Partial<Settings>) => req<Settings>('PUT', '/api/settings', s),
   blockTypes: () => req<BlockTypeInfo[]>('GET', '/api/block-types'),
+
+  toolchain: (fresh = false) => req<Toolchain>('GET', `/api/tools${fresh ? '?fresh=1' : ''}`),
+  installTool: (name: ToolName) => req<{ ok: true }>('POST', `/api/tools/${name}/install`),
+  installMissingTools: () => req<{ installing: ToolName[] }>('POST', '/api/tools/install-missing'),
+  installHomebrew: () => req<{ ok: true }>('POST', '/api/tools/homebrew/install'),
+  signIn: (name: 'claude' | 'gh') => req<{ ok: true }>('POST', `/api/tools/${name}/signin`),
 
   flows: () => req<FlowMeta[]>('GET', '/api/flows'),
   flow: (id: string) => req<Flow>('GET', `/api/flows/${encodeURIComponent(id)}`),

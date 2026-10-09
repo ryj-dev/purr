@@ -15,6 +15,15 @@ export const paths = {
 };
 for (const p of [paths.home, paths.worktrees, paths.scratch, paths.logs]) mkdirSync(p, { recursive: true });
 
+// Also look where Claude Code's installer and Homebrew put things, in case this process started with a PATH that
+// misses them, e.g. a tool installed from the Toolchain popup (the hooks and the service both import this module).
+export function withToolDirs(path: string | undefined, home: string): string {
+  const dirs = [...new Set((path || '/usr/bin:/bin:/usr/sbin:/sbin').split(':').filter(Boolean))];
+  const extra = [join(home, '.local/bin'), '/opt/homebrew/bin', '/usr/local/bin'].filter((d) => !dirs.includes(d));
+  return [...dirs, ...extra].join(':');
+}
+process.env.PATH = withToolDirs(process.env.PATH, homedir());
+
 export const ROOT = fileURLToPath(new URL('../..', import.meta.url)).replace(/\/$/, '');
 
 export const now = () => new Date().toISOString();
@@ -69,10 +78,6 @@ export function exec(cmd: string, args: string[], opts: {
     child.stdin.on('error', () => {});
     if (opts.input !== undefined) child.stdin.end(opts.input); else child.stdin.end();
   });
-}
-
-export async function which(bin: string): Promise<boolean> {
-  try { return (await exec('/usr/bin/which', [bin])).code === 0; } catch { return false; }
 }
 
 export class Semaphore {
