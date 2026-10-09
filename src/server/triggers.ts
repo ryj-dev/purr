@@ -87,7 +87,9 @@ export class PostPushWatcher {
     }
     const remote = body.remote || 'origin';
     const prOnly = this.db.getSettings().postPushPrsOnly;
-    this.reporting.add(body.sha);
+    // a hook here that will review its push, if it's the newer one: one in a clone with post-push off won't, so it
+    // mustn't make an older push's hook stand aside for it
+    if (this.mgr.resolveFlow('post-push', repo.id)) this.reporting.add(body.sha);
     const confirm = (async () => {
       const deadline = Date.now() + this.deps.confirmMs;
       let from: string | null | undefined;   // the branch's tip at the first look that answered, before this push landed
@@ -215,7 +217,8 @@ export class PostPushWatcher {
         // (only for a clone registered since this PR's account last answered: before that, the poller couldn't have
         // seen the PR through it, even if gh failed in the poll that found the clone)
         const cloned = Math.max(...local.map((c) => Date.parse(c.addedAt) || 0));
-        const justCloned = cloned > (before.get(pr.account) ?? anyBefore) && opened >= this.startedAt && opened >= cloned - DISCOVERY_MS;
+        // (and only once some account has answered a poll before: gh signed in late, every clone predates that answer)
+        const justCloned = before.size > 0 && cloned > (before.get(pr.account) ?? anyBefore) && opened >= this.startedAt && opened >= cloned - DISCOVERY_MS;
         if (!(opened >= (marks.get(pr.account) ?? this.startedAt)) && !justCloned) continue;
       }
       this.lastSeen.set(handled, pr.headRefOid);
