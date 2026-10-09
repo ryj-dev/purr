@@ -143,8 +143,34 @@ test('HTTP API: state, default flows read-only, duplicate/edit/delete, triggers,
     return { status: r.status, json: r.status === 204 ? null : await r.json() };
   };
   try {
+    // a repo with its own hooks path: the first state answers before git has, and a later one carries the flag
+    const husky = tempRepo();
+    sh(husky, 'config', 'core.hooksPath', '.husky/_');
+    const hr = await addRepo(db, husky);
+    // open windows hear about it from the event stream, without polling
+    const events = await fetch(`http://127.0.0.1:${port}/api/events`);
+    const reader = events.body!.getReader();
+    let heard = '';
+    const stateEvent = (async () => {
+      while (!heard.includes('"type":"state"')) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        heard += new TextDecoder().decode(value);
+      }
+    })();
     const st = await api('GET', '/api/state');
     assert.equal(st.status, 200);
+    assert.equal(typeof st.json.globalHooks.active, 'boolean');
+    assert.deepEqual(st.json.globalHooks.ownHooks, {}, 'own-hooks flags are served without waiting on git');
+    let flagged: unknown;
+    for (let i = 0; i < 50 && !flagged; i++) {
+      await new Promise((r) => setTimeout(r, 50));
+      flagged = (await api('GET', '/api/state')).json.globalHooks.ownHooks[hr.id];
+    }
+    assert.equal(flagged, '.husky/_', 'the background check fills it in');
+    await Promise.race([stateEvent, new Promise((r) => setTimeout(r, 3000))]);
+    await reader.cancel();
+    assert.match(heard, /"type":"state"/, 'the flag is pushed to open windows');
     assert.ok(st.json.flows.some((f: any) => f.id === 'default-review' && f.isDefault));
     assert.equal((await api('PUT', '/api/flows/default-review', { name: 'x' })).status, 403);
     assert.equal((await api('DELETE', '/api/flows/default-review')).status, 403);
