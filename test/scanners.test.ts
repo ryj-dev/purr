@@ -573,3 +573,19 @@ test('two actionlint errors of one kind on one line, with different messages, ke
   assert.ok(fs[0].fingerprint && fs[1].fingerprint);
   assert.notEqual(fs[0].fingerprint, fs[1].fingerprint);
 });
+
+test("a secret finding's identity is pinned: a change to it would reopen every dismissed secret", () => {
+  const f = { id: 'x', file: 'app.js', line: 2, category: 'secrets', severity: 'must_fix', title: 'GitHub token', scenario: 's',
+    source: { blockId: 'scan-betterleaks', kind: 'scanner', scanner: 'betterleaks', rule: 'github-pat' } } as Finding;
+  assert.equal(fingerprint(f, 'a\nconst token = "x";\nb'), '23236a4b2fbbe8f7');
+});
+
+test('a scanner block naming a scanner PuRR has no longer is a flow error, and never runs another scanner', async () => {
+  const { validateFlow } = await import('../src/server/flows/validate.ts');
+  const blocks = [{ id: 's', type: 'scanner', config: { scanner: 'gitleaks' } }, { id: 'out', type: 'output', config: { notify: false, postPrComment: false } }] as any;
+  const errors = validateFlow(blocks, [{ id: 'e', source: 's', target: 'out' }] as any).filter((i) => i.level === 'error').map((i) => i.message);
+  assert.ok(errors.includes('Unknown scanner "gitleaks"'), errors.join(' | '));
+  const r = await runScanner('gitleaks' as any, 's', [], { mode: 'staged' } as any);
+  assert.equal(r.state.state, 'failed');
+  assert.match(r.state.error ?? '', /unknown scanner "gitleaks"/);
+});

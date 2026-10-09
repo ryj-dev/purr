@@ -115,7 +115,7 @@ test('a push made before its PR is opened is reviewed when the PR opens; one rev
 
   // the push hook reports c1 before any PR exists: nothing is reviewed yet...
   pushed = 'c1';
-  await watcher.pushIntent({ repoPath: a, branch: 'feat', sha: 'c1' , from: null });
+  await watcher.pushIntent({ repoPath: a, branch: 'feat', sha: 'c1', from: null });
   await watcher.settled();
   assert.equal(scheduled.length, 0, 'no PR, no review');
   // ...and when the PR is opened, the poller reviews c1, because the hook didn't mark it as handled
@@ -128,7 +128,7 @@ test('a push made before its PR is opened is reviewed when the PR opens; one rev
   // checkout and must not review it a second time
   openPr = prs[0];
   pushed = 'c2';
-  await watcher.pushIntent({ repoPath: wt, branch: 'feat', sha: 'c2' , from: null });
+  await watcher.pushIntent({ repoPath: wt, branch: 'feat', sha: 'c2', from: null });
   await watcher.settled();
   assert.deepEqual(scheduled.map((r) => r.head), ['c1', 'c2'], 'the hook reviews a push to an open PR');
   prs = [{ ...prs[0], headRefOid: 'c2' }];
@@ -139,14 +139,14 @@ test('a push made before its PR is opened is reviewed when the PR opens; one rev
   prs = [{ ...prs[0], headRefOid: 'c3' }];
   await watcher.poll();
   pushed = 'c3';
-  await watcher.pushIntent({ repoPath: a, branch: 'feat', sha: 'c3' , from: null });
+  await watcher.pushIntent({ repoPath: a, branch: 'feat', sha: 'c3', from: null });
   await watcher.settled();
   assert.deepEqual(scheduled.map((r) => r.head), ['c1', 'c2', 'c3'], 'hook after poller: one review');
 
   // the same push reported by the hooks of two clones (main checkout, then the worktree)
   pushed = 'c4';
-  await watcher.pushIntent({ repoPath: a, branch: 'feat', sha: 'c4' , from: null });
-  await watcher.pushIntent({ repoPath: wt, branch: 'feat', sha: 'c4' , from: null });
+  await watcher.pushIntent({ repoPath: a, branch: 'feat', sha: 'c4', from: null });
+  await watcher.pushIntent({ repoPath: wt, branch: 'feat', sha: 'c4', from: null });
   await watcher.settled();
   assert.deepEqual(scheduled.map((r) => r.head), ['c1', 'c2', 'c3', 'c4'], 'hook from each clone: one review');
 
@@ -154,7 +154,7 @@ test('a push made before its PR is opened is reviewed when the PR opens; one rev
   // through the main checkout (main checkouts come before worktrees)
   db.setTrigger({ trigger: 'post-push', repoId: db.getRepoByPath(wt)!.id, flowId: null });
   pushed = 'c5';
-  await watcher.pushIntent({ repoPath: wt, branch: 'feat', sha: 'c5' , from: null });
+  await watcher.pushIntent({ repoPath: wt, branch: 'feat', sha: 'c5', from: null });
   await watcher.settled();
   assert.equal(scheduled.length, 4, 'the disabled clone schedules nothing');
   prs = [{ ...prs[0], headRefOid: 'c5' }];
@@ -280,14 +280,14 @@ test('a push is reviewed by the hook when gh is signed out or reviews aren\'t PR
   });
   await watcher.poll();
   pushed = 'h1';
-  await watcher.pushIntent({ repoPath: a, branch: 'feat', sha: 'h1' , from: null });
+  await watcher.pushIntent({ repoPath: a, branch: 'feat', sha: 'h1', from: null });
   await watcher.settled();
   assert.deepEqual(scheduled.map((r) => [r.head, r.pr]), [['h1', null]], 'no gh: reviewed against the default branch, no PR');
 
   authed = true;
   db.setSettings({ ...db.getSettings(), postPushPrsOnly: false });
   pushed = 'h2';
-  await watcher.pushIntent({ repoPath: a, branch: 'feat', sha: 'h2' , from: null });
+  await watcher.pushIntent({ repoPath: a, branch: 'feat', sha: 'h2', from: null });
   await watcher.settled();
   assert.deepEqual(scheduled.map((r) => r.head), ['h1', 'h2'], 'not PR-only: reviewed without a PR');
   prs = [{ repo: 'work-org/app-f', number: 4, headRefOid: 'h2', headRefName: 'feat', baseRefName: 'main', title: 't', body: '', url: 'u',
@@ -381,7 +381,7 @@ test('signing in to gh after startup brings no old PRs; a slow multi-account pol
     db.putRepo({ ...db.getRepoByPath(a)!, remoteUrl: null });
     db.setSettings({ ...db.getSettings(), postPushPrsOnly: false });
     pushed = 'k1';
-    await watcher.pushIntent({ repoPath: a, branch: 'feat', sha: 'k1' , from: null });
+    await watcher.pushIntent({ repoPath: a, branch: 'feat', sha: 'k1', from: 'k0' });
     await watcher.settled();
     assert.deepEqual(scheduled, ['k1']);
     fetched = { ...fetched, prs: [pr(2, 'old', t0 + 60_000), pr(1, 'k1', t0 + 60_000)], askedAt: { me: Date.now() - 5 * 60_000 } };
@@ -481,11 +481,11 @@ test("two quick pushes: the older one's slow PR lookup doesn't schedule it over 
     fetchPrs: async () => ({ prs: [], answered: ['me'] }), lsRemote: async () => tip, ghAuthed: async () => true,
     inHistoryOf: async () => 'yes',
     prForBranch: async () => {   // c6 lands while gh is asked about c5's PR, and its own hook here reports it
-      if (tip === 'c5') { tip = 'c6'; void watcher.pushIntent({ repoPath: a, branch: 'feat', sha: 'c6' , from: null }); }
+      if (tip === 'c5') { tip = 'c6'; void watcher.pushIntent({ repoPath: a, branch: 'feat', sha: 'c6', from: 'c5' }); }
       return null;
     },
   });
-  await watcher.pushIntent({ repoPath: a, branch: 'feat', sha: 'c5' , from: null });
+  await watcher.pushIntent({ repoPath: a, branch: 'feat', sha: 'c5', from: null });
   await watcher.settled();
   assert.deepEqual(scheduled, ['c6'], 'c5 is not scheduled over c6: c6, reviewed through its own hook');
   db.close();
@@ -503,7 +503,7 @@ test("no answer from the remote on the second look after asking gh is no news: t
   const watcher = new PostPushWatcher(db, mgr, {
     fetchPrs: async () => ({ prs: [], answered: ['me'] }), lsRemote: async () => looks.shift() ?? null, ghAuthed: async () => true, prForBranch: async () => null,
   });
-  await watcher.pushIntent({ repoPath: a, branch: 'feat', sha: 'm1' , from: null });
+  await watcher.pushIntent({ repoPath: a, branch: 'feat', sha: 'm1', from: null });
   await watcher.settled();
   assert.deepEqual(scheduled, ['m1']);
   db.close();
@@ -553,7 +553,7 @@ test("a push overtaken during the PR lookup by one nothing else reviews (a bot's
     inHistoryOf: async () => 'yes',
     prForBranch: async () => { tip = 'b6'; return null; },   // a bot pushes b6 on top, through no hook here
   });
-  await watcher.pushIntent({ repoPath: a, branch: 'feat', sha: 'b5' , from: null });
+  await watcher.pushIntent({ repoPath: a, branch: 'feat', sha: 'b5', from: null });
   await watcher.settled();
   assert.deepEqual(scheduled, ['b6'], "b6, which includes b5: not neither");
   db.close();
@@ -576,7 +576,7 @@ test('overtaken pushes: a PR the poller lists is left to it, a draft or a teamma
   });
   const open = (n: number, head: string, draft = false): OpenPr => ({ repo: 'work-org/app-p', number: n, headRefOid: head, headRefName: 'feat',
     baseRefName: 'main', title: 't', body: '', url: 'u', isDraft: draft, account: 'me', createdAt: new Date(Date.now() - 86_400_000).toISOString() });
-  const push = async (sha: string) => { tips = [sha]; await watcher.pushIntent({ repoPath: a, branch: 'feat', sha , from: null }); await watcher.settled(); };
+  const push = async (sha: string) => { tips = [sha]; await watcher.pushIntent({ repoPath: a, branch: 'feat', sha, from: null }); await watcher.settled(); };
 
   // the poller lists this PR (one of my accounts opened it): a bot's push on top is left to the poller's next look
   prs = [open(1, 'p0')];
@@ -608,7 +608,7 @@ test('overtaken pushes: a PR the poller lists is left to it, a draft or a teamma
     ghAuthed: async () => true, prForBranch: async () => null, inHistoryOf: async () => 'yes',
   });
   tips = ['q5', 'q7'];   // the tip before this push (q5), then the bot's (q7) on top of it
-  await quick.pushIntent({ repoPath: a, branch: 'feat', sha: 'q6' , from: null });
+  await quick.pushIntent({ repoPath: a, branch: 'feat', sha: 'q6', from: 'q5' });
   await quick.settled();
   assert.deepEqual(scheduled, ['q7']);
   db.close();
@@ -623,9 +623,9 @@ test('a push to a remote not on GitHub (every push reviewed) is reviewed once, h
   sh(a, 'remote', 'add', 'origin', 'https://gitlab.example.com/org/app.git');
   db.setSettings({ ...db.getSettings(), projectFolders: [root], postPushPrsOnly: false });
   const watcher = new PostPushWatcher(db, mgr, { fetchPrs: async () => ({ prs: [], answered: [] }), lsRemote: async () => 'g1', ghAuthed: async () => false });
-  await watcher.pushIntent({ repoPath: a, branch: 'feat', sha: 'g1' , from: null });
+  await watcher.pushIntent({ repoPath: a, branch: 'feat', sha: 'g1', from: null });
   await watcher.settled();
-  await watcher.pushIntent({ repoPath: a, branch: 'feat', sha: 'g1' , from: null });
+  await watcher.pushIntent({ repoPath: a, branch: 'feat', sha: 'g1', from: null });
   await watcher.settled();
   assert.deepEqual(scheduled, ['g1']);
   db.close();
@@ -644,7 +644,7 @@ test("a rejected push (a teammate's went in instead) doesn't get the teammate's 
     fetchPrs: async () => ({ prs: [], answered: ['me'] }), lsRemote: async () => (tips.length > 1 ? tips.shift()! : tips[0]),
     ghAuthed: async () => true, prForBranch: async () => null, inHistoryOf: async () => 'no', confirmMs: 100, confirmEveryMs: 5,
   });
-  await watcher.pushIntent({ repoPath: a, branch: 'feat', sha: 'mine' , from: null });
+  await watcher.pushIntent({ repoPath: a, branch: 'feat', sha: 'mine', from: 'r0' });
   await watcher.settled();
   assert.deepEqual(scheduled, [], "my push never landed, and the teammate's commit isn't mine to review");
   db.close();
@@ -710,11 +710,11 @@ test('two quick pushes, the newer from a clone with post-push off: the older hoo
   const watcher = new PostPushWatcher(db, mgr, {
     fetchPrs: async () => ({ prs: [], answered: ['me'] }), lsRemote: async () => tip, ghAuthed: async () => true, inHistoryOf: async () => 'yes',
     prForBranch: async () => {
-      if (tip === 's5') { tip = 's6'; void watcher.pushIntent({ repoPath: wt, branch: 'feat', sha: 's6' , from: null }); }   // from the worktree
+      if (tip === 's5') { tip = 's6'; void watcher.pushIntent({ repoPath: wt, branch: 'feat', sha: 's6', from: 's5' }); }   // from the worktree
       return null;
     },
   });
-  await watcher.pushIntent({ repoPath: a, branch: 'feat', sha: 's5' , from: null });
+  await watcher.pushIntent({ repoPath: a, branch: 'feat', sha: 's5', from: null });
   await watcher.settled();
   assert.deepEqual(scheduled, [`s6@${db.getRepoByPath(a)!.path}`], "the worktree won't review s6, so the main checkout's hook does");
   db.close();
@@ -733,7 +733,7 @@ test("when git can't tell whether a push is in the newer tip's history (offline)
     fetchPrs: async () => ({ prs: [], answered: ['me'] }), lsRemote: async () => (tips.length > 1 ? tips.shift()! : tips[0]),
     ghAuthed: async () => true, prForBranch: async () => null, inHistoryOf: async () => 'unknown', confirmMs: 100, confirmEveryMs: 5,
   });
-  await watcher.pushIntent({ repoPath: a, branch: 'feat', sha: 'u1' , from: null });
+  await watcher.pushIntent({ repoPath: a, branch: 'feat', sha: 'u1', from: 'u0' });
   await watcher.settled();
   assert.deepEqual(scheduled, [], "it may be a teammate's commit over a rejected push: not reviewed on a guess");
   db.close();
@@ -754,7 +754,7 @@ test('a real push to a local remote, through the real git calls, reaches review'
   const watcher = new PostPushWatcher(db, mgr, { ghAuthed: async () => false, confirmMs: 10_000, confirmEveryMs: 50 });
   sh(repo, 'commit', '-q', '--allow-empty', '-m', 'two', '--no-verify');
   const sha = sh(repo, 'rev-parse', 'HEAD');
-  const intent = watcher.pushIntent({ repoPath: repo, branch: 'main', sha , from: null });   // as the pre-push hook reports it, before the push
+  const intent = watcher.pushIntent({ repoPath: repo, branch: 'main', sha, from: null });   // as the pre-push hook reports it, before the push
   sh(repo, 'push', '-q', 'origin', 'main', '--no-verify');
   await intent;
   await watcher.settled();

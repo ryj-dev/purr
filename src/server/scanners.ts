@@ -371,6 +371,8 @@ class ScanFailed extends Error {
   constructor(message: string, found: Finding[]) { super(message); this.found = found; }
 }
 
+function unknownScanner(name: never): never { throw new Error(`unknown scanner "${name}"`); }
+
 /**
  * Runs one scanner. A missing or failing tool is reported in the state and yields no findings. The one thing that throws
  * is `signal` aborting (the review was cancelled or superseded): the scan stops between files, kills the tool it's
@@ -387,7 +389,8 @@ export async function runScanner(name: ScannerName, blockId: string, files: Chan
       : name === 'zizmor' ? await zizmor(blockId, files, change, work, signal)
       : name === 'hadolint' ? await hadolint(blockId, files, change, work, incomplete, signal)
       : name === 'actionlint' ? await actionlint(blockId, files, change, work, incomplete, signal)
-      : await osv(blockId, files, change, work, incomplete, signal);
+      : name === 'osv' ? await osv(blockId, files, change, work, incomplete, signal)
+      : unknownScanner(name);
     if (signal?.aborted) throw new Cancelled();
     const findings = got ? group(got) : [];
     if (got === null) return { findings, state: { state: 'n/a', secs: secs() } };

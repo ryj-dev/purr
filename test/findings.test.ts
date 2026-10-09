@@ -358,7 +358,7 @@ test('pushes that get no review of their own say why: superseded in the debounce
   tips = ['dcd1'];
   await quick2.pushIntent({ repoPath, branch: 'feat', sha: 'dcd1', from: 'dcd0' });
   await quick2.settled();
-  assert.deepEqual(kind('dcd1'), ['superseded', 'dcd2'], "the later tip isn't taken as the old one");
+  assert.deepEqual(kind('dcd1'), ['superseded', 'dcd2'], 'the newer push takes its place');
 
   // gh can't be asked whether there's a PR (offline), reviews PR-only: noted no-pr, and --wait keeps waiting
   const offline = new PostPushWatcher(db, mgr, { lsRemote: async () => 'aef1', ghAuthed: async () => true, prForBranch: async () => null, confirmEveryMs: 5 });
