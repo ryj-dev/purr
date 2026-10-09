@@ -5,7 +5,7 @@
 //     repos git's hooks can't reach. Repos in the project folders are discovered and registered every 10 minutes.
 import { existsSync, realpathSync } from 'node:fs';
 import type { DB } from './db.ts';
-import { lsRemote, remoteUrl } from './git.ts';
+import { inHistoryOf, lsRemote, remoteUrl } from './git.ts';
 import { addRepo } from './http.ts';
 import { type PrFetch, type PrInfo, ghAuthed, githubRepo, openPrsForAllAccounts, prForBranch } from './gh.ts';
 import { discoverRepos } from './discovery.ts';
@@ -20,6 +20,10 @@ export interface WatcherDeps {
   lsRemote: (cwd: string, remote: string, branch: string) => Promise<string | null>;
   ghAuthed: () => Promise<boolean>;
   prForBranch: (repoPath: string, branch: string) => Promise<PrInfo | null>;
+  inHistoryOf: (cwd: string, remote: string, a: string, b: string) => Promise<'yes' | 'no' | 'unknown'>;
+  /** how long the hook's push gets to show up on the remote, and how often to look */
+  confirmMs: number;
+  confirmEveryMs: number;
 }
 
 /** How often the poller looks for repos cloned since (ones PuRR's hooks never ran in, like a husky repo). */
@@ -51,7 +55,7 @@ export class PostPushWatcher {
 
   constructor(db: DB, mgr: RunManager, deps: Partial<WatcherDeps> = {}) {
     this.db = db; this.mgr = mgr;
-    this.deps = { fetchPrs: openPrsForAllAccounts, lsRemote, ghAuthed, prForBranch, ...deps };
+    this.deps = { fetchPrs: openPrsForAllAccounts, lsRemote, ghAuthed, prForBranch, inHistoryOf, confirmMs: 90_000, confirmEveryMs: 3000, ...deps };
   }
 
   start() {
@@ -85,15 +89,17 @@ export class PostPushWatcher {
     const prOnly = this.db.getSettings().postPushPrsOnly;
     this.reporting.add(body.sha);
     const confirm = (async () => {
-      const deadline = Date.now() + 90_000;
+      const deadline = Date.now() + this.deps.confirmMs;
       let from: string | null | undefined;   // the branch's tip at the first look that answered, before this push landed
       while (Date.now() < deadline) {
         const tip = await this.deps.lsRemote(body.repoPath, remote, body.branch);
         if (from === undefined && tip) from = tip === body.sha ? null : tip;
         // the branch moved past this push before it was seen landing (a bot or another machine pushed on top): that
-        // push is the one to review, by its own hook if one here reports it, else by this one
-        const overtaken = !!tip && tip !== body.sha && tip !== from;
+        // push is the one to review, by its own hook if one here reports it, else by this one. Only if this push is in
+        // its history, though: a push that was rejected (a teammate's went in instead) is nobody's to review here
+        let overtaken = !!tip && tip !== body.sha && tip !== from;
         if (overtaken && this.reporting.has(tip!)) return;
+        if (overtaken && (await this.deps.inHistoryOf(body.repoPath, remote, body.sha, tip!)) !== 'yes') overtaken = false;
         if (tip === body.sha || overtaken) {
           const gh = await this.deps.ghAuthed();
           const pr = gh ? await this.deps.prForBranch(body.repoPath, body.branch) : null;
@@ -103,7 +109,7 @@ export class PostPushWatcher {
           // teammate's PR) this hook reviews it, which covers this push too. No answer from ls-remote is no news
           let head = overtaken ? tip! : body.sha;
           const again = await this.deps.lsRemote(body.repoPath, remote, body.branch);
-          if (again && again !== head) {
+          if (again && again !== head && (await this.deps.inHistoryOf(body.repoPath, remote, head, again)) === 'yes') {
             const pollerSees = !!pr && !pr.isDraft && this.seenPr.has(`${githubRepo(repo.remoteUrl)}#${pr.number}`);
             if (pollerSees || this.reporting.has(again)) return;
             head = again;
@@ -122,7 +128,7 @@ export class PostPushWatcher {
           });
           return;
         }
-        await new Promise((r) => setTimeout(r, 3000));
+        await new Promise((r) => setTimeout(r, this.deps.confirmEveryMs));
       }
     })().catch(() => {});
     this.confirming.add(confirm);

@@ -150,6 +150,20 @@ export async function lsRemote(cwd: string, remote: string, branch: string): Pro
   return r.stdout.split(/\s+/)[0] || null;
 }
 
+/**
+ * Whether commit `a` is in the history of `b`, a tip on `remote`: 'unknown' only if git can't tell even after fetching
+ * `b` (into FETCH_HEAD alone, so no branch or remote-tracking ref of the user's moves).
+ */
+export async function inHistoryOf(cwd: string, remote: string, a: string, b: string): Promise<'yes' | 'no' | 'unknown'> {
+  const check = async () => (await exec('git', ['merge-base', '--is-ancestor', a, b], { cwd, timeoutMs: 30_000 })).code;
+  let code = await check();
+  if (code !== 0 && code !== 1) {
+    await exec('git', ['fetch', '--quiet', '--no-tags', '--no-write-fetch-head', remote, b], { cwd, timeoutMs: 60_000 });
+    code = await check();
+  }
+  return code === 0 ? 'yes' : code === 1 ? 'no' : 'unknown';
+}
+
 export async function isAncestor(cwd: string, a: string, b: string): Promise<boolean> {
   return (await exec('git', ['merge-base', '--is-ancestor', a, b], { cwd, timeoutMs: 30_000 })).code === 0;
 }
