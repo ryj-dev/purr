@@ -41,7 +41,9 @@ export function foundBy(f: Finding): string {
   const s = f.source.scanner;
   const about = s ? ABOUT[s] : undefined;
   if (!about) return '';
-  const [what, url] = about;
+  const [what, wiki] = about;
+  // hadolint also passes on ShellCheck's codes for RUN lines (SC1073…): those are documented on ShellCheck's wiki
+  const url = s === 'hadolint' && f.source.rule?.startsWith('SC') ? 'https://www.shellcheck.net/wiki/{rule}' : wiki;
   const rule = f.source.rule ? (url ? `[\`${f.source.rule}\`](${url.replace('{rule}', f.source.rule)})` : `\`${f.source.rule}\``) : null;
   return `_Found by **${s}**, ${what}.${rule ? ` Rule: ${rule}.` : ''}_`;
 }

@@ -224,6 +224,7 @@ test('a scanner finding says which tool found it and what that tool is', () => {
   const by = (scanner: any, rule: string) => foundBy({ id: 'x', file: 'f', line: 1, category: 'c', severity: 'consider', title: 't', scenario: 's',
     source: { blockId: 'b', kind: 'scanner', scanner, rule } });
   assert.match(by('hadolint', 'DL3009'), /Found by \*\*hadolint\*\*.*\[`DL3009`\]\(https:\/\/github\.com\/hadolint\/hadolint\/wiki\/DL3009\)/);
+  assert.match(by('hadolint', 'SC1073'), /\[`SC1073`\]\(https:\/\/www\.shellcheck\.net\/wiki\/SC1073\)/, "a ShellCheck code links to ShellCheck's wiki");
   assert.match(by('betterleaks', 'aws-access-token'), /Found by \*\*betterleaks\*\*, an open-source tool that finds secrets/);
   assert.match(by('gitleaks', 'x'), /Found by \*\*gitleaks\*\*/, 'findings recorded before the switch still say what found them');
 });
@@ -456,7 +457,8 @@ test("a missing osv-scanner shows as not installed, not failed or partial", asyn
 const installed = (tool: string) => { try { execFileSync('which', [tool], { stdio: 'pipe' }); return true; } catch { return false; } };
 
 test('the real betterleaks accepts PuRR\'s flags and finds a committed GitHub token', { skip: !installed('betterleaks') && 'betterleaks is not installed here' }, async () => {
-  // a GitHub token's shape, not a real one: betterleaks (unlike gitleaks) doesn't flag a bare AWS key id like FAKE_SECRET
+  // FAKE_SECRET is a GitHub token's shape, not a real one, which betterleaks and gitleaks both flag (betterleaks, unlike
+  // gitleaks, doesn't flag a bare AWS key id on its own)
   const { change, files } = await staged({ 'app.js': `const k = "${FAKE_SECRET}";\n` });
   const r = await runScanner('betterleaks', 's', files, change);
   assert.equal(r.state.state, 'ran', JSON.stringify(r.state));
@@ -470,6 +472,28 @@ test('the real hadolint accepts PuRR\'s flags and raises an error-level rule on 
   const r = await runScanner('hadolint', 'h', files, change);
   assert.equal(r.state.state, 'ran', JSON.stringify(r.state));
   assert.ok(r.findings.some((f) => f.source.rule === 'DL3000' && f.line === 2), JSON.stringify(r.findings));
+});
+
+test('the real osv-scanner accepts PuRR\'s flags and raises a new critical vulnerability in a lockfile', { skip: !installed('osv-scanner') && 'osv-scanner is not installed here' }, async (t) => {
+  // minimist 1.2.0 has a critical advisory (prototype pollution); the base branch's lockfile doesn't have it
+  const lock = (deps: Record<string, string>) => JSON.stringify({
+    name: 'app', version: '1.0.0', lockfileVersion: 3, requires: true,
+    packages: {
+      '': { name: 'app', version: '1.0.0', dependencies: deps },
+      ...Object.fromEntries(Object.entries(deps).map(([n, v]) => [`node_modules/${n}`, { version: v, resolved: `https://registry.npmjs.org/${n}/-/${n}-${v}.tgz` }])),
+    },
+  }, null, 2) + '\n';
+  const { change, files } = await staged({ 'package-lock.json': lock({ minimist: '1.2.0' }) }, { 'package-lock.json': lock({}) });
+  const r = await runScanner('osv', 'o', files, change);
+  // it asks the OSV database over the network (package names and versions only): offline, there's nothing to check
+  if (r.state.state !== 'ran' && /network|dial|lookup|connect|timeout|api\.osv\.dev/i.test(JSON.stringify(r.state))) {
+    t.skip(`osv-scanner couldn't reach the OSV database: ${JSON.stringify(r.state)}`);
+    return;
+  }
+  assert.equal(r.state.state, 'ran', JSON.stringify(r.state));
+  const hit = r.findings.find((f) => /minimist/.test(f.title));
+  assert.ok(hit, JSON.stringify(r.findings));
+  assert.equal(hit!.severity, 'must_fix');
 });
 
 test('the real actionlint accepts PuRR\'s flags and raises a workflow error on an added line', { skip: !installed('actionlint') && 'actionlint is not installed here' }, async () => {

@@ -25,7 +25,7 @@ function setup() {
 function featureRepo() {
   const repo = tempRepo({ 'app.js': 'export const x = 1;\n' });
   sh(repo, 'checkout', '-q', '-b', 'feature');
-  writeFileSync(join(repo, 'app.js'), `export const x = 1;\nexport const awsKey = "${FAKE_SECRET}";\n\nexport function avg(total, count) {\n  return total / count;\n}\n`);
+  writeFileSync(join(repo, 'app.js'), `export const x = 1;\nexport const apiToken = "${FAKE_SECRET}";\n\nexport function avg(total, count) {\n  return total / count;\n}\n`);
   sh(repo, 'commit', '-qam', 'add avg', '--no-verify');
   return repo;
 }
@@ -45,7 +45,7 @@ test('full review flow: scanners -> seed -> branch x6 -> merge -> severity -> ve
   for (const b of blocks) assert.equal(b.status, 'done', `${b.blockId}: ${b.error}`);
   // betterleaks, or the gitleaks it falls back to on a machine without it: real tools, the same report
   assert.equal(byId['scan-betterleaks'].output?.scanner?.state, 'ran');
-  assert.equal(byId['scan-betterleaks'].output?.findings?.length, 1, 'the secrets scanner flags the AWS key');
+  assert.equal(byId['scan-betterleaks'].output?.findings?.length, 1, 'the secrets scanner flags the committed token');
   assert.equal(byId['scan-zizmor'].output?.scanner?.state, 'n/a');
   assert.equal(byId['scan-hadolint'].output?.scanner?.state, 'n/a', 'no Dockerfile changed');
   assert.equal(byId['scan-actionlint'].output?.scanner?.state, 'n/a', 'no workflow changed');
