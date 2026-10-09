@@ -57,13 +57,16 @@ export class ReviewWatch {
   private findPr: typeof prLookup;
   private prChecked = new Map<string, { at: number; pr: PrInfo | null }>();
   private visited = new Set<string>();
+  private leftUntil = Infinity;
   private via: { repoPath: string; branch: string } | null = null;
   constructor(db: DB, q: RunQuery, findPr: typeof prLookup = prLookup) {
     this.db = db; this.q = q; this.findPr = findPr;
     if (q.sha) this.visited.add(q.sha.toLowerCase());
   }
 
-  async check(): Promise<ReviewState> {
+  /** `leftMs`: how long the caller will still wait; a slow gh mustn't hold it past that. */
+  async check(leftMs = Infinity): Promise<ReviewState> {
+    this.leftUntil = Date.now() + leftMs;
     for (let hops = 0; hops < 20; hops++) {
       const run = this.db.findRuns({ ...this.q, limit: 1 })[0] ?? null;
       if (run?.status === 'superseded') {
@@ -146,10 +149,16 @@ export class ReviewWatch {
   private async prOf(repoPath: string, branch: string): Promise<PrInfo | null | undefined> {
     const c = this.prChecked.get(branch);
     if (c && Date.now() - c.at < 20_000) return c.pr;
-    const pr = await this.findPr(repoPath, branch).catch(() => undefined);
+    // no longer than the caller will still wait: past that, gh's answer is "couldn't say"
+    const left = this.leftUntil - Date.now();
+    const lookup = this.findPr(repoPath, branch).catch(() => undefined);
+    const pr = Number.isFinite(left)
+      ? await Promise.race([lookup, new Promise<undefined>((r) => setTimeout(() => r(undefined), Math.max(0, left)).unref())])
+      : await lookup;
     if (pr !== undefined) this.prChecked.set(branch, { at: Date.now(), pr });
     return pr;
   }
+
 
 
 }
@@ -219,13 +228,13 @@ export class ServiceEvents {
  * Looks, then waits for the service to say something changed, until the watch is done, the service stops (`stop`
  * says so) or the timeout passes. Returns the last state. Without `events` (tests), it looks every `intervalMs`.
  */
-export async function waitForReview(watch: { check: () => Promise<ReviewState> },
+export async function waitForReview(watch: { check: (leftMs?: number) => Promise<ReviewState> },
   opts: { timeoutMs: number; intervalMs?: number; events?: ServiceEvents | null; onChange?: (run: Run | null) => void }) {
   if (!Number.isFinite(opts.timeoutMs) || opts.timeoutMs < 0) throw new Error(`Bad timeout: ${opts.timeoutMs}`);
   const deadline = Date.now() + opts.timeoutMs;
   let lastKey = '\0';   // nothing a state gives: the first check always reports, even "no review yet"
   for (;;) {
-    const st = await watch.check();
+    const st = await watch.check(Math.max(0, deadline - Date.now()));
     const key = st.run ? `${st.run.id}:${st.run.status}` : '';
     if (key !== lastKey) { lastKey = key; opts.onChange?.(st.run); }
     if (st.done || Date.now() >= deadline) return st;

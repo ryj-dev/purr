@@ -689,3 +689,47 @@ test("a newer push covered by an open PR the poller lists, or by a review alread
   assert.deepEqual(sched, []);
   db.close();
 });
+
+test('pushes judged by the remote pushed to, and post-push off everywhere; a slow gh holds --wait no longer than its timeout', async () => {
+  const { ClaudeRunner } = await import('../src/server/claude.ts');
+  const { RunManager } = await import('../src/server/manager.ts');
+  const { PostPushWatcher } = await import('../src/server/triggers.ts');
+  const { ensureDefaults } = await import('../src/server/flows/store.ts');
+  const db = openDb(join(mkdtempSync(join(process.env.TMPDIR!, 'purr-db-')), 'purr.db'));
+  ensureDefaults(db);
+  db.setSettings({ ...db.getSettings(), projectFolders: [], postPushPrsOnly: true });
+  const main = tempRepo();
+  sh(main, 'remote', 'add', 'origin', 'https://gitlab.example.com/org/app.git');
+  sh(main, 'remote', 'add', 'hub', 'https://github.com/work-org/app-v.git');
+  const a = await addRepo(db, main);
+  const mgr = new RunManager(db, new ClaudeRunner(db));
+  const sched: string[] = [];
+  mgr.schedulePostPush = (r: any) => { sched.push(r.head); };
+  const pr = { number: 2, title: 't', body: '', url: 'u', baseRefName: 'main', headRefName: 'feat', headRefOid: 'x', isDraft: false };
+  let thePr: any = pr;
+  const watcher = new PostPushWatcher(db, mgr, { lsRemote: async () => 'eaa1', ghAuthed: async () => true, prForBranch: async () => thePr, confirmEveryMs: 5 });
+  const kind = (sha: string) => db.getPushOutcomes(sha, [a.path])[0]?.kind ?? null;
+
+  // origin is GitLab, but this push went to a GitHub remote with an open PR: reviewed, not "isn't on GitHub"
+  await watcher.pushIntent({ repoPath: main, branch: 'feat', sha: 'eaa1', from: null, remote: 'hub' });
+  await watcher.settled();
+  assert.deepEqual(sched, ['eaa1']);
+
+  // post-push off in every clone, no PR yet: nothing will ever review it, so not "waiting for a PR"
+  db.setTrigger({ trigger: 'post-push', repoId: a.id, flowId: null });
+  thePr = null;
+  const off = new PostPushWatcher(db, mgr, { lsRemote: async () => 'eab1', ghAuthed: async () => true, prForBranch: async () => null, confirmEveryMs: 5 });
+  await off.pushIntent({ repoPath: main, branch: 'feat', sha: 'eab1', from: null, remote: 'hub' });
+  await off.settled();
+  assert.equal(kind('eab1'), 'skipped');
+  db.deleteTrigger('post-push', a.id);
+
+  // a gh that never answers: --wait gives up at its timeout, not 15-30s per account later
+  db.setPushOutcome({ sha: 'eac1', kind: 'no-pr', reason: 'r', repoPath: a.path, branch: 'feat' });
+  const watch = new ReviewWatch(db, { repoIds: [a.id], sha: 'eac1' }, () => new Promise(() => {}));
+  const t0 = Date.now();
+  const st = await waitForReview(watch, { timeoutMs: 300, intervalMs: 50 });
+  assert.equal(st.done, false);
+  assert.ok(Date.now() - t0 < 2_000, `stopped near its timeout (${Date.now() - t0}ms)`);
+  db.close();
+});

@@ -94,7 +94,9 @@ export class PostPushWatcher {
       this.mgr.emit({ type: 'push', sha: body.sha });   // wakes a `purr findings --wait` on this commit
     };
     note('pending', 'waiting for the push to land');
-    this.reporting.add(body.sha);
+    // a hook here that will review its push, if it's the newer one: one in a clone with post-push off won't, so it
+    // mustn't make an older push's hook stand aside for it
+    if (this.mgr.resolveFlow('post-push', repo.id)) this.reporting.add(body.sha);
     const confirm = (async () => {
       const deadline = Date.now() + this.deps.confirmMs;
       // the branch's tip before this push (null: a new branch); the hook says, else it's what's there at first look
@@ -140,7 +142,13 @@ export class PostPushWatcher {
           // no open PR (a push to main, or a branch not yet proposed): no review, and nothing marked as handled, so
           // the poller reviews this commit when its PR is opened
           // not a GitHub remote (GitLab, a bare repo): it can't have a PR here, so with reviews PR-only none will come
-          if (prOnly && repo.remoteUrl && !githubRepo(repo.remoteUrl)) return note('skipped', `${remote} isn't on GitHub, and PuRR reviews only PRs (turn that off in Settings)`);
+          // (the remote pushed to, which needn't be origin)
+          const pushedUrl = remote === 'origin' ? repo.remoteUrl : await remoteUrl(body.repoPath, remote);
+          if (prOnly && pushedUrl && !githubRepo(pushedUrl)) return note('skipped', `${remote} isn't on GitHub, and PuRR reviews only PRs (turn that off in Settings)`);
+          // post-push off in every clone: nothing will review it, PR or not
+          const ghRepo = githubRepo(repo.remoteUrl);
+          const clonesHere = ghRepo ? this.db.listRepos().filter((r) => githubRepo(r.remoteUrl) === ghRepo) : [repo];
+          if (!clonesHere.some((c) => this.mgr.resolveFlow('post-push', c.id))) return note('skipped', 'the post-push trigger is off for this repo');
           if (prOnly && gh && !pr) return note('no-pr', `${body.branch} has no open PR; it's reviewed once one is opened`);
           if (!this.mgr.resolveFlow('post-push', repo.id)) {
             // post-push off for this clone: left to the poller, through another clone of the repo that has it on
@@ -275,7 +283,8 @@ export class PostPushWatcher {
         // (only for a clone registered since this PR's account last answered: before that, the poller couldn't have
         // seen the PR through it, even if gh failed in the poll that found the clone)
         const cloned = Math.max(...local.map((c) => Date.parse(c.addedAt) || 0));
-        const justCloned = cloned > (before.get(pr.account) ?? anyBefore) && opened >= this.startedAt && opened >= cloned - DISCOVERY_MS;
+        // (and only once some account has answered a poll before: gh signed in late, every clone predates that answer)
+        const justCloned = before.size > 0 && cloned > (before.get(pr.account) ?? anyBefore) && opened >= this.startedAt && opened >= cloned - DISCOVERY_MS;
         if (!owed && !justCloned && !(opened >= (marks.get(pr.account) ?? this.startedAt))) continue;
       }
       this.lastSeen.set(handled, pr.headRefOid);
