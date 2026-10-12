@@ -47,6 +47,12 @@ export async function defaultBaseRef(cwd: string, remote = 'origin'): Promise<st
 }
 export const mergeBase = (cwd: string, a: string, b: string) => tryGit(cwd, ['merge-base', a, b]);
 export const resolveRef = (cwd: string, ref: string) => tryGit(cwd, ['rev-parse', '--verify', '--quiet', `${ref}^{commit}`]);
+/** Whether the repo has an object whose id starts with `prefix` (4+ hex digits): unlike resolveRef, true for an ambiguous one too. */
+export const hasObject = async (cwd: string, prefix: string) => !!(await tryGit(cwd, ['rev-parse', `--disambiguate=${prefix}`]));
+/** Fetches every remote; false if that couldn't be done (offline, say). */
+export const fetchAll = async (cwd: string) => (await exec('git', ['fetch', '--quiet', '--all'], {
+  cwd, timeoutMs: 60_000, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },   // never wait on a password prompt
+})).code === 0;
 
 export interface ChangedFile {
   path: string;

@@ -1,8 +1,8 @@
 import { sh, tempRepo } from './helpers.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn, spawnSync } from 'node:child_process';
-import { writeFileSync } from 'node:fs';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
+import { mkdtempSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { openDb } from '../src/server/db.ts';
 import { addRepo } from '../src/server/http.ts';
@@ -85,6 +85,17 @@ test("for one commit, findings shows the complete review over a newer one still 
   assert.equal(JSON.parse(rerun.stdout).run.id, retry.id);
   assert.notEqual(failed.id, retry.id);
 
+  // --wait that follows a newer push which took the commit's place: the notes are about the commit it followed to
+  const db3 = openDb();
+  db3.setPushOutcome({ sha: 'cafe0000a1', kind: 'superseded', reason: 'a newer push to the branch took its place', repoPath: repo.path, branch: 'feat', nextSha: 'cafe0000b2' });
+  db3.putRun(run({ repoId: repo.id, repoPath: repo.path, headSha: 'cafe0000b2' }));
+  const staleB = run({ repoId: repo.id, repoPath: repo.path, headSha: 'cafe0000b2', trigger: 'manual', status: 'running' });
+  db3.putRun(staleB);
+  db3.close();
+  const followed = purr(repoPath, 'findings', '--sha', 'cafe0000a1', '--wait', '--timeout', '5');
+  assert.equal(followed.status, 0, followed.stderr);
+  assert.match(followed.stderr, new RegExp(`a newer review of commit cafe0000b2, ${staleB.id} \\(manual\\), is running`));
+
   // a branch's newest review still running (a newer commit): that one, and where the last finished one is
   const db2 = openDb();
   const done = run({ repoId: repo.id, repoPath: repo.path, headSha: 'f00d000001', branch: 'live' });
@@ -97,44 +108,74 @@ test("for one commit, findings shows the complete review over a newer one still 
   assert.match(b.stderr, new RegExp(`${live.id} is still running; the last finished review of branch live is ${done.id} \\(f00d000001, passed, .*purr findings --run ${done.id}`));
 });
 
-test("a manual purr run that's told to stop cancels its run instead of leaving it running; a run nothing runs any more can be cancelled", async () => {
+/**
+ * Starts `purr <args>` in `cwd` and, once the run's block 'wait' is running, calls `act` with the child and the run id.
+ * Resolves with the exit code, stderr and run id; the polling is cleared however the child ends.
+ */
+function midRun(cwd: string, args: string[], act: (p: ReturnType<typeof spawn>, id: string) => void, opts: { input?: string; idFrom?: () => string } = {}) {
+  return new Promise<{ code: number | null; stderr: string; id: string }>((res) => {
+    const p = spawn(process.execPath, [CLI, ...args], { cwd, env: process.env });
+    if (opts.input != null) p.stdin.end(opts.input);
+    let stderr = '', id = '';
+    p.stderr.on('data', (d) => { stderr += d; });
+    const t = setInterval(() => {
+      id ||= stderr.match(/\((run-[0-9a-f]+)\)/)?.[1] ?? opts.idFrom?.() ?? '';
+      if (!id) return;
+      const db = openDb();
+      const block = db.listBlockRuns(id).find((x) => x.blockId === 'wait');
+      db.close();
+      if (block?.status === 'running') { clearInterval(t); act(p, id); }
+    }, 100);
+    p.on('close', (code) => { clearInterval(t); res({ code, stderr, id }); });
+  });
+}
+
+test("a purr run or hook that's told to stop cancels its run instead of leaving it running; so does Cancel in the UI", { timeout: 120_000 }, async () => {
   const db = openDb();
   const repoPath = tempRepo();
-  await addRepo(db, repoPath);
+  const repo = await addRepo(db, repoPath);
   const ts = new Date().toISOString();
   db.putFlow({ id: 'hang', name: 'Hang', description: '', isDefault: false, createdAt: ts, updatedAt: ts, edges: [],
     blocks: [{ id: 'wait', type: 'command', label: 'Wait', position: { x: 0, y: 0 }, config: { command: 'sleep 60', timeoutSec: 120, failOnNonZero: true } }] });
+  db.setTrigger({ trigger: 'pre-commit', repoId: repo.id, flowId: 'hang' });
   db.close();
   writeFileSync(join(repoPath, 'b.txt'), 'b\n');
   sh(repoPath, 'add', '-A');
   sh(repoPath, 'commit', '-q', '-m', 'b', '--no-verify');
+  const status = (id: string) => { const d = openDb(); try { return d.getRun(id)!; } finally { d.close(); } };
 
-  for (const sig of ['SIGTERM', 'SIGINT'] as const) {
+  for (const sig of ['SIGTERM', 'SIGINT', 'SIGHUP'] as const) {
     const t0 = Date.now();
-    const out = await new Promise<{ code: number | null; stderr: string; id: string }>((res) => {
-      const p = spawn(process.execPath, [CLI, 'run', '--flow', 'hang'], { cwd: repoPath, env: process.env });
-      let stderr = '', id = '', sent = false;
-      p.stderr.on('data', (d) => {
-        stderr += d;
-        id ||= stderr.match(/\((run-[0-9a-f]+)\)/)?.[1] ?? '';
-        if (!id || sent) return;
-        // once its command is running: the run is 'running' in the database, with a process under it
-        const t = setInterval(() => {
-          const db = openDb();
-          const block = db.listBlockRuns(id).find((x) => x.blockId === 'wait');
-          db.close();
-          if (block?.status === 'running') { clearInterval(t); p.kill(sig); }
-        }, 100);
-        sent = true;
-      });
-      p.on('close', (code) => res({ code, stderr, id }));
-    });
-    assert.equal(out.code, sig === 'SIGTERM' ? 143 : 130, out.stderr);
+    const out = await midRun(repoPath, ['run', '--flow', 'hang'], (p) => p.kill(sig));
+    assert.equal(out.code, 128 + { SIGHUP: 1, SIGINT: 2, SIGTERM: 15 }[sig], out.stderr);
     assert.ok(Date.now() - t0 < 30_000, 'stopped well before its 60s command');
-    const after = openDb();
-    assert.equal(after.getRun(out.id)!.status, 'cancelled', `${sig}: not left running`);
-    after.close();
+    assert.equal(status(out.id).status, 'cancelled', `${sig}: not left running`);
   }
+
+  // twice: quits at once, the run and its running block recorded cancelled
+  const twice = await midRun(repoPath, ['run', '--flow', 'hang'], (p) => { p.kill('SIGINT'); setTimeout(() => p.kill('SIGINT'), 20); });
+  assert.equal(twice.code, 130, twice.stderr);
+  assert.equal(status(twice.id).status, 'cancelled');
+  const blocks = (() => { const d = openDb(); try { return d.listBlockRuns(twice.id); } finally { d.close(); } })();
+  assert.ok(blocks.every((b) => b.status !== 'running'), JSON.stringify(blocks));
+
+  // the pre-commit hook, Ctrl-C'd: its run cancelled, the hook exits 130
+  writeFileSync(join(repoPath, 'c.txt'), 'c\n');
+  sh(repoPath, 'add', '-A');
+  const newest = () => { const d = openDb(); try { return d.findRuns({ repoIds: [repo.id], triggers: ['pre-commit'], limit: 1 })[0]?.id ?? ''; } finally { d.close(); } };
+  const before = newest();
+  const hook = await midRun(repoPath, ['hook', 'pre-commit'], (p) => p.kill('SIGINT'), { idFrom: () => { const id = newest(); return id !== before ? id : ''; } });
+  assert.equal(hook.code, 130, hook.stderr);
+  assert.equal(status(hook.id).status, 'cancelled');
+
+  // Cancel in the UI while the CLI runs it: the CLI notices and cancels it for real (exit 2), and it stays cancelled
+  const ui = await midRun(repoPath, ['run', '--flow', 'hang'], (_p, id) => {
+    const d = openDb();
+    new RunManager(d, new ClaudeRunner(d)).cancel(id);
+    d.close();
+  });
+  assert.equal(ui.code, 2, ui.stderr);
+  assert.equal(status(ui.id).status, 'cancelled');
 
   // a run whose process died outright (SIGKILL), left 'running': cancelling it (the UI's Cancel) records it cancelled
   const db2 = openDb();
@@ -149,4 +190,44 @@ test("a manual purr run that's told to stop cancels its run instead of leaving i
   mgr.cancel(other.id, 'superseded');
   assert.equal(db2.getRun(other.id)!.status, 'running');
   db2.close();
+});
+
+test("a commit that may still be reviewed here isn't called another repo's: in another clone, noted as pushed, ambiguous, or brought by a fetch", async () => {
+  const db = openDb();
+  const remote = 'https://github.com/acme/widget-stray.git';
+  const a = tempRepo(), b = tempRepo({ 'b.md': 'b\n' });
+  for (const p of [a, b]) sh(p, 'remote', 'add', 'origin', remote);
+  const ra = await addRepo(db, a);
+  await addRepo(db, b);
+  db.setPushOutcome({ sha: 'feed000001', kind: 'skipped', reason: 'reviews are paused', repoPath: ra.path, branch: 'feat' });
+  db.close();
+  const notStray = (cwd: string, sha: string) => {
+    const r = purr(cwd, 'findings', '--sha', sha, '--wait', '--timeout', '1');
+    assert.equal(r.status, 3);
+    assert.doesNotMatch(r.stderr, /isn't in/, `${sha}: ${r.stderr}`);
+    return r.stderr;
+  };
+  notStray(a, sh(b, 'rev-parse', 'HEAD'));   // only in the other clone
+  assert.match(notStray(a, 'feed000001'), /reviews are paused/);   // only a push note
+
+  // pushed from elsewhere to the remote, not fetched here yet: the fetch brings it, so it's waited for
+  const bare = mkdtempSync(join(process.env.TMPDIR!, 'purr-test-remote-'));
+  sh(bare, 'init', '-q', '--bare');
+  const c = tempRepo(), elsewhere = tempRepo({ 'e.md': 'e\n' });
+  sh(c, 'remote', 'add', 'origin', bare);
+  sh(elsewhere, 'remote', 'add', 'origin', bare);
+  sh(elsewhere, 'push', '-q', 'origin', 'main:feat', '--no-verify');
+  const db2 = openDb();
+  await addRepo(db2, c);
+  db2.close();
+  notStray(c, sh(elsewhere, 'rev-parse', 'HEAD'));
+
+  // a short prefix that's ambiguous here: blobs until two share the first 4 hex digits, then that prefix
+  const seen = new Map<string, string>();
+  let prefix = '';
+  for (let i = 0; !prefix; i++) {
+    const id = execFileSync('git', ['hash-object', '-w', '--stdin'], { cwd: c, input: `blob ${i}\n` }).toString().trim().slice(0, 4);
+    if (seen.has(id)) prefix = id; else seen.set(id, id);
+  }
+  notStray(c, prefix);
 });

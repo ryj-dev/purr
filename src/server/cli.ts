@@ -80,6 +80,7 @@ const SIGNALS = { SIGINT: 2, SIGTERM: 15, SIGHUP: 1 } as const;
  */
 async function executeHere(db: DB, mgr: RunManager, req: RunRequest, run: Run): Promise<{ run: Run; signal: keyof typeof SIGNALS | null }> {
   let signal: keyof typeof SIGNALS | null = null;
+  let quitting = false;
   const onSignal = (sig: keyof typeof SIGNALS) => {
     if (!signal) {
       signal = sig;
@@ -87,15 +88,31 @@ async function executeHere(db: DB, mgr: RunManager, req: RunRequest, run: Run): 
       mgr.cancel(run.id);
       return;
     }
+    if (quitting) return;
+    quitting = true;
     const cur = db.getRun(run.id);
-    if (cur && !isFinished(cur)) db.putRun({ ...cur, status: 'cancelled', finishedAt: now() });
-    process.exit(128 + SIGNALS[sig]);
+    if (cur && !isFinished(cur)) {
+      const at = now();
+      db.putRun({ ...cur, status: 'cancelled', finishedAt: at, error: 'Stopped before it finished cancelling' });
+      for (const b of db.listBlockRuns(run.id)) {
+        if (b.status === 'running' || b.status === 'pending') db.putBlockRun({ ...b, status: 'cancelled', finishedAt: at });
+      }
+    }
+    // the UI and any `purr findings --wait` hear of it now, not at their next slow look
+    void daemonPost('/api/hooks/notify', { runId: run.id }, 500).finally(() => process.exit(128 + SIGNALS[sig]));
   };
   const handlers = Object.keys(SIGNALS).map((sig) => [sig, () => onSignal(sig as keyof typeof SIGNALS)] as const);
   for (const [sig, h] of handlers) process.on(sig, h);
+  // Cancel in the UI records the run cancelled in the database (nothing in the service can stop this process): stop it
+  let asked = false;
+  const outside = setInterval(() => {
+    if (!asked && !signal && db.getRun(run.id)?.status === 'cancelled') { asked = true; mgr.cancel(run.id); }
+  }, 1000);
+  outside.unref();
   try {
     return { run: await mgr.execute(req, run), signal };
   } finally {
+    clearInterval(outside);
     for (const [sig, h] of handlers) process.off(sig, h);
   }
 }
@@ -123,7 +140,7 @@ async function hook(name: HookName) {
     { const db = openDb(); try { await addRepo(db, repoPath); } finally { db.close(); } }
     if (name === 'pre-commit') {
       const r = await runHookFlow({ trigger: 'pre-commit', repoPath, mode: 'staged' });
-      if (r?.signal) return 128 + SIGNALS[r.signal];   // stopped, as git would have been without us
+      if (r?.signal) return 128 + SIGNALS[r.signal];   // stopped (the hook script passes on only 1: a Ctrl-C stops git itself)
       if (r?.run.status === 'blocked') {
         process.stderr.write(`${C.dim}Commit blocked by purr. Fix the above, dismiss a false positive in the purr UI (Findings), or skip once with PURR_SKIP=1.${C.x}\n`);
         return 1;

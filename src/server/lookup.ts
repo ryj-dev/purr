@@ -3,7 +3,7 @@ import { existsSync, realpathSync } from 'node:fs';
 import type { Finding, Run } from '../shared/types.ts';
 import type { DB, RunQuery } from './db.ts';
 import { type PrInfo, githubRepo, prLookup } from './gh.ts';
-import { remoteUrl, repoRoot, resolveRef } from './git.ts';
+import { fetchAll, hasObject, remoteUrl, repoRoot } from './git.ts';
 import { TERMINAL } from './manager.ts';
 
 /**
@@ -55,15 +55,21 @@ export function pickReview(db: DB, q: RunQuery): { run: Run | null; newer: Run |
 }
 
 /**
- * For a commit with no review in the repos `repoIds`: whether it can ever get one there. null when it can (a clone or
- * worktree of the repo has the commit, or a push of it was noted there); otherwise the reviews of it in other repos
- * PuRR knows, newest first, which say where it belongs (none when no repo PuRR knows has reviewed it).
+ * For a commit with no review in the repos `repoIds`: whether it can ever get one there. null when it can: a clone or
+ * worktree of the repo has the commit (a short prefix that's ambiguous there counts), or a push of it was noted there.
+ * Otherwise the reviews of it in other repos PuRR knows, newest first, which say where it belongs. With none, it may
+ * have been pushed from elsewhere (CI, another machine) and not fetched yet: the clones fetch, and if that can't be
+ * done, or brings the commit, null; else none, meaning no repo PuRR knows has it.
  */
 export async function commitElsewhere(db: DB, repoIds: string[], sha: string): Promise<Run[] | null> {
-  const paths = repoIds.map((id) => db.getRepo(id)?.path).filter((p): p is string => !!p);
+  const paths = repoIds.map((id) => db.getRepo(id)?.path).filter((p): p is string => !!p && existsSync(p));
   if (db.getPushOutcomes(sha, paths).length) return null;
-  for (const p of paths) if (existsSync(p) && await resolveRef(p, sha)) return null;
-  return db.findRuns({ sha, limit: 20 }).filter((r) => !r.repoId || !repoIds.includes(r.repoId));
+  const here = async () => { for (const p of paths) if (await hasObject(p, sha)) return true; return false; };
+  if (await here()) return null;
+  const elsewhere = db.findRuns({ sha, limit: 20 }).filter((r) => !r.repoId || !repoIds.includes(r.repoId));
+  if (elsewhere.length) return elsewhere;
+  for (const p of paths) if (!await fetchAll(p)) return null;
+  return await here() ? null : [];
 }
 
 export interface ReviewState {
