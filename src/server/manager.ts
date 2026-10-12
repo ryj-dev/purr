@@ -151,7 +151,15 @@ export class RunManager {
       return run;
     }
     const c = this.controllers.get(runId);
-    if (c) { (c as any).reason = reason; c.abort(); }
+    if (c) { (c as any).reason = reason; c.abort(); return run; }
+    // asked to cancel a run not running in this process: a hook or `purr run` runs its flow in its own, and one killed
+    // outright (SIGKILL) left it 'running' for good. Record it cancelled; a process still running it goes on saving its
+    // own state over this. (A newer push doesn't do this: it only supersedes the reviews this process runs.)
+    if (reason === 'cancelled' && !TERMINAL.has(run.status)) {
+      run.status = 'cancelled'; run.finishedAt = now();
+      run.error = 'Cancelled outside the process running it';
+      this.save(run);
+    }
     return run;
   }
 

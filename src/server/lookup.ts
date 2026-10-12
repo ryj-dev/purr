@@ -3,7 +3,7 @@ import { existsSync, realpathSync } from 'node:fs';
 import type { Finding, Run } from '../shared/types.ts';
 import type { DB, RunQuery } from './db.ts';
 import { type PrInfo, githubRepo, prLookup } from './gh.ts';
-import { remoteUrl, repoRoot } from './git.ts';
+import { remoteUrl, repoRoot, resolveRef } from './git.ts';
 import { TERMINAL } from './manager.ts';
 
 /**
@@ -38,6 +38,33 @@ export function currentFindings(db: DB, run: Run): Finding[] {
 }
 
 export const isFinished = (run: Run) => TERMINAL.has(run.status);
+/** Finished and reviewed the code to the end: passed or blocked, not cut short (failed, cancelled, superseded). */
+export const isComplete = (run: Run) => run.status === 'passed' || run.status === 'blocked';
+
+/**
+ * The review `q` names: the newest, except for one commit (`q.sha`), where a complete review beats a newer one still
+ * running or cut short: it reviewed the same code (a manual `purr run` of a commit already reviewed after its push,
+ * say). Then a review in progress beats one cut short, which a rerun is retrying. `newer`: the newest review of the
+ * commit when it isn't the one picked, so the caller can say it exists.
+ */
+export function pickReview(db: DB, q: RunQuery): { run: Run | null; newer: Run | null } {
+  if (!q.sha) return { run: db.findRuns({ ...q, limit: 1 })[0] ?? null, newer: null };
+  const runs = db.findRuns({ ...q, limit: 50 });
+  const run = runs.find(isComplete) ?? runs.find((r) => !isFinished(r)) ?? runs[0] ?? null;
+  return { run, newer: run && runs[0] !== run ? runs[0] : null };
+}
+
+/**
+ * For a commit with no review in the repos `repoIds`: whether it can ever get one there. null when it can (a clone or
+ * worktree of the repo has the commit, or a push of it was noted there); otherwise the reviews of it in other repos
+ * PuRR knows, newest first, which say where it belongs (none when no repo PuRR knows has reviewed it).
+ */
+export async function commitElsewhere(db: DB, repoIds: string[], sha: string): Promise<Run[] | null> {
+  const paths = repoIds.map((id) => db.getRepo(id)?.path).filter((p): p is string => !!p);
+  if (db.getPushOutcomes(sha, paths).length) return null;
+  for (const p of paths) if (existsSync(p) && await resolveRef(p, sha)) return null;
+  return db.findRuns({ sha, limit: 20 }).filter((r) => !r.repoId || !repoIds.includes(r.repoId));
+}
 
 export interface ReviewState {
   run: Run | null;      // null until the review exists
@@ -68,7 +95,7 @@ export class ReviewWatch {
   async check(leftMs = Infinity): Promise<ReviewState> {
     this.leftUntil = Date.now() + leftMs;
     for (let hops = 0; hops < 20; hops++) {
-      const run = this.db.findRuns({ ...this.q, limit: 1 })[0] ?? null;
+      const { run } = pickReview(this.db, this.q);
       if (run?.status === 'superseded') {
         const next = run.branch ? this.db.findRuns({ repoIds: this.q.repoIds, branch: run.branch, triggers: this.q.triggers, limit: 1 })[0] : null;
         if (next?.headSha && next.id !== run.id && next.queuedAt > run.queuedAt) {

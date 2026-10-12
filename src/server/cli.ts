@@ -10,12 +10,15 @@ import { ensureDefaults } from './flows/store.ts';
 import { exportFlow, importFlow, previewImport } from './flows/share.ts';
 import { readFileSync } from 'node:fs';
 import { currentBranch, defaultBaseRef, headSha, repoRoot, upstreamBranch } from './git.ts';
-import { ReviewWatch, ServiceEvents, blockSessions, currentFindings, isActive, isFinished, resolvedBy, sameRepoIds, waitForReview } from './lookup.ts';
+import {
+  ReviewWatch, ServiceEvents, blockSessions, commitElsewhere, currentFindings, isActive, isComplete, isFinished, pickReview, resolvedBy, sameRepoIds,
+  waitForReview,
+} from './lookup.ts';
 import { addRepo, startHttp } from './http.ts';
 import { installGlobalHooks, removePidFile, uninstallGlobalHooks, writePidFile } from './globalHooks.ts';
 import { type RunRequest, RunManager } from './manager.ts';
 import { PostPushWatcher } from './triggers.ts';
-import { exec, paths } from './util.ts';
+import { exec, now, paths } from './util.ts';
 import { SHIM } from './runtime.ts';
 
 type HookName = 'pre-commit' | 'pre-push';
@@ -67,14 +70,47 @@ function report(run: Run, findings: Finding[], opts: { all?: boolean; detail?: b
   }
 }
 
-/** Runs a hook flow in this process (fast, no daemon needed), then tells the daemon so the UI updates. */
-async function runHookFlow(req: RunRequest): Promise<Run | null> {
+const SIGNALS = { SIGINT: 2, SIGTERM: 15, SIGHUP: 1 } as const;
+
+/**
+ * Runs a flow in this process. Nothing else owns the run, so when this process is told to stop (Ctrl-C, a closed
+ * terminal, or SIGTERM from whatever started it), it cancels the run, which stops its sessions and scanners, and waits
+ * for that to be recorded: otherwise the run would stay 'running' with nothing behind it. A second signal stops
+ * waiting and records it cancelled as it is. `signal`: the one that stopped it, if any (exit 128 + its number).
+ */
+async function executeHere(db: DB, mgr: RunManager, req: RunRequest, run: Run): Promise<{ run: Run; signal: keyof typeof SIGNALS | null }> {
+  let signal: keyof typeof SIGNALS | null = null;
+  const onSignal = (sig: keyof typeof SIGNALS) => {
+    if (!signal) {
+      signal = sig;
+      process.stderr.write(`${C.dim}purr: stopping, cancelling ${run.id}… (again to quit at once)${C.x}\n`);
+      mgr.cancel(run.id);
+      return;
+    }
+    const cur = db.getRun(run.id);
+    if (cur && !isFinished(cur)) db.putRun({ ...cur, status: 'cancelled', finishedAt: now() });
+    process.exit(128 + SIGNALS[sig]);
+  };
+  const handlers = Object.keys(SIGNALS).map((sig) => [sig, () => onSignal(sig as keyof typeof SIGNALS)] as const);
+  for (const [sig, h] of handlers) process.on(sig, h);
+  try {
+    return { run: await mgr.execute(req, run), signal };
+  } finally {
+    for (const [sig, h] of handlers) process.off(sig, h);
+  }
+}
+
+/**
+ * Runs a hook flow in this process (fast, no daemon needed), then tells the daemon so the UI updates. `signal`: this
+ * process was told to stop, so the run was cancelled.
+ */
+async function runHookFlow(req: RunRequest): Promise<{ run: Run; signal: keyof typeof SIGNALS | null } | null> {
   const { db, mgr } = setup();
   const run = mgr.createRun(req);
   if (!run) { db.close(); return null; }
-  const done = await mgr.execute(req, run);
-  report(done, db.getRunFindings(done.id));
-  await daemonPost('/api/hooks/notify', { runId: done.id });
+  const done = await executeHere(db, mgr, req, run);
+  report(done.run, db.getRunFindings(done.run.id));
+  await daemonPost('/api/hooks/notify', { runId: done.run.id });
   db.close();
   return done;
 }
@@ -86,8 +122,9 @@ async function hook(name: HookName) {
     // PuRR covers every repo: the first commit or push through it registers the repo (for the poller, ledger and settings)
     { const db = openDb(); try { await addRepo(db, repoPath); } finally { db.close(); } }
     if (name === 'pre-commit') {
-      const run = await runHookFlow({ trigger: 'pre-commit', repoPath, mode: 'staged' });
-      if (run?.status === 'blocked') {
+      const r = await runHookFlow({ trigger: 'pre-commit', repoPath, mode: 'staged' });
+      if (r?.signal) return 128 + SIGNALS[r.signal];   // stopped, as git would have been without us
+      if (r?.run.status === 'blocked') {
         process.stderr.write(`${C.dim}Commit blocked by purr. Fix the above, dismiss a false positive in the purr UI (Findings), or skip once with PURR_SKIP=1.${C.x}\n`);
         return 1;
       }
@@ -102,11 +139,12 @@ async function hook(name: HookName) {
     for (const [localRef, localSha, remoteRef, remoteSha] of refs) {
       if (ZERO.test(localSha) || !remoteRef.startsWith('refs/heads/')) continue; // branch deletion or tag
       const branch = remoteRef.slice('refs/heads/'.length);
-      const run = await runHookFlow({
+      const r = await runHookFlow({
         trigger: 'pre-push', repoPath, mode: 'range', head: localSha, base: ZERO.test(remoteSha) ? null : remoteSha,
         branch: localRef.startsWith('refs/heads/') ? localRef.slice(11) : branch,
       });
-      if (run?.status === 'blocked') {
+      if (r?.signal) return 128 + SIGNALS[r.signal];
+      if (r?.run.status === 'blocked') {
         process.stderr.write(`${C.dim}Push blocked by purr. Fix the above, dismiss a false positive in the purr UI (Findings), or skip once with PURR_SKIP=1.${C.x}\n`);
         return 1;
       }
@@ -167,12 +205,13 @@ async function manualRun() {
   const run = mgr.createRun(req);
   if (!run) { console.error('The manual trigger is disabled for this repo; pass --flow <id>'); return 2; }
   process.stderr.write(`purr: running "${run.flowName}" (${run.id})…\n`);
-  const done = await mgr.execute(req, run);
+  const { run: done, signal } = await executeHere(db, mgr, req, run);
   const findings = db.getRunFindings(done.id);
   if (args.includes('--json')) console.log(JSON.stringify({ run: { ...done, flow: undefined }, findings }, null, 2));
   else report(done, findings);
   await daemonPost('/api/hooks/notify', { runId: done.id });
   db.close();
+  if (signal) return 128 + SIGNALS[signal];
   if (done.status === 'failed' || done.status === 'cancelled') return 2;
   return done.counts.must_fix > 0 ? 1 : 0;
 }
@@ -280,8 +319,33 @@ const listen = (db: DB) => ServiceEvents.connect(db.getSettings().port);
 /** PuRR itself went wrong before or outside a command's own handling (the database won't open): exit 5, not 2. */
 const purrFailed = (e: unknown) => { console.error(`purr: couldn't read the reviews: ${(e as Error)?.message ?? e}`); return 5; };
 
+/** Where PuRR reviewed commit `sha`, for a lookup in the wrong repo: "PuRR reviewed it in /x (PR #3, run-…)", or null. */
+function reviewedIn(sha: string, runs: Run[]): string | null {
+  const r = runs.find(isComplete) ?? runs[0];
+  if (!r) return null;
+  return `PuRR reviewed commit ${sha.slice(0, 12)} in ${r.repoPath} (${[r.pr ? `PR #${r.pr.number}` : r.branch, r.id].filter(Boolean).join(', ')}): `
+    + `run this from there, or pass --repo ${r.repoPath}`;
+}
+
+/**
+ * Why no review of commit `sha` will ever come in the repos `repoIds`, or null if one may: it isn't in any clone of the
+ * repo, so it's another repo's commit (named, if PuRR reviewed it there). Then waiting for it would only time out.
+ */
+async function notInRepo(db: DB, repoIds: string[], sha: string): Promise<string | null> {
+  if (db.findRuns({ repoIds, sha, limit: 1 }).length) return null;
+  const elsewhere = await commitElsewhere(db, repoIds, sha);
+  if (!elsewhere) return null;
+  const top = await repoRoot(value('repo') ?? process.cwd());
+  return `commit ${sha.slice(0, 12)} isn't in ${top}${repoIds.length > 1 ? ' or its other clones' : ''}, so it won't be reviewed here. `
+    + (reviewedIn(sha, elsewhere) ?? "Run this from the repo it's in, or pass --repo <path> (pushed from another machine? git fetch first)");
+}
+
 const describe = (q: RunQuery) => q.pr != null ? `PR #${q.pr}` : q.sha ? `commit ${q.sha.slice(0, 12)}` : q.branch ? `branch ${q.branch}` : 'this repo';
-const unknownRepo = () => `PuRR hasn't seen the repo at ${value('repo') ?? process.cwd()} yet (commit or push through it, or run: purr repo add)`;
+const unknownRepo = (db: DB) => {
+  const sha = value('sha');
+  const there = sha ? reviewedIn(sha, db.findRuns({ sha, limit: 20 })) : null;
+  return `PuRR hasn't seen the repo at ${value('repo') ?? process.cwd()} yet (commit or push through it, or run: purr repo add)${there ? `. ${there}` : ''}`;
+};
 /** Local time, to the minute. */
 const localTime = (iso: string) => {
   const d = new Date(iso), p = (n: number) => String(n).padStart(2, '0');
@@ -298,10 +362,15 @@ async function findingsCmd(): Promise<number> {
   try {
     const runId = value('run');
     const q = runId ? {} : await runQuery(db, true);
-    if (!q) { console.error(`purr: ${unknownRepo()}`); return 3; }
+    if (!q) { console.error(`purr: ${unknownRepo(db)}`); return 3; }
+    // another repo's commit: say where it is now, rather than wait out the timeout for a review that can't come here
+    const sha = runId ? null : value('sha');
+    const stray = sha ? await notInRepo(db, q.repoIds!, sha) : null;
+    if (stray) { console.error(`purr: ${stray}`); return 3; }
     const wait = args.includes('--wait');
     const timeoutSec = positiveInt('timeout') ?? 1800;
     let run: Run | null;
+    let lastQuery: RunQuery = q;   // what --wait looked up last: it follows a newer push that covers the commit
     if (wait && !runId) {
       // with nothing to narrow it, wait for the review of the commit checked out here (the one just pushed), under
       // whatever name it was pushed as
@@ -323,6 +392,7 @@ async function findingsCmd(): Promise<number> {
         },
       });
       events?.close();
+      lastQuery = watch.q;
       for (; notes < watch.notes.length; notes++) process.stderr.write(`${C.dim}purr: ${watch.notes[notes]}${C.x}\n`);
       if (st.stop) { console.error(`purr: ${st.stop}`); return 3; }
       if (!events && !st.done) { console.error(`purr: ${NOT_RUNNING}`); return 3; }
@@ -330,7 +400,7 @@ async function findingsCmd(): Promise<number> {
       if (!run) { console.error(`purr: no review of ${label} appeared within ${timeoutSec}s`); return 3; }
       if (!st.done) { console.error(`purr: review ${run.id} is still ${run.status} after ${timeoutSec}s`); return 3; }
     } else {
-      const find = () => runId ? db.getRun(runId) : db.findRuns({ ...q, limit: 1 })[0] ?? null;
+      const find = () => runId ? db.getRun(runId) : pickReview(db, q).run;
       // a run id that doesn't exist will never appear: say so now rather than wait out the timeout
       if (runId && !db.getRun(runId)) { console.error(`purr: no review of run ${runId} found (purr runs lists them)`); return 3; }
       // waits for a review that isn't queued yet, too (the PR's first, still in its debounce)
@@ -347,6 +417,21 @@ async function findingsCmd(): Promise<number> {
       if (st?.stop) { console.error(`purr: ${st.stop}`); return 3; }
       run = st ? st.run : find();
       if (!run) { console.error(`purr: no review of ${runId ? `run ${runId}` : describe(q)} found (purr runs lists them)`); return 3; }
+    }
+    if (!runId) {
+      // the commit's newer review that wasn't picked (still running, cut short), or the last finished one of a
+      // review still running: say so, so neither hides the other
+      const at = lastQuery;
+      const { newer } = pickReview(db, at);
+      if (newer) {
+        process.stderr.write(`${C.dim}purr: a newer review of ${describe(at)}, ${newer.id} (${newer.trigger}), is ${newer.status}; `
+          + `showing ${isComplete(run) ? 'the last one that ran to the end' : run.id}${C.x}\n`);
+      }
+      const prev = isFinished(run) ? null : db.findRuns({ ...at, limit: 50 }).find(isComplete);
+      if (prev) {
+        process.stderr.write(`${C.dim}purr: ${run.id} is still ${run.status}; the last finished review of ${describe(at)} is ${prev.id} `
+          + `(${prev.headSha?.slice(0, 12)}, ${prev.status}, ${localTime(prev.finishedAt ?? prev.queuedAt)}): purr findings --run ${prev.id}${C.x}\n`);
+      }
     }
     const findings = currentFindings(db, run);
     const sessions = blockSessions(db, run.id);
@@ -385,7 +470,9 @@ async function runsCmd(): Promise<number> {
   const db = openDb();
   try {
     const q = await runQuery(db, false);
-    if (!q) { console.error(`purr: ${unknownRepo()}`); return 3; }
+    if (!q) { console.error(`purr: ${unknownRepo(db)}`); return 3; }
+    const stray = q.sha ? await notInRepo(db, q.repoIds!, q.sha) : null;
+    if (stray) { console.error(`purr: ${stray}`); return 3; }
     const runs = db.findRuns({ ...q, limit: positiveInt('limit') ?? 20 });
     if (args.includes('--json')) { console.log(JSON.stringify(runs.map((r) => ({ ...r, flow: undefined })), null, 2)); return 0; }
     if (!runs.length) { console.error(`purr: no reviews of ${describe(q)} found`); return 0; }

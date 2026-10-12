@@ -233,9 +233,11 @@ test('purr findings: exit codes, usage errors, --json and purr runs', async (tc)
   assert.equal(purr(empty, 'findings', '--wait').status, 4);
 
   // --wait gives up at its timeout: on a review that never appeared, and on one still running
-  const never = await purrA(repoPath, 'findings', '--sha', 'abab00ff', '--wait', '--timeout', '1');
+  execFileSync('git', ['commit', '-q', '--allow-empty', '-m', 'unreviewed', '--no-verify'], { cwd: repoPath });
+  const unreviewed = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repoPath, encoding: 'utf8' }).trim().slice(0, 12);
+  const never = await purrA(repoPath, 'findings', '--sha', unreviewed, '--wait', '--timeout', '1');
   assert.equal(never.status, 3);
-  assert.match(never.stderr, /no review of commit abab00ff appeared within 1s/);
+  assert.match(never.stderr, new RegExp(`no review of commit ${unreviewed} appeared within 1s`));
   const db8 = openDb();
   db8.putRun(run({ repoId: repo.id, repoPath, headSha: 'abab00fe', branch: 'slow', status: 'running' }));
   db8.close();
