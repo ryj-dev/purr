@@ -9,7 +9,7 @@ import { type DB, type RunQuery, openDb } from './db.ts';
 import { ensureDefaults } from './flows/store.ts';
 import { exportFlow, importFlow, previewImport } from './flows/share.ts';
 import { readFileSync } from 'node:fs';
-import { currentBranch, defaultBaseRef, headSha, repoRoot, upstreamBranch } from './git.ts';
+import { currentBranch, defaultBaseRef, fetchAll, headSha, repoRoot, upstreamBranch } from './git.ts';
 import {
   ReviewWatch, ServiceEvents, blockSessions, commitElsewhere, currentFindings, isActive, isComplete, isFinished, pickReview, resolvedBy, sameRepoIds,
   waitForReview,
@@ -116,7 +116,10 @@ async function executeHere(db: DB, mgr: RunManager, req: RunRequest, run: Run): 
   }, 1000);
   outside.unref();
   try {
-    return { run: await mgr.execute(req, run), signal };
+    const done = await mgr.execute(req, run);
+    // a signal that came once it had ended (blocked, say, while posting its comment) doesn't change what it found:
+    // a hook must still block on it
+    return { run: done, signal: done.status === 'cancelled' ? signal : null };
   } finally {
     clearInterval(outside);
     for (const [sig, h] of handlers) process.off(sig, h);
@@ -355,10 +358,12 @@ function reviewedIn(sha: string, runs: Run[]): string | null {
  * Why no review of commit `sha` will ever come in the repos `repoIds`, or null if one may: it isn't in any clone of the
  * repo, so it's another repo's commit (named, if PuRR reviewed it there). Then waiting for it would only time out.
  */
-async function notInRepo(db: DB, repoIds: string[], sha: string, timeoutSec: number): Promise<string | null> {
+async function notInRepo(db: DB, repoIds: string[], sha: string, wait: boolean, timeoutSec: number): Promise<string | null> {
   if (db.findRuns({ repoIds, sha, limit: 1 }).length) return null;
   const top = await repoRoot(value('repo') ?? process.cwd());
-  const elsewhere = await commitElsewhere(db, repoIds, sha, top, Math.min(15, timeoutSec) * 1000);
+  // only before a wait (that's what it saves): a plain lookup answers at once and leaves the remote refs alone
+  const fetch = wait ? (p: string) => fetchAll(p, Math.min(15, timeoutSec) * 1000) : null;
+  const elsewhere = await commitElsewhere(db, repoIds, sha, top, fetch);
   if (!elsewhere) return null;
   return `commit ${sha.slice(0, 12)} isn't in ${top}${repoIds.length > 1 ? ' or its other clones' : ''}, so it won't be reviewed here. `
     + (reviewedIn(sha, elsewhere) ?? "Run this from the repo it's in, or pass --repo <path> (pushed from another machine? git fetch first)");
@@ -391,7 +396,7 @@ async function findingsCmd(): Promise<number> {
     const sha = runId ? null : value('sha');
     const wait = args.includes('--wait');
     const timeoutSec = positiveInt('timeout') ?? 1800;
-    const stray = sha ? await notInRepo(db, q.repoIds!, sha, timeoutSec) : null;
+    const stray = sha ? await notInRepo(db, q.repoIds!, sha, wait, timeoutSec) : null;
     if (stray) { console.error(`purr: ${stray}`); return 3; }
     let run: Run | null;
     let lastQuery: RunQuery = q;   // what --wait looked up last: it follows a newer push that covers the commit

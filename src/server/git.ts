@@ -27,6 +27,8 @@ export const upstreamBranch = async (cwd: string, branch: string) => {
   return up.match(/^refs\/remotes\/[^/]+\/(.+)$/)?.[1] ?? null;
 };
 export const remoteUrl = (cwd: string, remote = 'origin') => tryGit(cwd, ['remote', 'get-url', remote]);
+/** The git dir a checkout's worktrees share. */
+export const commonDir = (cwd: string) => tryGit(cwd, ['rev-parse', '--path-format=absolute', '--git-common-dir']);
 export const gitDir = (cwd: string) => tryGit(cwd, ['rev-parse', '--absolute-git-dir']);
 /** Shared hooks dir (respects core.hooksPath). */
 export async function hooksDir(cwd: string): Promise<string> {

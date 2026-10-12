@@ -3,7 +3,7 @@ import { existsSync, realpathSync } from 'node:fs';
 import type { Finding, Run } from '../shared/types.ts';
 import type { DB, RunQuery } from './db.ts';
 import { type PrInfo, githubRepo, prLookup } from './gh.ts';
-import { fetchAll, hasObject, remoteUrl, repoRoot } from './git.ts';
+import { commonDir, hasObject, remoteUrl, repoRoot } from './git.ts';
 import { TERMINAL } from './manager.ts';
 
 /**
@@ -61,10 +61,11 @@ export function pickReview(db: DB, q: RunQuery): { run: Run | null; newer: Run |
  * For a commit with no review in the repos `repoIds`: whether it can ever get one there. null when it can: a clone or
  * worktree of the repo (or the `checkout` asked from) has the commit (a short prefix that's ambiguous there counts), or a push of it was noted there.
  * Otherwise the reviews of it in other repos PuRR knows, newest first, which say where it belongs. With none, it may
- * have been pushed from elsewhere (CI, another machine) and not fetched yet: the clones fetch, and if that can't be
- * done (within `fetchMs`), or brings the commit, null; else none, meaning no repo PuRR knows has it.
+ * have been pushed from elsewhere (CI, another machine) and not fetched yet: the clones `fetch`, and if that can't be
+ * done, or brings the commit, null; else none. Without `fetch`, can't tell (null) unless another repo reviewed it, meaning no repo PuRR knows has it.
  */
-export async function commitElsewhere(db: DB, repoIds: string[], sha: string, checkout: string | null, fetchMs = 15_000): Promise<Run[] | null> {
+export async function commitElsewhere(db: DB, repoIds: string[], sha: string, checkout: string | null,
+  fetch: ((path: string) => Promise<boolean>) | null): Promise<Run[] | null> {
   const registered = repoIds.map((id) => db.getRepo(id)?.path).filter((p): p is string => !!p);
   if (db.getPushOutcomes(sha, registered).length) return null;
   // the checkout asked from as well: it may be a clone or worktree PuRR hasn't registered, with commits of its own
@@ -75,8 +76,12 @@ export async function commitElsewhere(db: DB, repoIds: string[], sha: string, ch
   const elsewhere = db.findRuns({ sha, limit: 20 }).filter((r) => !r.repoId || !repoIds.includes(r.repoId));
   // 12+ digits reviewed elsewhere settle it; a short prefix may be another commit there that shares its digits
   if (elsewhere.length && sha.length >= 12) return elsewhere;
-  // all at once, and no longer than `fetchMs`: one that fails or runs out of time means can't tell
-  if ((await Promise.all(paths.map((p) => fetchAll(p, fetchMs)))).includes(false)) return null;
+  if (!fetch) return elsewhere.length ? elsewhere : null;
+  // all at once, once per git dir (worktrees share one, and two fetches into it fight over its ref locks): one that
+  // fails or runs out of time means can't tell
+  const dirs = new Map<string, string>();
+  for (const p of paths) { const d = await commonDir(p); if (d && !dirs.has(d)) dirs.set(d, p); }
+  if ((await Promise.all([...dirs.values()].map(fetch))).includes(false)) return null;
   return await here() ? null : elsewhere;
 }
 

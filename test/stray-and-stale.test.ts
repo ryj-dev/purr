@@ -9,7 +9,7 @@ import { addRepo, startHttp } from '../src/server/http.ts';
 import { PostPushWatcher } from '../src/server/triggers.ts';
 import { RunManager } from '../src/server/manager.ts';
 import { ClaudeRunner } from '../src/server/claude.ts';
-import { ReviewWatch } from '../src/server/lookup.ts';
+import { ReviewWatch, commitElsewhere } from '../src/server/lookup.ts';
 import type { Run } from '../src/shared/types.ts';
 
 const CLI = new URL('../src/server/cli.ts', import.meta.url).pathname;
@@ -179,7 +179,11 @@ test("a purr run or hook that's told to stop cancels its run instead of leaving 
 
   for (const sig of ['SIGTERM', 'SIGINT', 'SIGHUP'] as const) {
     const t0 = Date.now();
-    const out = await midRun(repoPath, ['run', '--flow', 'hang'], (p) => p.kill(sig));
+    // SIGHUP as a closed terminal sends it: nothing reads its output any more, so writes to it fail
+    const out = await midRun(repoPath, ['run', '--flow', 'hang'], (p) => {
+      if (sig === 'SIGHUP') { p.stdout!.destroy(); p.stderr!.destroy(); }
+      p.kill(sig);
+    });
     assert.equal(out.code, 128 + { SIGHUP: 1, SIGINT: 2, SIGTERM: 15 }[sig], out.stderr);
     assert.ok(Date.now() - t0 < 30_000, 'stopped well before its 60s command');
     assert.equal(status(out.id).status, 'cancelled', `${sig}: not left running`);
@@ -271,6 +275,25 @@ test("a purr run or hook that's told to stop cancels its run instead of leaving 
   mgr.cancel(other.id, 'superseded');
   assert.equal(db2.getRun(other.id)!.status, 'running');
 
+  // cancelled from outside just before its end (its command does it, then exits 0): recorded cancelled with why,
+  // nothing posted, nothing it would have marked fixed
+  const script = join(mkdtempSync(join(process.env.TMPDIR!, 'purr-test-script-')), 'cancel.mjs');
+  writeFileSync(script, `import { openDb } from ${JSON.stringify(new URL('../src/server/db.ts', import.meta.url).pathname)};
+const d = openDb();
+const row = d.raw.prepare("SELECT data FROM runs WHERE status = 'running' AND json_extract(data, '$.flowId') = 'cancelme'").get();
+const r = JSON.parse(row.data);
+d.cancelActiveRun({ ...r, status: 'cancelled', error: 'Cancelled outside the process running it' });
+d.close();
+`);
+  db2.putFlow({ id: 'cancelme', name: 'Cancel me', description: '', isDefault: false, createdAt: ts, updatedAt: ts, edges: [],
+    blocks: [{ id: 'c', type: 'command', label: 'C', position: { x: 0, y: 0 }, config: { command: `${JSON.stringify(process.execPath)} --no-warnings ${script}`, timeoutSec: 60, failOnNonZero: true } }] });
+  let posted = 0;
+  (mgr as any).sideEffects = async () => { posted++; };
+  const lateReq = { trigger: 'manual' as const, repoPath, mode: 'range' as const, flowId: 'cancelme' };
+  const late = await mgr.execute(lateReq, mgr.createRun(lateReq)!);
+  assert.deepEqual([late.status, db2.getRun(late.id)!.status, db2.getRun(late.id)!.error, posted],
+    ['cancelled', 'cancelled', 'Cancelled outside the process running it', 0]);
+
   // the UI's Cancel (POST /api/runs/:id/cancel) on a run another process left running: answered with it cancelled
   const server = startHttp(db2, mgr, new PostPushWatcher(db2, mgr), 0);
   await new Promise((r) => server.once('listening', r));
@@ -285,6 +308,29 @@ test("a purr run or hook that's told to stop cancels its run instead of leaving 
     assert.equal(db2.listBlockRuns(left.id)[0].status, 'cancelled');
   } finally { server.closeAllConnections(); server.close(); }
   db2.close();
+});
+
+test('commitElsewhere: with a fetch that works and brings nothing, only a commit no clone has is called stray', async () => {
+  const db = openDb();
+  const remote = 'https://github.com/acme/widget-direct.git';
+  const a = tempRepo(), b = tempRepo({ 'b.md': 'b\n' });
+  for (const p of [a, b]) sh(p, 'remote', 'add', 'origin', remote);
+  const ra = await addRepo(db, a), rb = await addRepo(db, b);
+  const unreg = mkdtempSync(join(process.env.TMPDIR!, 'purr-test-unreg-'));
+  execFileSync('git', ['clone', '-q', a, unreg]);
+  sh(unreg, '-c', 'user.email=t@example.com', '-c', 'user.name=T', 'commit', '-q', '--allow-empty', '-m', 'local', '--no-verify');
+  db.setPushOutcome({ sha: 'feed000009', kind: 'skipped', reason: 'paused', repoPath: ra.path, branch: 'feat' });
+  const fetched: string[] = [];
+  const fetch = async (p: string) => { fetched.push(p); return true; };
+  const ids = [ra.id, rb.id];
+  assert.equal(await commitElsewhere(db, ids, sh(b, 'rev-parse', 'HEAD'), a, fetch), null, 'in a registered clone');
+  assert.equal(await commitElsewhere(db, ids, sh(unreg, 'rev-parse', 'HEAD'), unreg, fetch), null, 'in the checkout asked from');
+  assert.equal(await commitElsewhere(db, ids, 'feed000009', a, fetch), null, 'noted as pushed');
+  assert.deepEqual(await commitElsewhere(db, ids, 'deadbeef00', a, fetch), [], 'nowhere: stray');
+  assert.ok(fetched.length > 0, 'it fetched before saying so');
+  assert.equal(await commitElsewhere(db, ids, 'deadbeef00', a, null), null, 'without a fetch: can\'t tell');
+  assert.equal(await commitElsewhere(db, ids, 'deadbeef00', a, async () => false), null, 'a fetch that failed: can\'t tell');
+  db.close();
 });
 
 test("a commit that may still be reviewed here isn't called another repo's: in another clone, noted as pushed, ambiguous, or brought by a fetch", async () => {

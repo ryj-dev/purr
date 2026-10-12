@@ -276,8 +276,10 @@ export class RunManager {
       // before, and then the run marks nothing fixed, posts nothing and is recorded cancelled, or after, and is refused
       // because the run has ended (cancelActiveRun)
       const ended = this.db.transaction(() => {
-        const outside = !controller.signal.aborted && this.db.getRun(run.id)?.status === 'cancelled';
-        if (outside) { run.status = 'cancelled'; run.error = 'Cancelled outside the process running it'; }
+        const stored = this.db.getRun(run.id);
+        const outside = !controller.signal.aborted && stored?.status === 'cancelled';
+        // recorded cancelled already, with why (the UI's Cancel, a second Ctrl-C): kept
+        if (stored?.status === 'cancelled') { run.status = 'cancelled'; run.error = stored.error ?? run.error; }
         const checked = result.failedBlocks.length === 0 && !controller.signal.aborted && !outside ? completeBlocks(run.flow.blocks, result.blocks) : null;
         applyLedger(this.db, run, result.findings, checked?.complete ?? null, checked?.unchecked);
         this.db.setRunFindings(run.id, result.findings);
