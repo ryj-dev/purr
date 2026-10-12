@@ -2,10 +2,11 @@ import { sh, tempRepo } from './helpers.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { openDb } from '../src/server/db.ts';
-import { addRepo } from '../src/server/http.ts';
+import { addRepo, startHttp } from '../src/server/http.ts';
+import { PostPushWatcher } from '../src/server/triggers.ts';
 import { RunManager } from '../src/server/manager.ts';
 import { ClaudeRunner } from '../src/server/claude.ts';
 import { ReviewWatch } from '../src/server/lookup.ts';
@@ -152,10 +153,11 @@ test("a purr run or hook that's told to stop cancels its run instead of leaving 
   const repoPath = tempRepo();
   const repo = await addRepo(db, repoPath);
   const ts = new Date().toISOString();
+  const pidFile = join(mkdtempSync(join(process.env.TMPDIR!, 'purr-test-pid-')), 'pid');
   db.putFlow({ id: 'hang', name: 'Hang', description: '', isDefault: false, createdAt: ts, updatedAt: ts, edges: [],
     blocks: [{ id: 'wait', type: 'command', label: 'Wait', position: { x: 0, y: 0 }, config: { command: 'sleep 60', timeoutSec: 120, failOnNonZero: true } }] });
   db.putFlow({ id: 'stubborn', name: 'Stubborn', description: '', isDefault: false, createdAt: ts, updatedAt: ts, edges: [],
-    blocks: [{ id: 'wait', type: 'command', label: 'Wait', position: { x: 0, y: 0 }, config: { command: "trap '' TERM; sleep 20", timeoutSec: 120, failOnNonZero: true } }] });
+    blocks: [{ id: 'wait', type: 'command', label: 'Wait', position: { x: 0, y: 0 }, config: { command: `trap '' TERM; echo $$ > ${pidFile}; sleep 20`, timeoutSec: 120, failOnNonZero: true } }] });
   db.setTrigger({ trigger: 'pre-commit', repoId: repo.id, flowId: 'hang' });
   db.close();
   writeFileSync(join(repoPath, 'b.txt'), 'b\n');
@@ -178,6 +180,9 @@ test("a purr run or hook that's told to stop cancels its run instead of leaving 
   assert.equal(twice.code, 130, twice.stderr);
   assert.ok(Date.now() - first < 2_500, `quit at once, not after the 3s kill (${Date.now() - first}ms)`);
   assert.deepEqual([status(twice.id).status, status(twice.id).error], ['cancelled', 'Stopped before it finished cancelling']);
+  const stubborn = Number(readFileSync(pidFile, 'utf8'));
+  await new Promise((r) => setTimeout(r, 200));
+  assert.throws(() => process.kill(stubborn, 0), { code: 'ESRCH' }, 'its command, ignoring SIGTERM, was killed before it quit');
   const blocks = (() => { const d = openDb(); try { return d.listBlockRuns(twice.id); } finally { d.close(); } })();
   assert.ok(blocks.every((b) => b.status !== 'running'), JSON.stringify(blocks));
 
@@ -199,6 +204,7 @@ test("a purr run or hook that's told to stop cancels its run instead of leaving 
   const push = await midRun(repoPath, ['hook', 'pre-push', 'origin', 'url'], (p) => p.kill('SIGINT'),
     { input: `refs/heads/main ${head} refs/heads/main ${'0'.repeat(40)}\n`, idFrom: newestPush });
   assert.equal(push.code, 130, push.stderr);
+  assert.doesNotMatch(push.stderr, /will be reviewed once the push lands/);
   assert.equal(status(push.id).status, 'cancelled');
   const db5 = openDb();
   assert.deepEqual(db5.getPushOutcomes(head, [repo.path]), []);
@@ -219,12 +225,15 @@ test("a purr run or hook that's told to stop cancels its run instead of leaving 
   db6.close();
 
   // Cancel in the UI while the CLI runs it: the CLI notices and cancels it for real (exit 2), and it stays cancelled
+  let cancelledAt = 0;
   const ui = await midRun(repoPath, ['run', '--flow', 'hang'], (_p, id) => {
+    cancelledAt = Date.now();
     const d = openDb();
     new RunManager(d, new ClaudeRunner(d)).cancel(id);
     d.close();
   });
   assert.equal(ui.code, 2, ui.stderr);
+  assert.ok(Date.now() - cancelledAt < 10_000, 'the CLI noticed and stopped, not ran its 60s command to the end');
   assert.equal(status(ui.id).status, 'cancelled');
 
   // a run whose process died outright (SIGKILL), left 'running': cancelling it (the UI's Cancel) records it cancelled
@@ -241,6 +250,20 @@ test("a purr run or hook that's told to stop cancels its run instead of leaving 
   db2.putRun(other);
   mgr.cancel(other.id, 'superseded');
   assert.equal(db2.getRun(other.id)!.status, 'running');
+
+  // the UI's Cancel (POST /api/runs/:id/cancel) on a run another process left running: answered with it cancelled
+  const server = startHttp(db2, mgr, new PostPushWatcher(db2, mgr), 0);
+  await new Promise((r) => server.once('listening', r));
+  try {
+    const port = (server.address() as { port: number }).port;
+    const left = run({ repoPath, headSha: 'abc0000003', trigger: 'manual', status: 'running' });
+    db2.putRun(left);
+    db2.putBlockRun({ runId: left.id, blockId: 'lens', status: 'pending', startedAt: null, finishedAt: null, error: null, output: null });
+    const res = await fetch(`http://127.0.0.1:${port}/api/runs/${left.id}/cancel`, { method: 'POST' });
+    assert.equal(res.status, 200);
+    assert.equal((await res.json()).status, 'cancelled');
+    assert.equal(db2.listBlockRuns(left.id)[0].status, 'cancelled');
+  } finally { server.closeAllConnections(); server.close(); }
   db2.close();
 });
 

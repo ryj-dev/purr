@@ -258,7 +258,9 @@ export class RunManager {
         { claude: this.claude, signal: controller.signal, onBlock: this.onBlock, isSuppressed, fingerprint: (fs) => fingerprintAll(fs, material) },
       );
       await fingerprintAll(result.findings, material);
-      const checked = result.failedBlocks.length === 0 && !controller.signal.aborted ? completeBlocks(run.flow.blocks, result.blocks) : null;
+      // cancelled from outside as it finished (the UI's Cancel of a CLI run): it mustn't mark anything fixed
+      const outside = !controller.signal.aborted && this.db.getRun(run.id)?.status === 'cancelled';
+      const checked = result.failedBlocks.length === 0 && !controller.signal.aborted && !outside ? completeBlocks(run.flow.blocks, result.blocks) : null;
       applyLedger(this.db, run, result.findings, checked?.complete ?? null, checked?.unchecked);
       this.db.setRunFindings(run.id, result.findings);
       run.counts = countBySeverity(active(result.findings));

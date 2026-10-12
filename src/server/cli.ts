@@ -80,10 +80,11 @@ const SIGNALS = { SIGINT: 2, SIGTERM: 15, SIGHUP: 1 } as const;
  */
 async function executeHere(db: DB, mgr: RunManager, req: RunRequest, run: Run): Promise<{ run: Run; signal: keyof typeof SIGNALS | null }> {
   let signal: keyof typeof SIGNALS | null = null;
-  let quitting = false;
+  let quitting = false, keepQuiet = false;
   const onSignal = (sig: keyof typeof SIGNALS) => {
     if (!signal) {
       signal = sig;
+      keepQuiet = true;   // a closed terminal (SIGHUP) fails every write to it from now on, to the end of the process
       process.stderr.write(`${C.dim}purr: stopping, cancelling ${run.id}… (again to quit at once)${C.x}\n`);
       mgr.cancel(run.id);
       return;
@@ -119,8 +120,7 @@ async function executeHere(db: DB, mgr: RunManager, req: RunRequest, run: Run): 
   } finally {
     clearInterval(outside);
     for (const [sig, h] of handlers) process.off(sig, h);
-    process.stdout.off('error', ignore);
-    process.stderr.off('error', ignore);
+    if (!keepQuiet) { process.stdout.off('error', ignore); process.stderr.off('error', ignore); }
   }
 }
 
@@ -133,8 +133,8 @@ async function runHookFlow(req: RunRequest): Promise<{ run: Run; signal: keyof t
   const run = mgr.createRun(req);
   if (!run) { db.close(); return null; }
   const done = await executeHere(db, mgr, req, run);
+  await daemonPost('/api/hooks/notify', { runId: done.run.id });   // first: the terminal may be gone (SIGHUP)
   report(done.run, db.getRunFindings(done.run.id));
-  await daemonPost('/api/hooks/notify', { runId: done.run.id });
   db.close();
   return done;
 }
@@ -230,10 +230,10 @@ async function manualRun() {
   if (!run) { console.error('The manual trigger is disabled for this repo; pass --flow <id>'); return 2; }
   process.stderr.write(`purr: running "${run.flowName}" (${run.id})…\n`);
   const { run: done, signal } = await executeHere(db, mgr, req, run);
+  await daemonPost('/api/hooks/notify', { runId: done.id });   // first: the terminal may be gone (SIGHUP)
   const findings = db.getRunFindings(done.id);
   if (args.includes('--json')) console.log(JSON.stringify({ run: { ...done, flow: undefined }, findings }, null, 2));
   else report(done, findings);
-  await daemonPost('/api/hooks/notify', { runId: done.id });
   db.close();
   if (signal) return 128 + SIGNALS[signal];
   if (done.status === 'failed' || done.status === 'cancelled') return 2;
@@ -355,10 +355,10 @@ function reviewedIn(sha: string, runs: Run[]): string | null {
  * Why no review of commit `sha` will ever come in the repos `repoIds`, or null if one may: it isn't in any clone of the
  * repo, so it's another repo's commit (named, if PuRR reviewed it there). Then waiting for it would only time out.
  */
-async function notInRepo(db: DB, repoIds: string[], sha: string): Promise<string | null> {
+async function notInRepo(db: DB, repoIds: string[], sha: string, timeoutSec: number): Promise<string | null> {
   if (db.findRuns({ repoIds, sha, limit: 1 }).length) return null;
   const top = await repoRoot(value('repo') ?? process.cwd());
-  const elsewhere = await commitElsewhere(db, repoIds, sha, top);
+  const elsewhere = await commitElsewhere(db, repoIds, sha, top, Math.min(15, timeoutSec) * 1000);
   if (!elsewhere) return null;
   return `commit ${sha.slice(0, 12)} isn't in ${top}${repoIds.length > 1 ? ' or its other clones' : ''}, so it won't be reviewed here. `
     + (reviewedIn(sha, elsewhere) ?? "Run this from the repo it's in, or pass --repo <path> (pushed from another machine? git fetch first)");
@@ -391,7 +391,7 @@ async function findingsCmd(): Promise<number> {
     const sha = runId ? null : value('sha');
     const wait = args.includes('--wait');
     const timeoutSec = positiveInt('timeout') ?? 1800;
-    const stray = sha ? await notInRepo(db, q.repoIds!, sha) : null;
+    const stray = sha ? await notInRepo(db, q.repoIds!, sha, timeoutSec) : null;
     if (stray) { console.error(`purr: ${stray}`); return 3; }
     let run: Run | null;
     let lastQuery: RunQuery = q;   // what --wait looked up last: it follows a newer push that covers the commit
@@ -561,7 +561,8 @@ const USAGE = `PuRR: Pull Request Reviewer
   purr daemon [--port N]          run the background daemon + UI (http://127.0.0.1:7878)
   purr open                       open the UI in your browser
   purr run [--repo P] [--flow ID] [--base REF] [--head REF] [--json]
-                                 run a flow now on the current branch (exit 0 clean, 1 must-fix, 2 failed)
+                                 run a flow now on the current branch (exit 0 clean, 1 must-fix, 2 failed,
+                                 128+signal when stopped: the run is cancelled)
   purr findings [--pr N | --branch B | --sha S | --run ID] [--wait [--timeout SECS]] [--all] [--json]
                                  the latest review's findings (default: this branch; with --wait, the review
                                  of the commit checked out here). Exit 0 clean, 1 must-fix, 2 failed or

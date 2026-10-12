@@ -59,9 +59,9 @@ export function pickReview(db: DB, q: RunQuery): { run: Run | null; newer: Run |
  * worktree of the repo (or the `checkout` asked from) has the commit (a short prefix that's ambiguous there counts), or a push of it was noted there.
  * Otherwise the reviews of it in other repos PuRR knows, newest first, which say where it belongs. With none, it may
  * have been pushed from elsewhere (CI, another machine) and not fetched yet: the clones fetch, and if that can't be
- * done, or brings the commit, null; else none, meaning no repo PuRR knows has it.
+ * done (within `fetchMs`), or brings the commit, null; else none, meaning no repo PuRR knows has it.
  */
-export async function commitElsewhere(db: DB, repoIds: string[], sha: string, checkout: string | null): Promise<Run[] | null> {
+export async function commitElsewhere(db: DB, repoIds: string[], sha: string, checkout: string | null, fetchMs = 15_000): Promise<Run[] | null> {
   const registered = repoIds.map((id) => db.getRepo(id)?.path).filter((p): p is string => !!p);
   if (db.getPushOutcomes(sha, registered).length) return null;
   // the checkout asked from as well: it may be a clone or worktree PuRR hasn't registered, with commits of its own
@@ -71,7 +71,8 @@ export async function commitElsewhere(db: DB, repoIds: string[], sha: string, ch
   if (await here()) return null;
   const elsewhere = db.findRuns({ sha, limit: 20 }).filter((r) => !r.repoId || !repoIds.includes(r.repoId));
   if (elsewhere.length) return elsewhere;
-  for (const p of paths) if (!await fetchAll(p)) return null;
+  // all at once, and no longer than `fetchMs`: one that fails or runs out of time means can't tell
+  if ((await Promise.all(paths.map((p) => fetchAll(p, fetchMs)))).includes(false)) return null;
   return await here() ? null : [];
 }
 
