@@ -79,7 +79,10 @@ test('purr findings: exit codes, usage errors, --json and purr runs', async (tc)
   assert.equal(code('--sha', 'aaaa000004'), 3, 'still running, not waiting');
   assert.equal(code('--sha', 'aaaa000007'), 2, 'cancelled');
   assert.equal(code('--sha', 'aaaa000005'), 0, 'its must-fix was dismissed since');
-  assert.equal(code('--sha', 'bbbb'), 3, 'no such review');
+  execFileSync('git', ['commit', '-q', '--allow-empty', '-m', 'not reviewed', '--no-verify'], { cwd: repoPath });
+  const notReviewed = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repoPath, encoding: 'utf8' }).trim().slice(0, 12);
+  const none = purr(repoPath, 'findings', '--sha', notReviewed);
+  assert.deepEqual([none.status, /no review of commit .* found/.test(none.stderr)], [3, true], `this repo's commit, no review: ${none.stderr}`);
   assert.equal(code('--run', 'run-nope'), 3);
   const typo = await purrA(repoPath, 'findings', '--run', 'run-typo', '--wait');
   assert.deepEqual([typo.status, /no review of run run-typo found/.test(typo.stderr)], [3, true], 'a run that will never appear: no wait');
@@ -233,9 +236,11 @@ test('purr findings: exit codes, usage errors, --json and purr runs', async (tc)
   assert.equal(purr(empty, 'findings', '--wait').status, 4);
 
   // --wait gives up at its timeout: on a review that never appeared, and on one still running
-  const never = await purrA(repoPath, 'findings', '--sha', 'abab00ff', '--wait', '--timeout', '1');
+  execFileSync('git', ['commit', '-q', '--allow-empty', '-m', 'unreviewed', '--no-verify'], { cwd: repoPath });
+  const unreviewed = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repoPath, encoding: 'utf8' }).trim().slice(0, 12);
+  const never = await purrA(repoPath, 'findings', '--sha', unreviewed, '--wait', '--timeout', '1');
   assert.equal(never.status, 3);
-  assert.match(never.stderr, /no review of commit abab00ff appeared within 1s/);
+  assert.match(never.stderr, new RegExp(`no review of commit ${unreviewed} appeared within 1s`));
   const db8 = openDb();
   db8.putRun(run({ repoId: repo.id, repoPath, headSha: 'abab00fe', branch: 'slow', status: 'running' }));
   db8.close();

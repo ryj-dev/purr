@@ -106,9 +106,25 @@ export class RunManager {
   }
 
   private save(run: Run) {
-    this.db.putRun(run);
-    this.emit({ type: 'run', run: { ...run, flow: { ...run.flow, blocks: [], edges: [] } } });
+    // cancelled from outside while it was going (the UI's Cancel of a CLI run, a second Ctrl-C): never written back
+    // over (one conditional write, so a cancel can't land between a look and the write). Still going, it stops now
+    // and its end records the cancel; already ended, it's recorded cancelled, with what it found.
+    if (run.status !== 'cancelled' && !this.db.putActiveRun(run)) {
+      const c = this.controllers.get(run.id);
+      if (c && !c.signal.aborted) { (c as any).reason = 'cancelled'; c.abort(); }
+      if (!TERMINAL.has(run.status)) return;
+      run.status = 'cancelled';
+      run.error = this.db.getRun(run.id)?.error ?? run.error;   // why it was cancelled, not how it then ended
+      this.db.putRun(run);
+    } else if (run.status === 'cancelled') {
+      // already recorded cancelled with why (a second Ctrl-C, the UI): keep that
+      if (!run.error) run.error = this.db.getRun(run.id)?.status === 'cancelled' ? this.db.getRun(run.id)!.error : null;
+      this.db.putRun(run);
+    }
+    this.announce(run);
   }
+
+  private announce(run: Run) { this.emit({ type: 'run', run: { ...run, flow: { ...run.flow, blocks: [], edges: [] } } }); }
 
   private onBlock = (b: BlockRun) => {
     this.db.putBlockRun(b);
@@ -151,7 +167,20 @@ export class RunManager {
       return run;
     }
     const c = this.controllers.get(runId);
-    if (c) { (c as any).reason = reason; c.abort(); }
+    if (c) { (c as any).reason = reason; c.abort(); return run; }
+    // asked to cancel a run not running in this process: a hook or `purr run` runs its flow in its own, and one killed
+    // outright (SIGKILL) left it 'running' for good. Record it cancelled; a CLI process still running it sees that
+    // within a second and cancels it itself (see executeHere). (A newer push doesn't do this: it only supersedes the reviews this process runs.)
+    if (reason === 'cancelled' && !TERMINAL.has(run.status)) {
+      run.status = 'cancelled'; run.finishedAt = now();
+      run.error = 'Cancelled outside the process running it';
+      // only if it's still going when written: it may have ended since it was read
+      if (!this.db.cancelActiveRun(run)) return this.db.getRun(runId);
+      this.announce(run);
+      for (const b of this.db.listBlockRuns(runId)) {
+        if (b.status === 'running' || b.status === 'pending') this.onBlock({ ...b, status: 'cancelled', finishedAt: run.finishedAt });
+      }
+    }
     return run;
   }
 
@@ -232,10 +261,6 @@ export class RunManager {
         { claude: this.claude, signal: controller.signal, onBlock: this.onBlock, isSuppressed, fingerprint: (fs) => fingerprintAll(fs, material) },
       );
       await fingerprintAll(result.findings, material);
-      const checked = result.failedBlocks.length === 0 && !controller.signal.aborted ? completeBlocks(run.flow.blocks, result.blocks) : null;
-      applyLedger(this.db, run, result.findings, checked?.complete ?? null, checked?.unchecked);
-      this.db.setRunFindings(run.id, result.findings);
-      run.counts = countBySeverity(active(result.findings));
       if (controller.signal.aborted) {
         run.status = ((controller as any).reason as Run['status']) ?? 'cancelled';
       } else if (result.gateFailed) {
@@ -248,7 +273,23 @@ export class RunManager {
       } else {
         run.status = 'passed';
       }
-      if (!controller.signal.aborted) await this.sideEffects(run, result.findings);
+      // its end, in one transaction with the ledger: a cancel from outside (the UI's Cancel of a CLI run) lands either
+      // before, and then the run marks nothing fixed, posts nothing and is recorded cancelled, or after, and is refused
+      // because the run has ended (cancelActiveRun)
+      const ended = this.db.transaction(() => {
+        const stored = this.db.getRun(run.id);
+        const outside = !controller.signal.aborted && stored?.status === 'cancelled';
+        // recorded cancelled already, with why (the UI's Cancel, a second Ctrl-C): kept
+        if (stored?.status === 'cancelled') { run.status = 'cancelled'; run.error = stored.error ?? run.error; }
+        const checked = result.failedBlocks.length === 0 && !controller.signal.aborted && !outside ? completeBlocks(run.flow.blocks, result.blocks) : null;
+        applyLedger(this.db, run, result.findings, checked?.complete ?? null, checked?.unchecked);
+        this.db.setRunFindings(run.id, result.findings);
+        run.counts = countBySeverity(active(result.findings));
+        run.finishedAt = now();
+        this.db.putRun(run);
+        return !outside;
+      });
+      if (ended && !controller.signal.aborted) await this.sideEffects(run, result.findings);
       return run;
     } catch (e: any) {
       run.status = controller.signal.aborted ? (((controller as any).reason as Run['status']) ?? 'cancelled') : 'failed';

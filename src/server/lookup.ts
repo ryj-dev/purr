@@ -3,7 +3,7 @@ import { existsSync, realpathSync } from 'node:fs';
 import type { Finding, Run } from '../shared/types.ts';
 import type { DB, RunQuery } from './db.ts';
 import { type PrInfo, githubRepo, prLookup } from './gh.ts';
-import { remoteUrl, repoRoot } from './git.ts';
+import { commonDir, hasObject, remoteUrl, repoRoot } from './git.ts';
 import { TERMINAL } from './manager.ts';
 
 /**
@@ -38,6 +38,54 @@ export function currentFindings(db: DB, run: Run): Finding[] {
 }
 
 export const isFinished = (run: Run) => TERMINAL.has(run.status);
+/** Finished and reviewed the code to the end: passed or blocked, not cut short (failed, cancelled, superseded). */
+export const isComplete = (run: Run) => run.status === 'passed' || run.status === 'blocked';
+
+/**
+ * The review `q` names: the newest, except for one commit (`q.sha`), where a complete review beats a newer one still
+ * running or cut short: it reviewed the same code (a manual `purr run` of a commit already reviewed after its push,
+ * say), unless a post-push review still going is newer still; that beats one cut short, too. Without either, the newest (an old run left 'running' mustn't hide a newer one that failed). `newer`: the newest
+ * review of the commit when it isn't the one picked, so the caller can say it exists.
+ */
+export function pickReview(db: DB, q: RunQuery): { run: Run | null; newer: Run | null } {
+  if (!q.sha) return { run: db.findRuns({ ...q, limit: 1 })[0] ?? null, newer: null };
+  const runs = db.findRuns({ ...q, limit: 50 });
+  // not over a newer one of another flow that failed: a quick scan that passed says nothing of a full review that didn't
+  const complete = runs.find((c) => isComplete(c) && !runs.some((r) => r.status === 'failed' && r.queuedAt > c.queuedAt && r.flowId !== c.flowId));
+  // except a post-push review still going, newer than that: the full review the push promised (after a quick or
+  // Ctrl-C'd `purr run`, say), which the service runs, so it isn't left over from a dead process
+  const live = runs.find((r) => r.trigger === 'post-push' && !isFinished(r));
+  const run = (live && (!complete || live.queuedAt > complete.queuedAt) ? live : complete) ?? runs[0] ?? null;
+  return { run, newer: run && runs[0] !== run ? runs[0] : null };
+}
+
+/**
+ * For a commit with no review in the repos `repoIds`: whether it can ever get one there. null when it can: a clone or
+ * worktree of the repo (or the `checkout` asked from) has the commit (a short prefix that's ambiguous there counts), or a push of it was noted there.
+ * Otherwise the reviews of it in other repos PuRR knows, newest first, which say where it belongs. With none, it may
+ * have been pushed from elsewhere (CI, another machine) and not fetched yet: the clones `fetch`, and if that can't be
+ * done, or brings the commit, null; else none. Without `fetch`, can't tell (null) unless another repo reviewed it, meaning no repo PuRR knows has it.
+ */
+export async function commitElsewhere(db: DB, repoIds: string[], sha: string, checkout: string | null,
+  fetch: ((path: string) => Promise<boolean>) | null): Promise<Run[] | null> {
+  const registered = repoIds.map((id) => db.getRepo(id)?.path).filter((p): p is string => !!p);
+  if (db.getPushOutcomes(sha, registered).length) return null;
+  // the checkout asked from as well: it may be a clone or worktree PuRR hasn't registered, with commits of its own
+  const paths = [...new Set([...registered, ...(checkout ? [checkout] : [])])].filter((p) => existsSync(p));
+  if (!paths.length) return null;   // nowhere to look: can't tell
+  const here = async () => { for (const p of paths) if (await hasObject(p, sha)) return true; return false; };
+  if (await here()) return null;
+  const elsewhere = db.findRuns({ sha, limit: 20 }).filter((r) => !r.repoId || !repoIds.includes(r.repoId));
+  // 12+ digits reviewed elsewhere settle it; a short prefix may be another commit there that shares its digits
+  if (elsewhere.length && sha.length >= 12) return elsewhere;
+  if (!fetch) return elsewhere.length && sha.length >= 12 ? elsewhere : null;
+  // all at once, once per git dir (worktrees share one, and two fetches into it fight over its ref locks): one that
+  // fails or runs out of time means can't tell
+  const dirs = new Map<string, string>();
+  for (const p of paths) { const d = (await commonDir(p)) ?? p; if (!dirs.has(d)) dirs.set(d, p); }   // unknown: fetch it anyway
+  if ((await Promise.all([...dirs.values()].map(fetch))).includes(false)) return null;
+  return await here() ? null : elsewhere;
+}
 
 export interface ReviewState {
   run: Run | null;      // null until the review exists
@@ -68,7 +116,7 @@ export class ReviewWatch {
   async check(leftMs = Infinity): Promise<ReviewState> {
     this.leftUntil = Date.now() + leftMs;
     for (let hops = 0; hops < 20; hops++) {
-      const run = this.db.findRuns({ ...this.q, limit: 1 })[0] ?? null;
+      const { run } = pickReview(this.db, this.q);
       if (run?.status === 'superseded') {
         const next = run.branch ? this.db.findRuns({ repoIds: this.q.repoIds, branch: run.branch, triggers: this.q.triggers, limit: 1 })[0] : null;
         if (next?.headSha && next.id !== run.id && next.queuedAt > run.queuedAt) {
