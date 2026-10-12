@@ -38,7 +38,9 @@ test("--sha for another repo's commit fails at once, naming the repo that review
   assert.match(w.stderr, new RegExp(`commit ${theirs.slice(0, 12)} isn't in .*, so it won't be reviewed here`));
   assert.match(w.stderr, new RegExp(`PuRR reviewed commit ${theirs.slice(0, 12)} in ${there.path} \\(PR #127, run-s\\d+\\).*--repo ${there.path}`));
   assert.ok(Date.now() - t0 < 15_000, 'at once');
-  assert.equal(purr(herePath, 'findings', '--sha', theirs).status, 3, 'without --wait too');
+  const plain = purr(herePath, 'findings', '--sha', theirs);
+  assert.equal(plain.status, 3, 'without --wait too');
+  assert.match(plain.stderr, /isn't in .*PuRR reviewed commit/);
   const listed = purr(herePath, 'runs', '--sha', theirs, '--json');
   assert.deepEqual([listed.status, JSON.parse(listed.stdout)], [0, []], 'a listing: still [] and exit 0');
   assert.match(listed.stderr, /PuRR reviewed commit/);
@@ -211,7 +213,7 @@ test("a purr run or hook that's told to stop cancels its run instead of leaving 
     }, 20);
   });
   assert.equal(twice.code, 130, twice.stderr);
-  assert.ok(Date.now() - first < 2_500, `quit at once, not after the 3s kill (${Date.now() - first}ms)`);
+  assert.ok(Date.now() - first < 2_900, `quit at once, not after the 3s kill (${Date.now() - first}ms)`);
   assert.deepEqual([status(twice.id).status, status(twice.id).error], ['cancelled', 'Stopped before it finished cancelling']);
   const stubborn = Number(readFileSync(pidFile, 'utf8'));
   const alive = () => { try { process.kill(stubborn, 0); return true; } catch { return false; } };

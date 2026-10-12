@@ -86,20 +86,23 @@ async function executeHere(db: DB, mgr: RunManager, req: RunRequest, run: Run): 
       signal = sig;
       keepQuiet = true;   // a closed terminal (SIGHUP) fails every write to it from now on, to the end of the process
       process.stderr.write(`${C.dim}purr: stopping, cancelling ${run.id}… (again to quit at once)${C.x}\n`);
-      mgr.cancel(run.id);
+      // these run outside hook()'s try: a busy database here mustn't crash the process (exit 1 blocks a commit)
+      try { mgr.cancel(run.id); } catch { /* the database is busy: the watcher below asks again */ }
       return;
     }
     if (quitting) return;
     quitting = true;
     // its sessions and commands got SIGTERM on the first; quitting now would leave any that ignore it running
     for (const pid of liveGroups) { try { process.kill(-pid, 'SIGKILL'); } catch { /* gone */ } }
-    const cur = db.getRun(run.id);
-    const at = now();
-    if (cur && db.cancelActiveRun({ ...cur, status: 'cancelled', finishedAt: at, error: 'Stopped before it finished cancelling' })) {
-      for (const b of db.listBlockRuns(run.id)) {
-        if (b.status === 'running' || b.status === 'pending') db.putBlockRun({ ...b, status: 'cancelled', finishedAt: at });
+    try {
+      const cur = db.getRun(run.id);
+      const at = now();
+      if (cur && db.cancelActiveRun({ ...cur, status: 'cancelled', finishedAt: at, error: 'Stopped before it finished cancelling' })) {
+        for (const b of db.listBlockRuns(run.id)) {
+          if (b.status === 'running' || b.status === 'pending') db.putBlockRun({ ...b, status: 'cancelled', finishedAt: at });
+        }
       }
-    }
+    } catch { /* the database is busy: quit all the same, as asked */ }
     // the UI and any `purr findings --wait` hear of it now, not at their next slow look
     void daemonPost('/api/hooks/notify', { runId: run.id }, 500).finally(() => process.exit(128 + SIGNALS[sig]));
   };
@@ -112,7 +115,11 @@ async function executeHere(db: DB, mgr: RunManager, req: RunRequest, run: Run): 
   // Cancel in the UI records the run cancelled in the database (nothing in the service can stop this process): stop it
   let asked = false;
   const outside = setInterval(() => {
-    if (!asked && !signal && db.getRun(run.id)?.status === 'cancelled') { asked = true; mgr.cancel(run.id); }
+    try {
+      if (asked) return;
+      // stopped by a signal whose cancel hit a busy database: ask again
+      if (signal || db.getRun(run.id)?.status === 'cancelled') { mgr.cancel(run.id); asked = true; }
+    } catch { /* the database is busy: look again in a second */ }
   }, 1000);
   outside.unref();
   try {
