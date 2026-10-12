@@ -29,7 +29,11 @@ export const ROOT = fileURLToPath(new URL('../..', import.meta.url)).replace(/\/
 export const now = () => new Date().toISOString();
 export const newId = (prefix = '') => prefix + randomBytes(6).toString('hex');
 
-/** Process groups exec started that haven't ended: a process quitting at once kills them first (see cli.ts). */
+/**
+ * Process groups exec started for a run (under its AbortSignal: flow commands, scanners, Claude sessions) that haven't
+ * ended: a process quitting at once kills them first (see cli.ts). Its own git housekeeping isn't here: killing a git
+ * mid-write would leave its lock files behind.
+ */
 export const liveGroups = new Set<number>();
 
 export interface ExecResult { code: number; stdout: string; stderr: string; timedOut: boolean }
@@ -47,7 +51,7 @@ export function exec(cmd: string, args: string[], opts: {
     });
     let stdout = '', stderr = '', buf = '', timedOut = false, settled = false;
     const pid = child.pid;
-    if (pid) liveGroups.add(pid);
+    if (pid && opts.signal) liveGroups.add(pid);
     const killGroup = (sig: NodeJS.Signals) => { try { if (child.pid) process.kill(-child.pid, sig); } catch { /* gone */ } };
     let forceTimer: NodeJS.Timeout | null = null;
     const finish = (code: number) => {

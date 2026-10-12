@@ -113,6 +113,16 @@ test("for one commit, findings shows the complete review over a newer one still 
   assert.equal(JSON.parse(hinted.stdout).run.id, full.id);
   assert.match(hinted.stderr, new RegExp(`the last finished review of commit cafe0000e5 is ${quick.id}`));
 
+  // pushed, then a `purr run` of the same commit Ctrl-C'd while the post-push review runs: that review, not exit 2
+  const db7 = openDb();
+  const pp = run({ repoId: repo.id, repoPath: repo.path, headSha: 'cafe0000f6', trigger: 'post-push', status: 'running' });
+  db7.putRun(pp);
+  db7.putRun(run({ repoId: repo.id, repoPath: repo.path, headSha: 'cafe0000f6', trigger: 'manual', status: 'cancelled' }));
+  db7.close();
+  const afterCtrlC = purr(repoPath, 'findings', '--sha', 'cafe0000f6', '--json');
+  assert.equal(afterCtrlC.status, 3);
+  assert.equal(JSON.parse(afterCtrlC.stdout).run.id, pp.id);
+
   // an old run left 'running' (its CLI was killed) doesn't hide a newer one of the commit that failed
   const db4 = openDb();
   db4.putRun(run({ repoId: repo.id, repoPath: repo.path, headSha: 'cafe0000c3', trigger: 'manual', status: 'running' }));
@@ -329,6 +339,12 @@ test('commitElsewhere: with a fetch that works and brings nothing, only a commit
   assert.deepEqual(await commitElsewhere(db, ids, 'deadbeef00', a, fetch), [], 'nowhere: stray');
   assert.ok(fetched.length > 0, 'it fetched before saying so');
   assert.equal(await commitElsewhere(db, ids, 'deadbeef00', a, null), null, 'without a fetch: can\'t tell');
+  // a short prefix another repo's review shares, without a fetch: can't tell either (it may be this repo's, unfetched)
+  const other = tempRepo({ 'o.md': 'o\n' });
+  const ro = await addRepo(db, other);
+  db.putRun(run({ repoId: ro.id, repoPath: ro.path, headSha: `abcdef1${'0'.repeat(33)}` }));
+  assert.equal(await commitElsewhere(db, ids, 'abcdef1', a, null), null);
+  assert.equal((await commitElsewhere(db, ids, `abcdef1${'0'.repeat(5)}`, a, null))?.length, 1, '12 digits: that repo');
   assert.equal(await commitElsewhere(db, ids, 'deadbeef00', a, async () => false), null, 'a fetch that failed: can\'t tell');
   db.close();
 });

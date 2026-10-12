@@ -114,6 +114,7 @@ export class RunManager {
       if (c && !c.signal.aborted) { (c as any).reason = 'cancelled'; c.abort(); }
       if (!TERMINAL.has(run.status)) return;
       run.status = 'cancelled';
+      run.error = this.db.getRun(run.id)?.error ?? run.error;   // why it was cancelled, not how it then ended
       this.db.putRun(run);
     } else if (run.status === 'cancelled') {
       // already recorded cancelled with why (a second Ctrl-C, the UI): keep that
