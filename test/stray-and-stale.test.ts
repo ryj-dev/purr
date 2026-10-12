@@ -8,6 +8,7 @@ import { openDb } from '../src/server/db.ts';
 import { addRepo } from '../src/server/http.ts';
 import { RunManager } from '../src/server/manager.ts';
 import { ClaudeRunner } from '../src/server/claude.ts';
+import { ReviewWatch } from '../src/server/lookup.ts';
 import type { Run } from '../src/shared/types.ts';
 
 const CLI = new URL('../src/server/cli.ts', import.meta.url).pathname;
@@ -37,7 +38,10 @@ test("--sha for another repo's commit fails at once, naming the repo that review
   assert.match(w.stderr, new RegExp(`PuRR reviewed commit ${theirs.slice(0, 12)} in ${there.path} \\(PR #127, run-s\\d+\\).*--repo ${there.path}`));
   assert.ok(Date.now() - t0 < 15_000, 'at once');
   assert.equal(purr(herePath, 'findings', '--sha', theirs).status, 3, 'without --wait too');
-  assert.match(purr(herePath, 'runs', '--sha', theirs).stderr, /PuRR reviewed commit/);
+  const listed = purr(herePath, 'runs', '--sha', theirs, '--json');
+  assert.deepEqual([listed.status, JSON.parse(listed.stdout)], [0, []], 'a listing: still [] and exit 0');
+  assert.match(listed.stderr, /PuRR reviewed commit/);
+  assert.equal(purr(herePath, 'findings', '--sha', theirs, '--wait', '--timeout', '10m').status, 4, 'a bad --timeout is a usage error first');
   assert.equal(purr(herePath, 'findings', '--sha', theirs, '--repo', therePath).status, 0, '--repo looks there');
 
   // a commit no repo PuRR knows has: the same, without a repo to name
@@ -96,6 +100,19 @@ test("for one commit, findings shows the complete review over a newer one still 
   assert.equal(followed.status, 0, followed.stderr);
   assert.match(followed.stderr, new RegExp(`a newer review of commit cafe0000b2, ${staleB.id} \\(manual\\), is running`));
 
+  // an old run left 'running' (its CLI was killed) doesn't hide a newer one of the commit that failed
+  const db4 = openDb();
+  db4.putRun(run({ repoId: repo.id, repoPath: repo.path, headSha: 'cafe0000c3', trigger: 'manual', status: 'running' }));
+  db4.putRun(run({ repoId: repo.id, repoPath: repo.path, headSha: 'cafe0000c3', status: 'failed', error: 'boom' }));
+  // a complete review, then a newer one superseded: the complete one, done (ReviewWatch, as --wait uses it)
+  const kept = run({ repoId: repo.id, repoPath: repo.path, headSha: 'cafe0000d4' });
+  db4.putRun(kept);
+  db4.putRun(run({ repoId: repo.id, repoPath: repo.path, headSha: 'cafe0000d4', status: 'superseded' }));
+  const st = await new ReviewWatch(db4, { repoIds: [repo.id], sha: 'cafe0000d4', triggers: ['post-push', 'manual'] }).check();
+  assert.deepEqual([st.run?.id, st.done], [kept.id, true]);
+  db4.close();
+  assert.equal(purr(repoPath, 'findings', '--sha', 'cafe0000c3', '--wait', '--timeout', '5').status, 2, 'the failure, not a wait on the orphan');
+
   // a branch's newest review still running (a newer commit): that one, and where the last finished one is
   const db2 = openDb();
   const done = run({ repoId: repo.id, repoPath: repo.path, headSha: 'f00d000001', branch: 'live' });
@@ -137,6 +154,8 @@ test("a purr run or hook that's told to stop cancels its run instead of leaving 
   const ts = new Date().toISOString();
   db.putFlow({ id: 'hang', name: 'Hang', description: '', isDefault: false, createdAt: ts, updatedAt: ts, edges: [],
     blocks: [{ id: 'wait', type: 'command', label: 'Wait', position: { x: 0, y: 0 }, config: { command: 'sleep 60', timeoutSec: 120, failOnNonZero: true } }] });
+  db.putFlow({ id: 'stubborn', name: 'Stubborn', description: '', isDefault: false, createdAt: ts, updatedAt: ts, edges: [],
+    blocks: [{ id: 'wait', type: 'command', label: 'Wait', position: { x: 0, y: 0 }, config: { command: "trap '' TERM; sleep 20", timeoutSec: 120, failOnNonZero: true } }] });
   db.setTrigger({ trigger: 'pre-commit', repoId: repo.id, flowId: 'hang' });
   db.close();
   writeFileSync(join(repoPath, 'b.txt'), 'b\n');
@@ -152,10 +171,13 @@ test("a purr run or hook that's told to stop cancels its run instead of leaving 
     assert.equal(status(out.id).status, 'cancelled', `${sig}: not left running`);
   }
 
-  // twice: quits at once, the run and its running block recorded cancelled
-  const twice = await midRun(repoPath, ['run', '--flow', 'hang'], (p) => { p.kill('SIGINT'); setTimeout(() => p.kill('SIGINT'), 20); });
+  // twice, while the cancel is still going (the command ignores SIGTERM, so it takes 3s to kill): quits at once, the
+  // run and its running block recorded cancelled
+  let first = 0;
+  const twice = await midRun(repoPath, ['run', '--flow', 'stubborn'], (p) => { first = Date.now(); p.kill('SIGINT'); setTimeout(() => p.kill('SIGINT'), 300); });
   assert.equal(twice.code, 130, twice.stderr);
-  assert.equal(status(twice.id).status, 'cancelled');
+  assert.ok(Date.now() - first < 2_500, `quit at once, not after the 3s kill (${Date.now() - first}ms)`);
+  assert.deepEqual([status(twice.id).status, status(twice.id).error], ['cancelled', 'Stopped before it finished cancelling']);
   const blocks = (() => { const d = openDb(); try { return d.listBlockRuns(twice.id); } finally { d.close(); } })();
   assert.ok(blocks.every((b) => b.status !== 'running'), JSON.stringify(blocks));
 
@@ -181,9 +203,11 @@ test("a purr run or hook that's told to stop cancels its run instead of leaving 
   const db2 = openDb();
   const orphan = run({ repoPath, headSha: 'abc0000001', trigger: 'manual', status: 'running' });
   db2.putRun(orphan);
+  db2.putBlockRun({ runId: orphan.id, blockId: 'lens', status: 'running', startedAt: null, finishedAt: null, error: null, output: null });
   const mgr = new RunManager(db2, new ClaudeRunner(db2));
   mgr.cancel(orphan.id);
   assert.equal(db2.getRun(orphan.id)!.status, 'cancelled');
+  assert.equal(db2.listBlockRuns(orphan.id)[0].status, 'cancelled', 'its blocks too');
   // a newer push supersedes only the reviews its own process runs: a run another process owns is left to it
   const other = run({ repoPath, headSha: 'abc0000002', trigger: 'manual', status: 'running' });
   db2.putRun(other);
@@ -221,6 +245,14 @@ test("a commit that may still be reviewed here isn't called another repo's: in a
   await addRepo(db2, c);
   db2.close();
   notStray(c, sh(elsewhere, 'rev-parse', 'HEAD'));
+
+  // offline (the fetch fails): can't tell, so waited for as before
+  const offline = tempRepo();
+  sh(offline, 'remote', 'add', 'origin', 'http://127.0.0.1:1/nothing.git');
+  const db3 = openDb();
+  await addRepo(db3, offline);
+  db3.close();
+  notStray(offline, 'deadbeef00');
 
   // a short prefix that's ambiguous here: blobs until two share the first 4 hex digits, then that prefix
   const seen = new Map<string, string>();

@@ -44,13 +44,13 @@ export const isComplete = (run: Run) => run.status === 'passed' || run.status ==
 /**
  * The review `q` names: the newest, except for one commit (`q.sha`), where a complete review beats a newer one still
  * running or cut short: it reviewed the same code (a manual `purr run` of a commit already reviewed after its push,
- * say). Then a review in progress beats one cut short, which a rerun is retrying. `newer`: the newest review of the
- * commit when it isn't the one picked, so the caller can say it exists.
+ * say). Without one, the newest (an old run left 'running' mustn't hide a newer one that failed). `newer`: the newest
+ * review of the commit when it isn't the one picked, so the caller can say it exists.
  */
 export function pickReview(db: DB, q: RunQuery): { run: Run | null; newer: Run | null } {
   if (!q.sha) return { run: db.findRuns({ ...q, limit: 1 })[0] ?? null, newer: null };
   const runs = db.findRuns({ ...q, limit: 50 });
-  const run = runs.find(isComplete) ?? runs.find((r) => !isFinished(r)) ?? runs[0] ?? null;
+  const run = runs.find(isComplete) ?? runs[0] ?? null;
   return { run, newer: run && runs[0] !== run ? runs[0] : null };
 }
 

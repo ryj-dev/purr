@@ -103,6 +103,10 @@ async function executeHere(db: DB, mgr: RunManager, req: RunRequest, run: Run): 
   };
   const handlers = Object.keys(SIGNALS).map((sig) => [sig, () => onSignal(sig as keyof typeof SIGNALS)] as const);
   for (const [sig, h] of handlers) process.on(sig, h);
+  // a closed terminal (SIGHUP) fails later writes to it (EIO): that mustn't crash this before the cancel is recorded
+  const ignore = () => {};
+  process.stdout.on('error', ignore);
+  process.stderr.on('error', ignore);
   // Cancel in the UI records the run cancelled in the database (nothing in the service can stop this process): stop it
   let asked = false;
   const outside = setInterval(() => {
@@ -114,6 +118,8 @@ async function executeHere(db: DB, mgr: RunManager, req: RunRequest, run: Run): 
   } finally {
     clearInterval(outside);
     for (const [sig, h] of handlers) process.off(sig, h);
+    process.stdout.off('error', ignore);
+    process.stderr.off('error', ignore);
   }
 }
 
@@ -382,10 +388,10 @@ async function findingsCmd(): Promise<number> {
     if (!q) { console.error(`purr: ${unknownRepo(db)}`); return 3; }
     // another repo's commit: say where it is now, rather than wait out the timeout for a review that can't come here
     const sha = runId ? null : value('sha');
-    const stray = sha ? await notInRepo(db, q.repoIds!, sha) : null;
-    if (stray) { console.error(`purr: ${stray}`); return 3; }
     const wait = args.includes('--wait');
     const timeoutSec = positiveInt('timeout') ?? 1800;
+    const stray = sha ? await notInRepo(db, q.repoIds!, sha) : null;
+    if (stray) { console.error(`purr: ${stray}`); return 3; }
     let run: Run | null;
     let lastQuery: RunQuery = q;   // what --wait looked up last: it follows a newer push that covers the commit
     if (wait && !runId) {
@@ -488,9 +494,10 @@ async function runsCmd(): Promise<number> {
   try {
     const q = await runQuery(db, false);
     if (!q) { console.error(`purr: ${unknownRepo(db)}`); return 3; }
-    const stray = q.sha ? await notInRepo(db, q.repoIds!, q.sha) : null;
-    if (stray) { console.error(`purr: ${stray}`); return 3; }
     const runs = db.findRuns({ ...q, limit: positiveInt('limit') ?? 20 });
+    // none here for a commit PuRR reviewed in another repo: say where (a listing, so no fetch and the same exit code)
+    const there = !runs.length && q.sha ? reviewedIn(q.sha, db.findRuns({ sha: q.sha, limit: 20 }).filter((r) => !q.repoIds!.includes(r.repoId ?? ''))) : null;
+    if (there) console.error(`purr: ${there}`);
     if (args.includes('--json')) { console.log(JSON.stringify(runs.map((r) => ({ ...r, flow: undefined })), null, 2)); return 0; }
     if (!runs.length) { console.error(`purr: no reviews of ${describe(q)} found`); return 0; }
     for (const r of runs) {

@@ -106,6 +106,13 @@ export class RunManager {
   }
 
   private save(run: Run) {
+    // cancelled from outside while it was still going (the UI's Cancel, a second Ctrl-C): stop, and never write it
+    // back to running; the end of execute() records it cancelled
+    if (!TERMINAL.has(run.status) && this.db.getRun(run.id)?.status === 'cancelled') {
+      const c = this.controllers.get(run.id);
+      if (c && !c.signal.aborted) { (c as any).reason = 'cancelled'; c.abort(); }
+      return;
+    }
     this.db.putRun(run);
     this.emit({ type: 'run', run: { ...run, flow: { ...run.flow, blocks: [], edges: [] } } });
   }
@@ -159,6 +166,9 @@ export class RunManager {
       run.status = 'cancelled'; run.finishedAt = now();
       run.error = 'Cancelled outside the process running it';
       this.save(run);
+      for (const b of this.db.listBlockRuns(runId)) {
+        if (b.status === 'running' || b.status === 'pending') this.onBlock({ ...b, status: 'cancelled', finishedAt: run.finishedAt });
+      }
     }
     return run;
   }
