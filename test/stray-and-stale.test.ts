@@ -44,6 +44,7 @@ test("--sha for another repo's commit fails at once, naming the repo that review
   const listed = purr(herePath, 'runs', '--sha', theirs, '--json');
   assert.deepEqual([listed.status, JSON.parse(listed.stdout)], [0, []], 'a listing: still [] and exit 0');
   assert.match(listed.stderr, /PuRR reviewed commit/);
+  assert.doesNotMatch(purr(herePath, 'runs', '--sha', theirs.slice(0, 6)).stderr, /PuRR reviewed commit/, 'a short prefix names nothing');
   assert.equal(purr(herePath, 'findings', '--sha', theirs, '--wait', '--timeout', '10m').status, 4, 'a bad --timeout is a usage error first');
   assert.equal(purr(herePath, 'findings', '--sha', theirs, '--repo', therePath).status, 0, '--repo looks there');
 
@@ -114,6 +115,13 @@ test("for one commit, findings shows the complete review over a newer one still 
   assert.equal(hinted.status, 3, 'the post-push review, still running');
   assert.equal(JSON.parse(hinted.stdout).run.id, full.id);
   assert.match(hinted.stderr, new RegExp(`the last finished review of commit cafe0000e5 is ${quick.id}`));
+
+  // a quick scan that passed, then the full review failed: the failure (exit 2), not a clean exit
+  const db8 = openDb();
+  db8.putRun(run({ repoId: repo.id, repoPath: repo.path, headSha: 'cafe0000a7', trigger: 'manual', flowId: 'scan-only' }));
+  db8.putRun(run({ repoId: repo.id, repoPath: repo.path, headSha: 'cafe0000a7', status: 'failed', error: 'boom' }));
+  db8.close();
+  assert.equal(purr(repoPath, 'findings', '--sha', 'cafe0000a7', '--wait', '--timeout', '5').status, 2);
 
   // pushed, then a `purr run` of the same commit Ctrl-C'd while the post-push review runs: that review, not exit 2
   const db7 = openDb();

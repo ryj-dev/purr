@@ -50,7 +50,8 @@ export const isComplete = (run: Run) => run.status === 'passed' || run.status ==
 export function pickReview(db: DB, q: RunQuery): { run: Run | null; newer: Run | null } {
   if (!q.sha) return { run: db.findRuns({ ...q, limit: 1 })[0] ?? null, newer: null };
   const runs = db.findRuns({ ...q, limit: 50 });
-  const complete = runs.find(isComplete);
+  // not over a newer one of another flow that failed: a quick scan that passed says nothing of a full review that didn't
+  const complete = runs.find((c) => isComplete(c) && !runs.some((r) => r.status === 'failed' && r.queuedAt > c.queuedAt && r.flowId !== c.flowId));
   // except a post-push review still going, newer than that: the full review the push promised (after a quick or
   // Ctrl-C'd `purr run`, say), which the service runs, so it isn't left over from a dead process
   const live = runs.find((r) => r.trigger === 'post-push' && !isFinished(r));
@@ -81,7 +82,7 @@ export async function commitElsewhere(db: DB, repoIds: string[], sha: string, ch
   // all at once, once per git dir (worktrees share one, and two fetches into it fight over its ref locks): one that
   // fails or runs out of time means can't tell
   const dirs = new Map<string, string>();
-  for (const p of paths) { const d = await commonDir(p); if (d && !dirs.has(d)) dirs.set(d, p); }
+  for (const p of paths) { const d = (await commonDir(p)) ?? p; if (!dirs.has(d)) dirs.set(d, p); }   // unknown: fetch it anyway
   if ((await Promise.all([...dirs.values()].map(fetch))).includes(false)) return null;
   return await here() ? null : elsewhere;
 }

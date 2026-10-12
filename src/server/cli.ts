@@ -355,6 +355,7 @@ const purrFailed = (e: unknown) => { console.error(`purr: couldn't read the revi
 
 /** Where PuRR reviewed commit `sha`, for a lookup in the wrong repo: "PuRR reviewed it in /x (PR #3, run-…)", or null. */
 function reviewedIn(sha: string, runs: Run[]): string | null {
+  if (sha.length < 12) return null;   // a short prefix may be another commit there that shares its digits
   const r = runs.find(isComplete) ?? runs[0];
   if (!r) return null;
   return `PuRR reviewed commit ${sha.slice(0, 12)} in ${r.repoPath} (${[r.pr ? `PR #${r.pr.number}` : r.branch, r.id].filter(Boolean).join(', ')}): `
