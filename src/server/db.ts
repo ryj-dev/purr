@@ -193,6 +193,13 @@ export function openDb(file = paths.db) {
     putRun: (r: Run) =>
       db.prepare(`INSERT INTO runs (id, repo_id, status, queued_at, data) VALUES (?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET status = excluded.status, data = excluded.data`).run(r.id, r.repoId, r.status, r.queuedAt, JSON.stringify(r)),
+    /** putRun, but never over a 'cancelled' another process recorded (the UI's Cancel of a CLI run): false if it's that. */
+    putActiveRun: (r: Run): boolean => Number(db.prepare(`INSERT INTO runs (id, repo_id, status, queued_at, data) VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET status = excluded.status, data = excluded.data WHERE runs.status != 'cancelled'`)
+      .run(r.id, r.repoId, r.status, r.queuedAt, JSON.stringify(r)).changes) > 0,
+    /** Records `r` (cancelled) only while the stored run is still queued or running: false if it ended meanwhile. */
+    cancelActiveRun: (r: Run): boolean =>
+      Number(db.prepare("UPDATE runs SET status = ?, data = ? WHERE id = ? AND status IN ('queued', 'running')").run(r.status, JSON.stringify(r), r.id).changes) > 0,
     getRun: (id: string): Run | null => {
       const r = db.prepare('SELECT data FROM runs WHERE id = ?').get(id) as { data: string } | undefined;
       return r ? JSON.parse(r.data) : null;

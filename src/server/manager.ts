@@ -106,16 +106,22 @@ export class RunManager {
   }
 
   private save(run: Run) {
-    // cancelled from outside while it was still going (the UI's Cancel, a second Ctrl-C): stop, and never write it
-    // back to running; the end of execute() records it cancelled
-    if (!TERMINAL.has(run.status) && this.db.getRun(run.id)?.status === 'cancelled') {
+    // cancelled from outside while it was going (the UI's Cancel of a CLI run, a second Ctrl-C): never written back
+    // over (one conditional write, so a cancel can't land between a look and the write). Still going, it stops now
+    // and its end records the cancel; already ended, it's recorded cancelled, with what it found.
+    if (run.status !== 'cancelled' && !this.db.putActiveRun(run)) {
       const c = this.controllers.get(run.id);
       if (c && !c.signal.aborted) { (c as any).reason = 'cancelled'; c.abort(); }
-      return;
+      if (!TERMINAL.has(run.status)) return;
+      run.status = 'cancelled';
+      this.db.putRun(run);
+    } else if (run.status === 'cancelled') {
+      this.db.putRun(run);
     }
-    this.db.putRun(run);
-    this.emit({ type: 'run', run: { ...run, flow: { ...run.flow, blocks: [], edges: [] } } });
+    this.announce(run);
   }
+
+  private announce(run: Run) { this.emit({ type: 'run', run: { ...run, flow: { ...run.flow, blocks: [], edges: [] } } }); }
 
   private onBlock = (b: BlockRun) => {
     this.db.putBlockRun(b);
@@ -165,7 +171,9 @@ export class RunManager {
     if (reason === 'cancelled' && !TERMINAL.has(run.status)) {
       run.status = 'cancelled'; run.finishedAt = now();
       run.error = 'Cancelled outside the process running it';
-      this.save(run);
+      // only if it's still going when written: it may have ended since it was read
+      if (!this.db.cancelActiveRun(run)) return this.db.getRun(runId);
+      this.announce(run);
       for (const b of this.db.listBlockRuns(runId)) {
         if (b.status === 'running' || b.status === 'pending') this.onBlock({ ...b, status: 'cancelled', finishedAt: run.finishedAt });
       }
@@ -266,7 +274,9 @@ export class RunManager {
       } else {
         run.status = 'passed';
       }
-      if (!controller.signal.aborted) await this.sideEffects(run, result.findings);
+      // cancelled from outside as it finished: no notification or PR comment for it (save keeps it cancelled)
+      if (!controller.signal.aborted && this.db.getRun(run.id)?.status === 'cancelled') run.status = 'cancelled';
+      if (!controller.signal.aborted && run.status !== 'cancelled') await this.sideEffects(run, result.findings);
       return run;
     } catch (e: any) {
       run.status = controller.signal.aborted ? (((controller as any).reason as Run['status']) ?? 'cancelled') : 'failed';

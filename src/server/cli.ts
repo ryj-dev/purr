@@ -18,7 +18,7 @@ import { addRepo, startHttp } from './http.ts';
 import { installGlobalHooks, removePidFile, uninstallGlobalHooks, writePidFile } from './globalHooks.ts';
 import { type RunRequest, RunManager } from './manager.ts';
 import { PostPushWatcher } from './triggers.ts';
-import { exec, now, paths } from './util.ts';
+import { exec, liveGroups, now, paths } from './util.ts';
 import { SHIM } from './runtime.ts';
 
 type HookName = 'pre-commit' | 'pre-push';
@@ -90,10 +90,11 @@ async function executeHere(db: DB, mgr: RunManager, req: RunRequest, run: Run): 
     }
     if (quitting) return;
     quitting = true;
+    // its sessions and commands got SIGTERM on the first; quitting now would leave any that ignore it running
+    for (const pid of liveGroups) { try { process.kill(-pid, 'SIGKILL'); } catch { /* gone */ } }
     const cur = db.getRun(run.id);
-    if (cur && !isFinished(cur)) {
-      const at = now();
-      db.putRun({ ...cur, status: 'cancelled', finishedAt: at, error: 'Stopped before it finished cancelling' });
+    const at = now();
+    if (cur && db.cancelActiveRun({ ...cur, status: 'cancelled', finishedAt: at, error: 'Stopped before it finished cancelling' })) {
       for (const b of db.listBlockRuns(run.id)) {
         if (b.status === 'running' || b.status === 'pending') db.putBlockRun({ ...b, status: 'cancelled', finishedAt: at });
       }
@@ -356,9 +357,9 @@ function reviewedIn(sha: string, runs: Run[]): string | null {
  */
 async function notInRepo(db: DB, repoIds: string[], sha: string): Promise<string | null> {
   if (db.findRuns({ repoIds, sha, limit: 1 }).length) return null;
-  const elsewhere = await commitElsewhere(db, repoIds, sha);
-  if (!elsewhere) return null;
   const top = await repoRoot(value('repo') ?? process.cwd());
+  const elsewhere = await commitElsewhere(db, repoIds, sha, top);
+  if (!elsewhere) return null;
   return `commit ${sha.slice(0, 12)} isn't in ${top}${repoIds.length > 1 ? ' or its other clones' : ''}, so it won't be reviewed here. `
     + (reviewedIn(sha, elsewhere) ?? "Run this from the repo it's in, or pass --repo <path> (pushed from another machine? git fetch first)");
 }

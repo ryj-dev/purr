@@ -29,6 +29,9 @@ export const ROOT = fileURLToPath(new URL('../..', import.meta.url)).replace(/\/
 export const now = () => new Date().toISOString();
 export const newId = (prefix = '') => prefix + randomBytes(6).toString('hex');
 
+/** Process groups exec started that haven't ended: a process quitting at once kills them first (see cli.ts). */
+export const liveGroups = new Set<number>();
+
 export interface ExecResult { code: number; stdout: string; stderr: string; timedOut: boolean }
 
 /** Runs a command without a shell (unless `shell`). Never throws on a non-zero exit; throws ENOENT if the binary is missing. */
@@ -43,11 +46,14 @@ export function exec(cmd: string, args: string[], opts: {
       cwd: opts.cwd, env: opts.env ?? process.env, shell: opts.shell ?? false, stdio: ['pipe', 'pipe', 'pipe'], detached: true,
     });
     let stdout = '', stderr = '', buf = '', timedOut = false, settled = false;
+    const pid = child.pid;
+    if (pid) liveGroups.add(pid);
     const killGroup = (sig: NodeJS.Signals) => { try { if (child.pid) process.kill(-child.pid, sig); } catch { /* gone */ } };
     let forceTimer: NodeJS.Timeout | null = null;
     const finish = (code: number) => {
       if (settled) return;
       settled = true;
+      if (pid) liveGroups.delete(pid);
       if (timer) clearTimeout(timer);
       if (forceTimer) clearTimeout(forceTimer);
       opts.signal?.removeEventListener('abort', onAbort);
@@ -73,7 +79,7 @@ export function exec(cmd: string, args: string[], opts: {
       }
     });
     child.stderr.on('data', (d: Buffer) => { stderr += d.toString(); });
-    child.on('error', (e) => { if (timer) clearTimeout(timer); settled = true; reject(e); });
+    child.on('error', (e) => { if (timer) clearTimeout(timer); if (pid) liveGroups.delete(pid); settled = true; reject(e); });
     child.on('close', (code) => finish(code ?? -1));
     child.stdin.on('error', () => {});
     if (opts.input !== undefined) child.stdin.end(opts.input); else child.stdin.end();

@@ -56,14 +56,17 @@ export function pickReview(db: DB, q: RunQuery): { run: Run | null; newer: Run |
 
 /**
  * For a commit with no review in the repos `repoIds`: whether it can ever get one there. null when it can: a clone or
- * worktree of the repo has the commit (a short prefix that's ambiguous there counts), or a push of it was noted there.
+ * worktree of the repo (or the `checkout` asked from) has the commit (a short prefix that's ambiguous there counts), or a push of it was noted there.
  * Otherwise the reviews of it in other repos PuRR knows, newest first, which say where it belongs. With none, it may
  * have been pushed from elsewhere (CI, another machine) and not fetched yet: the clones fetch, and if that can't be
  * done, or brings the commit, null; else none, meaning no repo PuRR knows has it.
  */
-export async function commitElsewhere(db: DB, repoIds: string[], sha: string): Promise<Run[] | null> {
-  const paths = repoIds.map((id) => db.getRepo(id)?.path).filter((p): p is string => !!p && existsSync(p));
-  if (db.getPushOutcomes(sha, paths).length) return null;
+export async function commitElsewhere(db: DB, repoIds: string[], sha: string, checkout: string | null): Promise<Run[] | null> {
+  const registered = repoIds.map((id) => db.getRepo(id)?.path).filter((p): p is string => !!p);
+  if (db.getPushOutcomes(sha, registered).length) return null;
+  // the checkout asked from as well: it may be a clone or worktree PuRR hasn't registered, with commits of its own
+  const paths = [...new Set([...registered, ...(checkout ? [checkout] : [])])].filter((p) => existsSync(p));
+  if (!paths.length) return null;   // nowhere to look: can't tell
   const here = async () => { for (const p of paths) if (await hasObject(p, sha)) return true; return false; };
   if (await here()) return null;
   const elsewhere = db.findRuns({ sha, limit: 20 }).filter((r) => !r.repoId || !repoIds.includes(r.repoId));

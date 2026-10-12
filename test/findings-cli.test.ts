@@ -79,7 +79,10 @@ test('purr findings: exit codes, usage errors, --json and purr runs', async (tc)
   assert.equal(code('--sha', 'aaaa000004'), 3, 'still running, not waiting');
   assert.equal(code('--sha', 'aaaa000007'), 2, 'cancelled');
   assert.equal(code('--sha', 'aaaa000005'), 0, 'its must-fix was dismissed since');
-  assert.equal(code('--sha', 'bbbb'), 3, 'no such review');
+  execFileSync('git', ['commit', '-q', '--allow-empty', '-m', 'not reviewed', '--no-verify'], { cwd: repoPath });
+  const notReviewed = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repoPath, encoding: 'utf8' }).trim().slice(0, 12);
+  const none = purr(repoPath, 'findings', '--sha', notReviewed);
+  assert.deepEqual([none.status, /no review of commit .* found/.test(none.stderr)], [3, true], `this repo's commit, no review: ${none.stderr}`);
   assert.equal(code('--run', 'run-nope'), 3);
   const typo = await purrA(repoPath, 'findings', '--run', 'run-typo', '--wait');
   assert.deepEqual([typo.status, /no review of run run-typo found/.test(typo.stderr)], [3, true], 'a run that will never appear: no wait');

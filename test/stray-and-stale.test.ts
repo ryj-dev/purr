@@ -190,6 +190,34 @@ test("a purr run or hook that's told to stop cancels its run instead of leaving 
   assert.equal(hook.code, 130, hook.stderr);
   assert.equal(status(hook.id).status, 'cancelled');
 
+  // the pre-push hook, Ctrl-C'd: its run cancelled, exit 130, and no push reported for refs it never finished checking
+  const head = sh(repoPath, 'rev-parse', 'HEAD');
+  const db4 = openDb();
+  db4.setTrigger({ trigger: 'pre-push', repoId: repo.id, flowId: 'hang' });
+  db4.close();
+  const newestPush = () => { const d = openDb(); try { return d.findRuns({ repoIds: [repo.id], triggers: ['pre-push'], limit: 1 })[0]?.id ?? ''; } finally { d.close(); } };
+  const push = await midRun(repoPath, ['hook', 'pre-push', 'origin', 'url'], (p) => p.kill('SIGINT'),
+    { input: `refs/heads/main ${head} refs/heads/main ${'0'.repeat(40)}\n`, idFrom: newestPush });
+  assert.equal(push.code, 130, push.stderr);
+  assert.equal(status(push.id).status, 'cancelled');
+  const db5 = openDb();
+  assert.deepEqual(db5.getPushOutcomes(head, [repo.path]), []);
+  db5.close();
+
+  // cancelled from outside before its first save (between creating the run and running it): the save doesn't write it
+  // back to running; it stops, and ends cancelled
+  const db6 = openDb();
+  const m6 = new RunManager(db6, new ClaudeRunner(db6));
+  const req = { trigger: 'manual' as const, repoPath, mode: 'range' as const, flowId: 'hang' };
+  const early = m6.createRun(req)!;
+  new RunManager(db6, new ClaudeRunner(db6)).cancel(early.id);   // as the service would, owning nothing
+  const t6 = Date.now();
+  const ended = await m6.execute(req, early);
+  assert.equal(ended.status, 'cancelled');
+  assert.equal(db6.getRun(early.id)!.status, 'cancelled');
+  assert.ok(Date.now() - t6 < 20_000, 'stopped, not run to the end of its 60s command');
+  db6.close();
+
   // Cancel in the UI while the CLI runs it: the CLI notices and cancels it for real (exit 2), and it stays cancelled
   const ui = await midRun(repoPath, ['run', '--flow', 'hang'], (_p, id) => {
     const d = openDb();
@@ -232,6 +260,12 @@ test("a commit that may still be reviewed here isn't called another repo's: in a
     return r.stderr;
   };
   notStray(a, sh(b, 'rev-parse', 'HEAD'));   // only in the other clone
+  // only in this checkout, a clone PuRR hasn't registered (same remote as a registered one)
+  const unreg = mkdtempSync(join(process.env.TMPDIR!, 'purr-test-unreg-'));
+  execFileSync('git', ['clone', '-q', a, unreg]);
+  sh(unreg, 'remote', 'set-url', 'origin', remote);
+  sh(unreg, '-c', 'user.email=t@example.com', '-c', 'user.name=T', 'commit', '-q', '--allow-empty', '-m', 'local', '--no-verify');
+  notStray(unreg, sh(unreg, 'rev-parse', 'HEAD'));
   assert.match(notStray(a, 'feed000001'), /reviews are paused/);   // only a push note
 
   // pushed from elsewhere to the remote, not fetched here yet: the fetch brings it, so it's waited for
