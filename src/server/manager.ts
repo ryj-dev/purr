@@ -116,6 +116,8 @@ export class RunManager {
       run.status = 'cancelled';
       this.db.putRun(run);
     } else if (run.status === 'cancelled') {
+      // already recorded cancelled with why (a second Ctrl-C, the UI): keep that
+      if (!run.error) run.error = this.db.getRun(run.id)?.status === 'cancelled' ? this.db.getRun(run.id)!.error : null;
       this.db.putRun(run);
     }
     this.announce(run);
@@ -258,12 +260,6 @@ export class RunManager {
         { claude: this.claude, signal: controller.signal, onBlock: this.onBlock, isSuppressed, fingerprint: (fs) => fingerprintAll(fs, material) },
       );
       await fingerprintAll(result.findings, material);
-      // cancelled from outside as it finished (the UI's Cancel of a CLI run): it mustn't mark anything fixed
-      const outside = !controller.signal.aborted && this.db.getRun(run.id)?.status === 'cancelled';
-      const checked = result.failedBlocks.length === 0 && !controller.signal.aborted && !outside ? completeBlocks(run.flow.blocks, result.blocks) : null;
-      applyLedger(this.db, run, result.findings, checked?.complete ?? null, checked?.unchecked);
-      this.db.setRunFindings(run.id, result.findings);
-      run.counts = countBySeverity(active(result.findings));
       if (controller.signal.aborted) {
         run.status = ((controller as any).reason as Run['status']) ?? 'cancelled';
       } else if (result.gateFailed) {
@@ -276,9 +272,21 @@ export class RunManager {
       } else {
         run.status = 'passed';
       }
-      // cancelled from outside as it finished: no notification or PR comment for it (save keeps it cancelled)
-      if (!controller.signal.aborted && this.db.getRun(run.id)?.status === 'cancelled') run.status = 'cancelled';
-      if (!controller.signal.aborted && run.status !== 'cancelled') await this.sideEffects(run, result.findings);
+      // its end, in one transaction with the ledger: a cancel from outside (the UI's Cancel of a CLI run) lands either
+      // before, and then the run marks nothing fixed, posts nothing and is recorded cancelled, or after, and is refused
+      // because the run has ended (cancelActiveRun)
+      const ended = this.db.transaction(() => {
+        const outside = !controller.signal.aborted && this.db.getRun(run.id)?.status === 'cancelled';
+        if (outside) { run.status = 'cancelled'; run.error = 'Cancelled outside the process running it'; }
+        const checked = result.failedBlocks.length === 0 && !controller.signal.aborted && !outside ? completeBlocks(run.flow.blocks, result.blocks) : null;
+        applyLedger(this.db, run, result.findings, checked?.complete ?? null, checked?.unchecked);
+        this.db.setRunFindings(run.id, result.findings);
+        run.counts = countBySeverity(active(result.findings));
+        run.finishedAt = now();
+        this.db.putRun(run);
+        return !outside;
+      });
+      if (ended && !controller.signal.aborted) await this.sideEffects(run, result.findings);
       return run;
     } catch (e: any) {
       run.status = controller.signal.aborted ? (((controller as any).reason as Run['status']) ?? 'cancelled') : 'failed';

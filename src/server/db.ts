@@ -110,6 +110,11 @@ export function openDb(file = paths.db) {
   return {
     raw: db,
     close: () => db.close(),
+    /** `fn` as one write transaction: no other process writes in between (it waits, up to the busy timeout). */
+    transaction: <T>(fn: () => T): T => {
+      db.exec('BEGIN IMMEDIATE');
+      try { const r = fn(); db.exec('COMMIT'); return r; } catch (e) { db.exec('ROLLBACK'); throw e; }
+    },
 
     // settings / usage
     getSettings: (): Settings => {

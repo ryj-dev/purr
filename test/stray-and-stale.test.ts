@@ -2,7 +2,7 @@ import { sh, tempRepo } from './helpers.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { openDb } from '../src/server/db.ts';
 import { addRepo, startHttp } from '../src/server/http.ts';
@@ -101,6 +101,18 @@ test("for one commit, findings shows the complete review over a newer one still 
   assert.equal(followed.status, 0, followed.stderr);
   assert.match(followed.stderr, new RegExp(`a newer review of commit cafe0000b2, ${staleB.id} \\(manual\\), is running`));
 
+  // a quick manual run, then the push: --wait (the push hint) waits for the post-push review, not the manual one
+  const db5 = openDb();
+  const quick = run({ repoId: repo.id, repoPath: repo.path, headSha: 'cafe0000e5', trigger: 'manual' });
+  db5.putRun(quick);
+  const full = run({ repoId: repo.id, repoPath: repo.path, headSha: 'cafe0000e5', trigger: 'post-push', status: 'running' });
+  db5.putRun(full);
+  db5.close();
+  const hinted = purr(repoPath, 'findings', '--sha', 'cafe0000e5', '--json');
+  assert.equal(hinted.status, 3, 'the post-push review, still running');
+  assert.equal(JSON.parse(hinted.stdout).run.id, full.id);
+  assert.match(hinted.stderr, new RegExp(`the last finished review of commit cafe0000e5 is ${quick.id}`));
+
   // an old run left 'running' (its CLI was killed) doesn't hide a newer one of the commit that failed
   const db4 = openDb();
   db4.putRun(run({ repoId: repo.id, repoPath: repo.path, headSha: 'cafe0000c3', trigger: 'manual', status: 'running' }));
@@ -176,13 +188,21 @@ test("a purr run or hook that's told to stop cancels its run instead of leaving 
   // twice, while the cancel is still going (the command ignores SIGTERM, so it takes 3s to kill): quits at once, the
   // run and its running block recorded cancelled
   let first = 0;
-  const twice = await midRun(repoPath, ['run', '--flow', 'stubborn'], (p) => { first = Date.now(); p.kill('SIGINT'); setTimeout(() => p.kill('SIGINT'), 300); });
+  const twice = await midRun(repoPath, ['run', '--flow', 'stubborn'], (p) => {
+    // once its shell has set its trap (it writes its pid after)
+    const t = setInterval(() => {
+      if (!existsSync(pidFile)) return;
+      clearInterval(t);
+      first = Date.now(); p.kill('SIGINT'); setTimeout(() => p.kill('SIGINT'), 300);
+    }, 20);
+  });
   assert.equal(twice.code, 130, twice.stderr);
   assert.ok(Date.now() - first < 2_500, `quit at once, not after the 3s kill (${Date.now() - first}ms)`);
   assert.deepEqual([status(twice.id).status, status(twice.id).error], ['cancelled', 'Stopped before it finished cancelling']);
   const stubborn = Number(readFileSync(pidFile, 'utf8'));
-  await new Promise((r) => setTimeout(r, 200));
-  assert.throws(() => process.kill(stubborn, 0), { code: 'ESRCH' }, 'its command, ignoring SIGTERM, was killed before it quit');
+  const alive = () => { try { process.kill(stubborn, 0); return true; } catch { return false; } };
+  for (const t = Date.now(); alive() && Date.now() - t < 2_000;) await new Promise((r) => setTimeout(r, 50));
+  assert.ok(!alive(), 'its command, ignoring SIGTERM, was killed before it quit');
   const blocks = (() => { const d = openDb(); try { return d.listBlockRuns(twice.id); } finally { d.close(); } })();
   assert.ok(blocks.every((b) => b.status !== 'running'), JSON.stringify(blocks));
 
@@ -302,6 +322,15 @@ test("a commit that may still be reviewed here isn't called another repo's: in a
   await addRepo(db2, c);
   db2.close();
   notStray(c, sh(elsewhere, 'rev-parse', 'HEAD'));
+  // the same by a short prefix that another repo's review happens to share: fetched, not pinned on that repo
+  const pushed = tempRepo({ 'p.md': 'p\n' });
+  sh(pushed, 'remote', 'add', 'origin', bare);
+  sh(pushed, 'push', '-q', 'origin', 'main:feat2', '--no-verify');
+  const short = sh(pushed, 'rev-parse', 'HEAD').slice(0, 7);
+  const dbS = openDb();
+  dbS.putRun(run({ repoId: ra.id, repoPath: ra.path, headSha: `${short}${'0'.repeat(33)}` }));
+  dbS.close();
+  notStray(c, short);
 
   // offline (the fetch fails): can't tell, so waited for as before
   const offline = tempRepo();

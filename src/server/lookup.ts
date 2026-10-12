@@ -44,13 +44,16 @@ export const isComplete = (run: Run) => run.status === 'passed' || run.status ==
 /**
  * The review `q` names: the newest, except for one commit (`q.sha`), where a complete review beats a newer one still
  * running or cut short: it reviewed the same code (a manual `purr run` of a commit already reviewed after its push,
- * say). Without one, the newest (an old run left 'running' mustn't hide a newer one that failed). `newer`: the newest
+ * say), unless that newer one is a post-push review still going. Without one, the newest (an old run left 'running' mustn't hide a newer one that failed). `newer`: the newest
  * review of the commit when it isn't the one picked, so the caller can say it exists.
  */
 export function pickReview(db: DB, q: RunQuery): { run: Run | null; newer: Run | null } {
   if (!q.sha) return { run: db.findRuns({ ...q, limit: 1 })[0] ?? null, newer: null };
   const runs = db.findRuns({ ...q, limit: 50 });
-  const run = runs.find(isComplete) ?? runs[0] ?? null;
+  const top = runs[0];
+  // except a post-push review still going: the full review the push promised (after a quick `purr run`, say), which
+  // the service runs, so it isn't left over from a dead process
+  const run = !top || isComplete(top) || (top.trigger === 'post-push' && !isFinished(top)) ? top ?? null : runs.find(isComplete) ?? top;
   return { run, newer: run && runs[0] !== run ? runs[0] : null };
 }
 
@@ -70,10 +73,11 @@ export async function commitElsewhere(db: DB, repoIds: string[], sha: string, ch
   const here = async () => { for (const p of paths) if (await hasObject(p, sha)) return true; return false; };
   if (await here()) return null;
   const elsewhere = db.findRuns({ sha, limit: 20 }).filter((r) => !r.repoId || !repoIds.includes(r.repoId));
-  if (elsewhere.length) return elsewhere;
+  // 12+ digits reviewed elsewhere settle it; a short prefix may be another commit there that shares its digits
+  if (elsewhere.length && sha.length >= 12) return elsewhere;
   // all at once, and no longer than `fetchMs`: one that fails or runs out of time means can't tell
   if ((await Promise.all(paths.map((p) => fetchAll(p, fetchMs)))).includes(false)) return null;
-  return await here() ? null : [];
+  return await here() ? null : elsewhere;
 }
 
 export interface ReviewState {
